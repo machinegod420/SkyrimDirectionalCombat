@@ -42,7 +42,7 @@ public:
 	void RunActor(RE::Actor* actor, float delta);
 	void TryRiposte(RE::Actor* actor);
 	void TryBlock(RE::Actor* actor, RE::Actor* attacker);
-	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target);
+	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force);
 	void TryAttack(RE::Actor* actor);
 
 	bool CanAct(RE::Actor* actor) const;

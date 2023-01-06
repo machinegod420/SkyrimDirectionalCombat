@@ -19,6 +19,8 @@ void DirectionHandler::Initialize()
 	Debuff = DataHandler->LookupForm<RE::BGSPerk>(0x810, PluginName);
 	Unblockable = DataHandler->LookupForm<RE::BGSPerk>(0x80A, PluginName);
 	NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
+	BattleaxeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x6D932, "Skyrim.esm");
+	PikeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x0E457E, "NewArmoury.esp");
 	logger::info("DirectionHandler Initialized");
  }
 
@@ -337,6 +339,12 @@ void DirectionHandler::SwitchToNewDirection(RE::Actor* attacker, RE::Actor* targ
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force)
 {
+	auto Iter = DirectionTimers.find(actor->GetHandle());
+	// skip if we already have a direction to switch to that is the same
+	if (Iter != DirectionTimers.end() && Iter->second.dir == dir)
+	{
+		return;
+	}
 	if (force || DirectionTimers.find(actor->GetHandle()) == DirectionTimers.end())
 	{
 		DirectionSwitch ToDir;
@@ -347,10 +355,27 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 
 }
 
-void DirectionHandler::AddDirectional(RE::Actor* actor)
+void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon)
 {
 	// top right by default
-	actor->GetActorBase()->AddPerk(TR, 1);
+	// battleaxes are thrusting polearms so they get BR
+	if (!weapon)
+	{
+		actor->GetActorBase()->AddPerk(TR, 1);
+	}
+	else if (weapon->HasKeyword(BattleaxeKeyword))
+	{
+		actor->GetActorBase()->AddPerk(BR, 1);
+	}
+	else if (PikeKeyword && weapon->HasKeyword(PikeKeyword))
+	{
+		actor->GetActorBase()->AddPerk(BR, 1);
+	}
+	else
+	{
+		actor->GetActorBase()->AddPerk(TR, 1);
+	}
+	
 
 }
 
@@ -386,7 +411,6 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	RE::WEAPON_STATE WeaponState = actor->AsActorState()->GetWeaponState();
 	RE::ATTACK_STATE_ENUM AttackState = actor->AsActorState()->GetAttackState();
 	auto Equipped = actor->GetEquippedObject(false);
-
 	float SQDist = RE::PlayerCharacter::GetSingleton()->GetPosition().GetSquaredDistance(actor->GetPosition());
 	// too far causes problems
 	// square dist
@@ -402,19 +426,19 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		return;
 	}
 	// Non melee weapon
-	auto Weapon = Equipped->As<RE::TESObjectWEAP>();
-	if (!Weapon->IsMelee())
+	RE::TESObjectWEAP* Weapon = nullptr;
+	Weapon = Equipped->As<RE::TESObjectWEAP>();
+	if (Weapon && !Weapon->IsMelee())
 	{
 		CleanupActor(actor);
 		return;
 	}
-	
+
 	if (WeaponState == RE::WEAPON_STATE::kDrawn && AttackState != RE::ATTACK_STATE_ENUM::kBowAttached)
 	{
 		if (!HasDirectionalPerks(actor))
 		{
-
-			AddDirectional(actor);
+			AddDirectional(actor, Weapon);
 			// temporary
 			//actor->AsActorValueOwner()->SetBaseActorValue(RE::ActorValue::kWeaponSpeedMult, 0.1f);
 			logger::info("gave {} perks", actor->GetName());

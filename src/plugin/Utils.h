@@ -35,7 +35,6 @@ namespace std
 	};
 }
 
-
 class CircularArray
 {
 public:

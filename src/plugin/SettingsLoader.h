@@ -21,6 +21,7 @@ struct Settings
 	static float ActiveDistance;
 	static bool HasPrecision;
 	static bool InvertY;
+	static bool EnableForH2H;
 };
 
 struct InputSettings
@@ -67,6 +68,21 @@ struct AISettings
 	static int VeryEasyLvl;
 	static float AIDifficultyMult;
 	static float AIGrowthFactor;
+
+	// you're gonna mess with these for a long time
+	static float LegendaryUpdateTimer;
+	static float VeryHardUpdateTimer;
+	static float HardUpdateTimer;
+	static float NormalUpdateTimer;
+	static float EasyUpdateTimer;
+	static float VeryEasyUpdateTimer;
+
+	static float LegendaryActionTimer;
+	static float VeryHardActionTimer;
+	static float HardActionTimer;
+	static float NormalActionTimer;
+	static float EasyActionTimer;
+	static float VeryEasyActionTimer;
 };
 
 struct UISettings

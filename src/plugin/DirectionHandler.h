@@ -22,6 +22,8 @@ public:
 		Unblockable = nullptr;
 		NPCKeyword = nullptr;
 		ParryVFX = nullptr;
+		BattleaxeKeyword = nullptr;
+		PikeKeyword = nullptr;
 	}
 	static DirectionHandler* GetSingleton()
 	{
@@ -31,7 +33,7 @@ public:
 
 	bool HasDirectionalPerks(RE::Actor* actor) const;
 	bool HasBlockAngle(RE::Actor* attacker, RE::Actor* target);
-	void AddDirectional(RE::Actor* actor);
+	void AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon);
 	void SwitchDirectionLeft(RE::Actor* actor);
 	void SwitchDirectionUp(RE::Actor* actor);
 	void SwitchDirectionDown(RE::Actor* actor);
@@ -87,6 +89,10 @@ private:
 	RE::BGSPerk* Debuff;
 	RE::TESObjectACTI* ParryVFX;
 	RE::BGSKeyword* NPCKeyword;
+
+	// This is so incredibly specific i hate having it
+	RE::BGSKeyword* BattleaxeKeyword;
+	RE::BGSKeyword* PikeKeyword;
 
 	// is mapping really better?
 	// 5 compares versus hashing?

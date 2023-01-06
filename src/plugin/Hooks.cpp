@@ -408,19 +408,22 @@ namespace Hooks
 				return false;
 			}
 			RE::Actor* target = actor->GetActorRuntimeData().currentCombatTarget.get().get();
-
-			if (AIHandler::GetSingleton()->ShouldAttack(actor, target))
+			if (target)
 			{
-				//logger::info("do attack");
+				if (AIHandler::GetSingleton()->ShouldAttack(actor, target))
+				{
+					//logger::info("do attack");
 
-				bool ret = _PerformAttackAction(a_actionData);
-				return ret;
+					bool ret = _PerformAttackAction(a_actionData);
+					return ret;
+				}
+				else
+				{
+					//logger::info("do not attack");
+					return false;
+				}
 			}
-			else 
-			{
-				//logger::info("do not attack");
-				return false;
-			}
+
 		}
 
 
@@ -432,14 +435,26 @@ namespace Hooks
 	bool HookHasAttackAngle::GetAttackAngle(RE::Actor* a_attacker, RE::Actor* a_target, const RE::NiPoint3& a3, const RE::NiPoint3& a4, RE::BGSAttackData* a_attackData, float a6, void* a7, bool a8)
 	{
 		bool ret = _GetAttackAngle(a_attacker, a_target, a3, a4, a_attackData, a6, a7, a8);
-		// gets the AI to switch angle before attacking
-		// this is not instant though so higher levels of difficulty can transition back to a coveredd angle
+
+		// This does not guarantee that the attack actually happens.
+		// So it's possible that the AI switches directions and just switches back.
 		if (ret && a_attacker && a_target)
 		{
-			if (DirectionHandler::GetSingleton()->HasBlockAngle(a_attacker, a_target))
+			// ai tends to not attack if its blocking
+			if (!a_attacker->IsBlocking())
 			{
-				DirectionHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
+				if (DirectionHandler::GetSingleton()->HasBlockAngle(a_attacker, a_target))
+				{
+					// Because of the above issue, we're going to RNG this for now
+					int val = std::rand() % 3;
+					if (val == 0)
+					{
+						DirectionHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
+					}
+					
+				}
 			}
+
 		}
 
 		return ret;

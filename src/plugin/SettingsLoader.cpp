@@ -14,6 +14,7 @@ bool DifficultySettings::AttacksCostStamina = true;
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
 bool Settings::InvertY = false;
+bool Settings::EnableForH2H = true;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -27,11 +28,11 @@ bool WeaponSettings::RebalanceWeapons = true;
 float WeaponSettings::WarhammerSpeed = 0.72f;
 float WeaponSettings::BattleaxeSpeed = 0.74f;
 float WeaponSettings::GreatSwordSpeed = 0.77f;
-float WeaponSettings::SwordSpeed = 0.85f;
+float WeaponSettings::SwordSpeed = 0.8f;
 float WeaponSettings::AxeSpeed = 0.8f;
 float WeaponSettings::WeaponSpeedMult = 0.9f;
 
-float AISettings::AIWaitTimer = 2.f;
+float AISettings::AIWaitTimer = 3.f;
 int AISettings::LegendaryLvl = 11;
 int AISettings::VeryHardLvl = 7;
 int AISettings::HardLvl = 5;
@@ -40,6 +41,20 @@ int AISettings::EasyLvl = -3;
 int AISettings::VeryEasyLvl = -8;
 float AISettings::AIDifficultyMult = 1.0f;
 float AISettings::AIGrowthFactor = 0.04f;
+
+float AISettings::LegendaryUpdateTimer = 0.15f;
+float AISettings::VeryHardUpdateTimer = 0.18f;
+float AISettings::HardUpdateTimer = 0.2f;
+float AISettings::NormalUpdateTimer = 0.2f;
+float AISettings::EasyUpdateTimer = 0.24f;
+float AISettings::VeryEasyUpdateTimer = 0.3f;
+
+float AISettings::LegendaryActionTimer = 0.13f;
+float AISettings::VeryHardActionTimer = 0.17f;
+float AISettings::HardActionTimer = 0.2f;
+float AISettings::NormalActionTimer = 0.2f;
+float AISettings::EasyActionTimer = 0.24f;
+float AISettings::VeryEasyActionTimer = 0.28f;
 
 float UISettings::Size = 300.f;
 float UISettings::Length = 13.f;
@@ -62,6 +77,7 @@ void SettingsLoader::InitializeDefaultValues()
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
 	Settings::InvertY = false;
+	Settings::EnableForH2H = true;
 
 	InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 	InputSettings::MouseSens = 5;
@@ -79,7 +95,7 @@ void SettingsLoader::InitializeDefaultValues()
 	WeaponSettings::AxeSpeed = 0.8f;
 	WeaponSettings::WeaponSpeedMult = 0.9f;
 
-	AISettings::AIWaitTimer = 1.f;
+	AISettings::AIWaitTimer = 3.f;
 	AISettings::LegendaryLvl = 11;
 	AISettings::VeryHardLvl = 7;
 	AISettings::HardLvl = 5;
@@ -88,6 +104,20 @@ void SettingsLoader::InitializeDefaultValues()
 	AISettings::VeryEasyLvl = -8;
 	AISettings::AIDifficultyMult = 1.0f;
 	AISettings::AIGrowthFactor = 0.04f;
+
+	AISettings::LegendaryUpdateTimer = 0.16f;
+	AISettings::VeryHardUpdateTimer = 0.2f;
+	AISettings::HardUpdateTimer = 0.24f;
+	AISettings::NormalUpdateTimer = 0.24f;
+	AISettings::EasyUpdateTimer = 0.3f;
+	AISettings::VeryEasyUpdateTimer = 0.3f;
+
+	AISettings::LegendaryActionTimer = 0.14f;
+	AISettings::VeryHardActionTimer = 0.17f;
+	AISettings::HardActionTimer = 0.2f;
+	AISettings::NormalActionTimer = 0.2f;
+	AISettings::EasyActionTimer = 0.24f;
+	AISettings::VeryEasyActionTimer = 0.28f;
 
 	UISettings::Size = 300.f;
 	UISettings::Length = 13.f;
@@ -278,6 +308,90 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, AISettings::LegendaryLvl);
 				}
+				else if (fieldName == "VeryEasyUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::VeryEasyUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::VeryEasyUpdateTimer);
+				}
+				else if (fieldName == "EasyUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::EasyUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::EasyUpdateTimer);
+				}
+				else if (fieldName == "NormalUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::NormalUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::NormalUpdateTimer);
+				}
+				else if (fieldName == "HardUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::HardUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::HardUpdateTimer);
+				}
+				else if (fieldName == "VeryHardUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::VeryHardUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::VeryHardUpdateTimer);
+				}
+				else if (fieldName == "LegendaryUpdateTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::LegendaryUpdateTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::LegendaryUpdateTimer);
+				}
+				else if (fieldName == "VeryEasyActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::VeryEasyActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::VeryEasyActionTimer);
+				}
+				else if (fieldName == "EasyActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::EasyActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::EasyActionTimer);
+				}
+				else if (fieldName == "NormalActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::NormalActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::NormalActionTimer);
+				}
+				else if (fieldName == "HardActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::HardActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::HardActionTimer);
+				}
+				else if (fieldName == "VeryHardActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::VeryHardActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::VeryHardActionTimer);
+				}
+				else if (fieldName == "LegendaryActionTimer")
+				{
+					float newval = field.as<float>();
+					AISettings::LegendaryActionTimer = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::LegendaryActionTimer);
+				}
 			}
 			else if (sectionName == "UI")
 			{
@@ -407,29 +521,30 @@ void SettingsLoader::RebalanceWeapons()
 		if (weap->IsMelee())
 		{
 			float speed = weap->weaponData.speed;
-			float damage = weap->attackDamage;
+			float damage = (float)weap->attackDamage;
 			uint16_t newdamage = weap->attackDamage;
+			float newspeed = weap->weaponData.speed;
 			switch (weap->GetWeaponType())
 			{
 			case RE::WEAPON_TYPE::kOneHandDagger:
 			case RE::WEAPON_TYPE::kOneHandSword:
 			{
 				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::SwordSpeed));
-				weap->weaponData.speed = WeaponSettings::SwordSpeed;
+				newspeed = WeaponSettings::SwordSpeed;
 				break;
 			}
 			case RE::WEAPON_TYPE::kOneHandMace:
 			case RE::WEAPON_TYPE::kOneHandAxe:
 			{
 				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::AxeSpeed));
-				weap->weaponData.speed = WeaponSettings::AxeSpeed;
+				newspeed = WeaponSettings::AxeSpeed;
 				break;
 			}
 
 			case RE::WEAPON_TYPE::kTwoHandSword:
 			{
 				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::GreatSwordSpeed));
-				weap->weaponData.speed = WeaponSettings::GreatSwordSpeed;
+				newspeed = WeaponSettings::GreatSwordSpeed;
 				break;
 			}
 
@@ -439,18 +554,19 @@ void SettingsLoader::RebalanceWeapons()
 				if (weap->HasKeyword(IsWarhammer))
 				{
 					newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::WarhammerSpeed));
-					weap->weaponData.speed = WeaponSettings::WarhammerSpeed;
+					newspeed = WeaponSettings::WarhammerSpeed;
 				}
 				else
 				{
 					newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::BattleaxeSpeed));
-					weap->weaponData.speed = WeaponSettings::BattleaxeSpeed;
+					newspeed = WeaponSettings::BattleaxeSpeed;
 				}
 				break;
 			}
 			}
 			//logger::info("{} got its damaged changed from {} to {} and speed from {} to {}", weap->GetName(), weap->attackDamage, newdamage, speed, weap->weaponData.speed);
 			weap->attackDamage = newdamage;
+			weap->weaponData.speed = newspeed;
 		}
 
 		

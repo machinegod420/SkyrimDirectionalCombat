@@ -5,26 +5,29 @@
 
 constexpr int MaxDirs = 5;
 
+// MUST be higher than the direction switch time otherwise it will try to switch directions too quickly and freeze
 constexpr float LowestTime = 0.13f;
+// have to be very careful with this number
+constexpr float AIJitterRange = 0.04f;
 
 void AIHandler::InitializeValues()
 {
 	// time in seconds between each update
-	DifficultyUpdateTimer[Difficulty::VeryEasy] = 0.7f;
-	DifficultyUpdateTimer[Difficulty::Easy] = 0.6f;
-	DifficultyUpdateTimer[Difficulty::Normal] = 0.4f;
-	DifficultyUpdateTimer[Difficulty::Hard] = 0.3f;
-	DifficultyUpdateTimer[Difficulty::VeryHard] = 0.24f;
-	DifficultyUpdateTimer[Difficulty::Legendary] = 0.16f;
+	DifficultyUpdateTimer[Difficulty::VeryEasy] = AISettings::VeryEasyUpdateTimer;
+	DifficultyUpdateTimer[Difficulty::Easy] = AISettings::EasyUpdateTimer;
+	DifficultyUpdateTimer[Difficulty::Normal] = AISettings::NormalUpdateTimer;
+	DifficultyUpdateTimer[Difficulty::Hard] = AISettings::HardUpdateTimer;
+	DifficultyUpdateTimer[Difficulty::VeryHard] = AISettings::VeryHardUpdateTimer;
+	DifficultyUpdateTimer[Difficulty::Legendary] = AISettings::LegendaryUpdateTimer;
 
 	// time between each action
-	DifficultyActionTimer[Difficulty::VeryEasy] = 0.28f;
-	DifficultyActionTimer[Difficulty::Easy] = 0.24f;
-	DifficultyActionTimer[Difficulty::Normal] = 0.24f;
-	DifficultyActionTimer[Difficulty::Hard] = 0.2f;
-	DifficultyActionTimer[Difficulty::VeryHard] = 0.2f;
+	DifficultyActionTimer[Difficulty::VeryEasy] = AISettings::VeryEasyActionTimer;
+	DifficultyActionTimer[Difficulty::Easy] = AISettings::EasyActionTimer;
+	DifficultyActionTimer[Difficulty::Normal] = AISettings::NormalActionTimer;
+	DifficultyActionTimer[Difficulty::Hard] = AISettings::HardActionTimer;
+	DifficultyActionTimer[Difficulty::VeryHard] = AISettings::VeryHardActionTimer;
 	// peak human reaction time
-	DifficultyActionTimer[Difficulty::Legendary] = 0.16f;
+	DifficultyActionTimer[Difficulty::Legendary] = AISettings::LegendaryActionTimer;
 
 
 	logger::info("Difficulty Mult is {}", AISettings::AIDifficultyMult);
@@ -38,7 +41,8 @@ void AIHandler::InitializeValues()
 	for (auto& iter : DifficultyActionTimer)
 	{
 		iter.second *= AISettings::AIDifficultyMult;
-		iter.second = std::max(iter.second, LowestTime);
+		// actions can be below the lowest time cause it doesnt cause weird direction change issues
+		iter.second = std::max(iter.second, LowestTime * 0.5f);
 	}
 	logger::info("Finished reinitializing difficulty");
 }
@@ -46,6 +50,11 @@ void AIHandler::InitializeValues()
 void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
 {
 	auto Iter = ActionQueue.find(actor->GetHandle());
+	// don't do anything if we already have the same action queued
+	if (Iter != ActionQueue.end() && Iter->second.toDo == toDo)
+	{
+		return;
+	}
 	// if no action or time has expired
 	if (Iter == ActionQueue.end() || force || Iter->second.timeLeft <= 0.f || Iter->second.toDo == Actions::None)
 	{
@@ -99,6 +108,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					{
 						TryAttack(actor);
 					}
+
 					if (target->IsAttacking())
 					{
 						//logger::info("NPC in range");
@@ -137,49 +147,50 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				// slower update tick to make AIs reasonable to fight
 				if (CanAct(actor))
 				{
-					if (actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) <
-						actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.5f
-						&& actor->IsBlocking())
-					{
-						actor->NotifyAnimationGraph("blockStop");
-						actor->SetGraphVariableBool("IsBlocking", false);
-					}
 
 					if (TargetDist < 60000)
 					{
 
-						// if they are blocking theyre probably not attacking
-						bool ShouldDirectionMatch = !target->IsBlocking();
-						// if the target takes too long in one guard, try switching
-						if (DifficultyMap.contains(actor->GetHandle()) && DifficultyMap[actor->GetHandle()].targetSwitchTimer > AISettings::AIWaitTimer)
+						if (actor->IsAttacking())
 						{
-							ShouldDirectionMatch = false;
-							//logger::info("try to move to a new angle");
-							// unless they are attacking and havent moved
-
-						}
-						if (target->IsAttacking())
-						{
-							//definitely direction match
-							//AI shouldn't be too good at this though
-							ShouldDirectionMatch = true;
-						}
-						// hard defensive if cant attack
-						if (!AttackHandler::GetSingleton()->CanAttack(actor))
-						{
-							ShouldDirectionMatch = true;
-						}
-						if (!ShouldDirectionMatch)
-						{
-							DirHandler->SwitchToNewDirection(actor, target);
+							DirHandler->SwitchToNewDirection(actor, actor);
 						}
 						else
 						{
-							// direction match
-							DirectionMatchTarget(actor, target);
+							// if they are blocking theyre probably not attacking
+							bool ShouldDirectionMatch = !target->IsBlocking();
+							// if the target takes too long in one guard, try switching
+							if (DifficultyMap.contains(actor->GetHandle()) && DifficultyMap[actor->GetHandle()].targetSwitchTimer > AISettings::AIWaitTimer)
+							{
+								ShouldDirectionMatch = false;
+								//logger::info("try to move to a new angle");
+								// unless they are attacking and havent moved
+
+							}
+							if (target->IsAttacking())
+							{
+								//definitely direction match
+								//AI shouldn't be too good at this though
+								ShouldDirectionMatch = true;
+							}
+							// hard defensive if cant attack
+							if (!AttackHandler::GetSingleton()->CanAttack(actor))
+							{
+								ShouldDirectionMatch = true;
+							}
+							if (!ShouldDirectionMatch)
+							{
+								DirHandler->SwitchToNewDirection(actor, target);
+							}
+							else
+							{
+								// direction match
+								DirectionMatchTarget(actor, target, target->IsAttacking());
+							}
+
 						}
 
-
+						
 					}
 					else 
 					{
@@ -247,7 +258,6 @@ void AIHandler::TryRiposte(RE::Actor* actor)
 	int val = std::rand() % mod;
 	if (val > 0)
 	{
-		actor->NotifyAnimationGraph("blockStop");
 		AddAction(actor, AIHandler::Actions::Riposte, true);
 	}
 }
@@ -261,12 +271,13 @@ void AIHandler::TryBlock(RE::Actor* actor, RE::Actor* attacker)
 	if (val > 0)
 	{
 		// try direction match
-		DirectionMatchTarget(actor, attacker);
+		DirectionMatchTarget(actor, attacker, false);
 		AddAction(actor, AIHandler::Actions::Block, true);
 	}
 }
 
-void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target)
+// force should not be abused, as it can cause actions to never be finished because they are constantly be overwritten
+void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force)
 {
 	// direction match
 	// really follow the last direction tracked then update it
@@ -278,6 +289,17 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target)
 	// follow last tracked direction isntead of the targets current direction
 	// the AI is too easy to confuse with this though, since they can lag behind a bit
 	Directions ToCounter = DifficultyMap[actor->GetHandle()].lastDirectionTracked;
+	
+	// add some RNG to mix it up
+	int mod = (int)CalcAndInsertDifficulty(actor);
+	// 33% chance of legendary AI switching immediately
+	mod = (int)(mod * 0.5);
+	int val = std::rand() % mod;
+	if (val > 0)
+	{
+		ToCounter = DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(target));
+	}
+
 	Directions ToSwitch = Directions::TR;
 	switch (ToCounter)
 	{
@@ -296,7 +318,7 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target)
 	}
 	DifficultyMap[actor->GetHandle()].lastDirectionTracked = 
 		DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(target));
-	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch);
+	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch, force);
 }
 
 void AIHandler::TryAttack(RE::Actor* actor)
@@ -421,8 +443,10 @@ void AIHandler::SignalBadThing(RE::Actor* actor, Directions attackDir)
 	}
 	int dupes = (int)(Num - dirs.size());
 	dupes = std::max(1, dupes);
-	Iter->second.mistakeRatio -= (AISettings::AIGrowthFactor * dupes);
-
+	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio - (AISettings::AIGrowthFactor * dupes);
+	NewMistakeRatio = std::min(NewMistakeRatio, 0.1f);
+	NewMistakeRatio = std::max(NewMistakeRatio, -0.1f);
+	DifficultyMap[actor->GetHandle()].mistakeRatio += NewMistakeRatio;
 }
 
 void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
@@ -446,16 +470,22 @@ void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 		dirs.insert(dir);
 	}
 	unsigned size = std::max(1u, (unsigned)dirs.size());
-	DifficultyMap[actor->GetHandle()].mistakeRatio += (AISettings::AIGrowthFactor * size);
-
+	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio + (AISettings::AIGrowthFactor * size);
+	NewMistakeRatio = std::min(NewMistakeRatio, 0.1f);
+	NewMistakeRatio = std::max(NewMistakeRatio, -0.1f);
+	DifficultyMap[actor->GetHandle()].mistakeRatio += NewMistakeRatio;;
 }
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 {
 	float base = DifficultyUpdateTimer[CalcAndInsertDifficulty(actor)];
 	float mistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio;
-	// compounding
-	base += 3*mistakeRatio;
+	base += mistakeRatio;
+	// add jitter
+	// so ugly
+	float result = (float)(std::rand()) / ((float)(RAND_MAX / (AIJitterRange * 2.f)));
+	result -= AIJitterRange;
+	base += result;
 	// don't break animation direction switching by letting AI flicker changes
 	base = std::max(base, LowestTime);
 	return base;
@@ -465,8 +495,11 @@ float AIHandler::CalcActionTimer(RE::Actor* actor)
 {
 	float base = DifficultyActionTimer[CalcAndInsertDifficulty(actor)];
 	float mistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio;
-
+	mistakeRatio *= 0.5;
 	base += mistakeRatio;
+	float result = (float)(std::rand()) / ((float)(RAND_MAX / (AIJitterRange * 2.f)));
+	result -= AIJitterRange;
+	base += result;
 	base = std::max(base, LowestTime);
 
 	return base;
@@ -565,6 +598,11 @@ void AIHandler::Update(float delta)
 			//continue;
 
 			UpdateTimerIter->second -= delta;
+		}
+		else
+		{
+			//UpdateTimerIter = UpdateTimer.erase(UpdateTimerIter);
+			//continue;
 		}
 		UpdateTimerIter++;
 	}
