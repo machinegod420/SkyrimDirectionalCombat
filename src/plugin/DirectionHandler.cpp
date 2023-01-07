@@ -12,12 +12,12 @@ constexpr float SlowTimeBetweenChanges = TimeBetweenChanges * 2.f;
 void DirectionHandler::Initialize()
 {
 	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
-	TR = DataHandler->LookupForm<RE::BGSPerk>(0x800, PluginName);
-	TL = DataHandler->LookupForm<RE::BGSPerk>(0x801, PluginName);
-	BL = DataHandler->LookupForm<RE::BGSPerk>(0x802, PluginName);
-	BR = DataHandler->LookupForm<RE::BGSPerk>(0x803, PluginName);
+	TR = DataHandler->LookupForm<RE::SpellItem>(0x5370, PluginName);
+	TL = DataHandler->LookupForm<RE::SpellItem>(0x5371, PluginName);
+	BL = DataHandler->LookupForm<RE::SpellItem>(0x5372, PluginName);
+	BR = DataHandler->LookupForm<RE::SpellItem>(0x5373, PluginName);
 	Debuff = DataHandler->LookupForm<RE::BGSPerk>(0x810, PluginName);
-	Unblockable = DataHandler->LookupForm<RE::BGSPerk>(0x80A, PluginName);
+	Unblockable = DataHandler->LookupForm<RE::SpellItem>(0x5374, PluginName);
 	NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
 	BattleaxeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x6D932, "Skyrim.esm");
 	PikeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x0E457E, "NewArmoury.esp");
@@ -26,44 +26,44 @@ void DirectionHandler::Initialize()
 
 bool DirectionHandler::HasDirectionalPerks(RE::Actor* actor) const
 {
-	return actor->HasPerk(TR) 
-		|| actor->HasPerk(TL) 
-		|| actor->HasPerk(BL) 
-		|| actor->HasPerk(BR);
+	return actor->HasSpell(TR) 
+		|| actor->HasSpell(TL)
+		|| actor->HasSpell(BL)
+		|| actor->HasSpell(BR);
 }
 
 bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target)
 {
 	// never can block this
-	if (attacker->HasPerk(Unblockable))
+	if (attacker->HasSpell(Unblockable))
 	{
 		return false;
 	}
 	// opposite side angle
-	if (attacker->HasPerk(TR)) 
+	if (attacker->HasSpell(TR))
 	{
-		return target->HasPerk(TL);
+		return target->HasSpell(TL);
 	}
-	if (attacker->HasPerk(TL))
+	if (attacker->HasSpell(TL))
 	{
-		return target->HasPerk(TR);
+		return target->HasSpell(TR);
 	}
-	if (attacker->HasPerk(BL))
+	if (attacker->HasSpell(BL))
 	{
-		return target->HasPerk(BR);
+		return target->HasSpell(BR);
 	}
-	if (attacker->HasPerk(BR))
+	if (attacker->HasSpell(BR))
 	{
-		return target->HasPerk(BL);
+		return target->HasSpell(BL);
 	}
 
-	// if no perk then any angle blocks
+	// if no Spell then any angle blocks
 	return true;
 }
 
 void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 {
-	RE::BGSPerk* Perk = GetDirectionalPerk(actor);
+	RE::SpellItem* Perk = GetDirectionalPerk(actor);
 	if (Perk != nullptr)
 	{
 		if (!actor->IsPlayerRef())
@@ -87,7 +87,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		{
 			state = UIDirectionState::Attacking;
 		}
-		if (actor->HasPerk(Unblockable))
+		if (actor->HasSpell(Unblockable))
 		{
 			state = UIDirectionState::Unblockable;
 		}
@@ -154,7 +154,7 @@ bool DirectionHandler::DetermineMirrored(RE::Actor* actor)
 }
 
 
-RE::BGSPerk* DirectionHandler::DirectionToPerk(Directions dir) const
+RE::SpellItem* DirectionHandler::DirectionToPerk(Directions dir) const
 {
 	switch (dir)
 	{
@@ -171,33 +171,33 @@ RE::BGSPerk* DirectionHandler::DirectionToPerk(Directions dir) const
 	return nullptr;
 }
 
-RE::BGSPerk* DirectionHandler::GetDirectionalPerk(RE::Actor* actor) const
+RE::SpellItem* DirectionHandler::GetDirectionalPerk(RE::Actor* actor) const
 {
 	
-	if (actor->HasPerk(Unblockable))
+	if (actor->HasSpell(Unblockable))
 	{
 		return Unblockable;
 	}
-	if (actor->HasPerk(TR))
+	if (actor->HasSpell(TR))
 	{
 		return TR;
 	}
-	if (actor->HasPerk(TL))
+	if (actor->HasSpell(TL))
 	{
 		return TL;
 	}
-	if (actor->HasPerk(BL))
+	if (actor->HasSpell(BL))
 	{
 		return BL;
 	}
-	if (actor->HasPerk(BR))
+	if (actor->HasSpell(BR))
 	{
 		return BR;
 	}
 	return nullptr;
 }
 
-Directions DirectionHandler::PerkToDirection(RE::BGSPerk* perk) const
+Directions DirectionHandler::PerkToDirection(RE::SpellItem* perk) const
 {
 	if (perk == TR)
 	{
@@ -230,7 +230,7 @@ bool DirectionHandler::CanSwitch(RE::Actor* actor)
 void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir)
 {
 	RemoveDirectionalPerks(actor);
-	actor->GetActorBase()->AddPerk(DirectionToPerk(dir), 1);
+	actor->AddSpell(DirectionToPerk(dir));
 }
 
 void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
@@ -361,19 +361,19 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 	// battleaxes are thrusting polearms so they get BR
 	if (!weapon)
 	{
-		actor->GetActorBase()->AddPerk(TR, 1);
+		actor->AddSpell(TR);
 	}
 	else if (weapon->HasKeyword(BattleaxeKeyword))
 	{
-		actor->GetActorBase()->AddPerk(BR, 1);
+		actor->AddSpell(BR);
 	}
 	else if (PikeKeyword && weapon->HasKeyword(PikeKeyword))
 	{
-		actor->GetActorBase()->AddPerk(BR, 1);
+		actor->AddSpell(BR);
 	}
 	else
 	{
-		actor->GetActorBase()->AddPerk(TR, 1);
+		actor->AddSpell(TR);
 	}
 	
 
@@ -381,21 +381,21 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 
 void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
 {
-	if (actor->HasPerk(TR))
+	if (actor->HasSpell(TR))
 	{
-		actor->GetActorBase()->RemovePerk(TR);
+		actor->RemoveSpell(TR);
 	}
-	if (actor->HasPerk(TL))
+	if (actor->HasSpell(TL))
 	{
-		actor->GetActorBase()->RemovePerk(TL);
+		actor->RemoveSpell(TL);
 	}
-	if (actor->HasPerk(BL))
+	if (actor->HasSpell(BL))
 	{
-		actor->GetActorBase()->RemovePerk(BL);
+		actor->RemoveSpell(BL);
 	}
-	if (actor->HasPerk(BR))
+	if (actor->HasSpell(BR))
 	{
-		actor->GetActorBase()->RemovePerk(BR);
+		actor->RemoveSpell(BR);
 	}
 	if (actor->HasPerk(Debuff))
 	{
@@ -407,34 +407,87 @@ void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
 
 void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 {
-	UNUSED(delta);
+	// There is an extremely serious bug here. Some, very specific NPCs in skyrim can flicker in between the
+	// sheathed and drawn states while having their weapon drawn. There is no obvious reason why this happens.
+	// This is almost certainly an issue with skyrim and there is no easy fix for this.
+
+	// One fix could be to add perks on the Drawing and Sheathing states instead of Drawn and Sheathed.
+	// This can lead to edge cases where if the Sheathed state doesn't get hit you will have perks or vise versa
 	RE::WEAPON_STATE WeaponState = actor->AsActorState()->GetWeaponState();
-	RE::ATTACK_STATE_ENUM AttackState = actor->AsActorState()->GetAttackState();
-	auto Equipped = actor->GetEquippedObject(false);
 	float SQDist = RE::PlayerCharacter::GetSingleton()->GetPosition().GetSquaredDistance(actor->GetPosition());
 	// too far causes problems
 	// square dist
 	if (SQDist > Settings::ActiveDistance * Settings::ActiveDistance)
 	{
-		CleanupActor(actor);
+		if (HasDirectionalPerks(actor))
+		{
+			CleanupActor(actor);
+		}
 		return;
 	}
+	if (WeaponState != RE::WEAPON_STATE::kDrawn)
+	{
+		if (HasDirectionalPerks(actor))
+		{
+			logger::info("{} removed cause weapon is not drawn {}", actor->GetName(), (int)WeaponState);
+			CleanupActor(actor);
+
+		}
+		return;
+	}
+	auto Equipped = actor->GetEquippedObject(false);
+	auto EquippedLeft = actor->GetEquippedObject(true);
 	// Only weapons (no H2H)
-	if (!Equipped || (Equipped && !Equipped->IsWeapon()))
+	// however, if race can attack then we force it anyway
+	bool RaceCanFight = AIHandler::GetSingleton()->RaceForcedDirectionalCombat(actor);
+	if (!RaceCanFight)
 	{
-		CleanupActor(actor);
-		return;
-	}
-	// Non melee weapon
-	RE::TESObjectWEAP* Weapon = nullptr;
-	Weapon = Equipped->As<RE::TESObjectWEAP>();
-	if (Weapon && !Weapon->IsMelee())
-	{
-		CleanupActor(actor);
-		return;
+		if (!Equipped || (Equipped && !Equipped->IsWeapon()))
+		{
+			if (!EquippedLeft || (EquippedLeft && !EquippedLeft->IsWeapon()))
+			{
+				if (HasDirectionalPerks(actor))
+				{
+					logger::info("{} removed cause of lack of weapon", actor->GetName());
+					CleanupActor(actor);
+				}
+				return;
+			} 
+		}
 	}
 
-	if (WeaponState == RE::WEAPON_STATE::kDrawn && AttackState != RE::ATTACK_STATE_ENUM::kBowAttached)
+	// Non melee weapon
+	RE::TESObjectWEAP* Weapon = nullptr;
+	RE::TESObjectWEAP* WeaponLeft = nullptr;
+	bool HasWeapon = RaceCanFight;
+	if (Equipped)
+	{
+		Weapon = Equipped->As<RE::TESObjectWEAP>();
+		if (Weapon && Weapon->IsMelee())
+		{
+			HasWeapon = true;
+		}
+	}
+	if (EquippedLeft)
+	{
+		WeaponLeft = EquippedLeft->As<RE::TESObjectWEAP>();
+		if (WeaponLeft && WeaponLeft->IsMelee())
+		{
+			HasWeapon = true;
+		}
+	}
+	if (!HasWeapon)
+	{
+		if (HasDirectionalPerks(actor))
+		{
+			logger::info("{} removed cause wepaon is not melee", actor->GetName());
+			CleanupActor(actor);
+
+		}
+
+		return;
+	}
+	if (WeaponState == RE::WEAPON_STATE::kDrawn)
 	{
 		if (!HasDirectionalPerks(actor))
 		{
@@ -443,24 +496,13 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			//actor->AsActorValueOwner()->SetBaseActorValue(RE::ActorValue::kWeaponSpeedMult, 0.1f);
 			logger::info("gave {} perks", actor->GetName());
 		}
-		else 
+		else
 		{
 			UIDrawAngles(actor);
 		}
 
 	}
-	else if (WeaponState == RE::WEAPON_STATE::kSheathed || AttackState == RE::ATTACK_STATE_ENUM::kBowAttached)
-	{
 
-		if (HasDirectionalPerks(actor))
-		{
-			RemoveDirectionalPerks(actor);
-			// temporary
-			//actor->AsActorValueOwner()->SetBaseActorValue(RE::ActorValue::kWeaponSpeedMult, 1.f);
-			logger::info("remove {} perks", actor->GetName());
-		}
-
-	}
 
 	// AI stuff
 	if (!actor->IsPlayerRef() && HasDirectionalPerks(actor))
@@ -472,11 +514,15 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 
 void DirectionHandler::CleanupActor(RE::Actor* actor)
 {
+
 	RemoveDirectionalPerks(actor);
-	if (actor->HasPerk(Unblockable))
+	if (actor->HasSpell(Unblockable))
 	{
-		actor->GetActorBase()->RemovePerk(Unblockable);
+		actor->RemoveSpell(Unblockable);
 	}
+	DirectionTimers.erase(actor->GetHandle());
+	AnimationTimer.erase(actor->GetHandle());
+	ComboDatas.erase(actor->GetHandle());
 	InAttackWin.erase(actor->GetHandle());
 	AIHandler::GetSingleton()->RemoveActor(actor);
 }
@@ -605,9 +651,9 @@ void DirectionHandler::Update(float delta)
 			ComboData& data = ComboIter->second;
 			data.size--;
 			data.size = std::max(0, data.size);
-			if (actor->HasPerk(Unblockable))
+			if (actor->HasSpell(Unblockable))
 			{
-				actor->GetActorBase()->RemovePerk(Unblockable);
+				actor->RemoveSpell(Unblockable);
 			}
 			if (data.size == 0)
 			{
@@ -658,9 +704,9 @@ void DirectionHandler::DebuffActor(RE::Actor* actor)
 
 void DirectionHandler::AddCombo(RE::Actor* actor)
 {
-	if (actor->HasPerk(Unblockable))
+	if (actor->HasSpell(Unblockable))
 	{
-		actor->GetActorBase()->RemovePerk(Unblockable);
+		actor->RemoveSpell(Unblockable);
 		return;
 	}
 	// insert first if doesnt exist
@@ -671,7 +717,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 	}
 	auto Iter = ComboDatas.find(actor->GetHandle());
 	// wait for the unblockable attack to end before starting new combo
-	if (Iter != ComboDatas.end() && !actor->HasPerk(Unblockable))
+	if (Iter != ComboDatas.end() && !actor->HasSpell(Unblockable))
 	{
 		ComboData& data = Iter->second;
 		// assume we have enough space for 3 as it should be prereserved
@@ -706,7 +752,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 		// clean up all combo stuff if we can apply it
 		if (data.size >= 2 && data.repeatCount == 0)
 		{
-			actor->GetActorBase()->AddPerk(Unblockable, 1);
+			actor->AddSpell(Unblockable);
 			data.currentIdx = 0;
 			data.size = 0;
 			data.repeatCount = 0;

@@ -238,6 +238,7 @@ namespace Hooks
 			HookProjectileHit::Install();
 			DirectionHandler::GetSingleton()->Initialize();
 			FXHandler::GetSingleton()->Initialize();
+			BlockHandler::GetSingleton()->Initialize();
 			HookBeginMeleeHit::Install();
 			HookUpdate::Install();
 			HookCharacter::Install();

@@ -14,6 +14,7 @@ struct DifficultySettings
 	static float StaminaRegenMult;
 	static float AttackTimeoutTime;
 	static bool AttacksCostStamina;
+	static float NonNPCStaggerMult;
 };
 
 struct Settings

@@ -10,6 +10,7 @@ float DifficultySettings::HyperarmorTimer = 1.0f;
 float DifficultySettings::StaminaRegenMult = 0.2f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
+float DifficultySettings::NonNPCStaggerMult = 2.f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -73,6 +74,7 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::HyperarmorTimer = 1.0f;
 	DifficultySettings::AttackTimeoutTime = 1.0f;
 	DifficultySettings::AttacksCostStamina = true;
+	DifficultySettings::NonNPCStaggerMult = 2.f;
 
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
@@ -248,6 +250,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::AttackTimeoutTime = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::AttackTimeoutTime);
+				}
+				else if (fieldName == "NonNPCStaggerMult")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::NonNPCStaggerMult = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::NonNPCStaggerMult);
 				}
 			}
 			else if (sectionName == "AI")

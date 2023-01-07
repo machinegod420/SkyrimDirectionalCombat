@@ -22,7 +22,7 @@ public:
 	void InitializeValues();
 	AIHandler()
 	{
-		InitializeValues();
+		EnableRaceKeyword = nullptr;
 	}
 	enum class Actions
 	{
@@ -37,6 +37,11 @@ public:
 	{
 		static AIHandler obj;
 		return std::addressof(obj);
+	}
+	bool RaceForcedDirectionalCombat(RE::Actor* actor)
+	{
+		// can cache value in <race,bool> dictionary
+		return (actor->GetRace()->HasKeyword(EnableRaceKeyword));
 	}
 	void Update(float delta);
 	void RunActor(RE::Actor* actor, float delta);
@@ -67,6 +72,7 @@ public:
 
 	void Cleanup();
 private:
+	RE::BGSKeyword* EnableRaceKeyword;
 
 	void AddAction(RE::Actor* actor, Actions toDo, bool force = false);
 	float CalcUpdateTimer(RE::Actor* actor);

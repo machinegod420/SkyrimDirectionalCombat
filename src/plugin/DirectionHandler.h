@@ -40,9 +40,9 @@ public:
 	void SwitchDirectionRight(RE::Actor* actor);
 	void SwitchToNewDirection(RE::Actor* attacker, RE::Actor* target);
 	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false);
-	RE::BGSPerk* DirectionToPerk(Directions dir) const;
-	RE::BGSPerk* GetDirectionalPerk(RE::Actor* actor) const;
-	Directions PerkToDirection(RE::BGSPerk* perk) const;
+	RE::SpellItem* DirectionToPerk(Directions dir) const;
+	RE::SpellItem* GetDirectionalPerk(RE::Actor* actor) const;
+	Directions PerkToDirection(RE::SpellItem* perk) const;
 	void RemoveDirectionalPerks(RE::Actor* actor);
 	void UIDrawAngles(RE::Actor* actor);
 	bool DetermineMirrored(RE::Actor* actor);
@@ -64,7 +64,7 @@ public:
 	}
 	inline bool IsUnblockable(RE::Actor* actor)
 	{
-		return actor->HasPerk(Unblockable);
+		return actor->HasSpell(Unblockable);
 	}
 
 	void Cleanup();
@@ -80,12 +80,12 @@ public:
 	}
 private:
 	void CleanupActor(RE::Actor* actor);
-	RE::BGSPerk* TR;
-	RE::BGSPerk* TL;
-	RE::BGSPerk* BL;
-	RE::BGSPerk* BR;
+	RE::SpellItem* TR;
+	RE::SpellItem* TL;
+	RE::SpellItem* BL;
+	RE::SpellItem* BR;
 	
-	RE::BGSPerk* Unblockable;
+	RE::SpellItem* Unblockable;
 	RE::BGSPerk* Debuff;
 	RE::TESObjectACTI* ParryVFX;
 	RE::BGSKeyword* NPCKeyword;

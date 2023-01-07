@@ -4,6 +4,21 @@
 #include "SettingsLoader.h"
 #include "FXHandler.h"
 
+BlockHandler::BlockHandler()
+{
+	NPCKeyword = nullptr;
+}
+
+void BlockHandler::Initialize()
+{
+	if (!NPCKeyword)
+	{
+		RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
+		NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
+	}
+}
+
+
 void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
 {
 	float Damage = hitData.totalDamage;
@@ -26,7 +41,11 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
 
 void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude)
 {
-	if (StaggerTimer.find(actor->GetHandle()) == StaggerTimer.end() && !DirectionHandler::GetSingleton()->IsUnblockable(actor))
+	// make sure we can stagger them
+	// todo: make sure we can only stagger NPCs since the staggering of trolls and shit totally breaks the game
+	// since they can't block
+	if (StaggerTimer.find(actor->GetHandle()) == StaggerTimer.end() 
+		&& !DirectionHandler::GetSingleton()->IsUnblockable(actor))
 	{
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
@@ -34,7 +53,15 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
 		actor->NotifyAnimationGraph("staggerStart");
 
-		StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
+		if (actor->HasKeyword(NPCKeyword))
+		{
+			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
+		}
+		else
+		{
+			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer * DifficultySettings::NonNPCStaggerMult;
+		}
+		
 	}
 }
 

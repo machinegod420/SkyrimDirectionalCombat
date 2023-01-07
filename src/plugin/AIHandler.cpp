@@ -45,6 +45,17 @@ void AIHandler::InitializeValues()
 		iter.second = std::max(iter.second, LowestTime * 0.5f);
 	}
 	logger::info("Finished reinitializing difficulty");
+
+	if (!EnableRaceKeyword)
+	{
+		RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
+		EnableRaceKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x800, "DirectionModRaces.esp");
+		if (EnableRaceKeyword)
+		{
+			logger::info("Got race keyword");
+		}
+
+	}
 }
 
 void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
@@ -94,7 +105,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		if (target)
 		{
 
-			RE::BGSPerk* perk = DirHandler->GetDirectionalPerk(target);
+			RE::SpellItem* perk = DirHandler->GetDirectionalPerk(target);
 			if (perk)
 			{
 
@@ -397,6 +408,15 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 		else 
 		{
 			ret = Difficulty::Legendary;
+		}
+		// if race is forced to have directional combat, then we cap its difficulty
+		if (RaceForcedDirectionalCombat(actor))
+		{
+			if (ret > Difficulty::Normal)
+			{
+				ret = Difficulty::Normal;
+			}
+			
 		}
 		logger::info("{} got difficulty level {}", actor->GetName(), (int)ret);
 		AIDifficulty aidiff = { ret, 0.f };

@@ -110,7 +110,8 @@ namespace Hooks
 				}
 
 				BlockHandler::GetSingleton()->CauseStagger(victim, actor, 0.f);
-				if (!victim->IsPlayerRef())
+				
+				if (!victim->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(victim))
 				{
 					// mostly prevents follow ups
 					AIHandler::GetSingleton()->TryBlock(victim, actor);
@@ -441,7 +442,7 @@ namespace Hooks
 		if (ret && a_attacker && a_target)
 		{
 			// ai tends to not attack if its blocking
-			if (!a_attacker->IsBlocking())
+			if (!a_attacker->IsBlocking() && DirectionHandler::GetSingleton()->HasDirectionalPerks(a_attacker))
 			{
 				if (DirectionHandler::GetSingleton()->HasBlockAngle(a_attacker, a_target))
 				{

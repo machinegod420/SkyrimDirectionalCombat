@@ -7,6 +7,8 @@
 class BlockHandler
 {
 public:
+	BlockHandler();
+	void Initialize();
 	static BlockHandler* GetSingleton()
 	{
 		static BlockHandler obj;
@@ -30,6 +32,7 @@ public:
 		HyperArmorTimer.clear();
 	}
 private:
+	RE::BGSKeyword* NPCKeyword;
 	std::unordered_map<RE::ActorHandle, float> StaggerTimer;
 	
 	std::unordered_map<RE::ActorHandle, float> HyperArmorTimer;
