@@ -15,6 +15,7 @@ struct DifficultySettings
 	static float AttackTimeoutTime;
 	static bool AttacksCostStamina;
 	static float NonNPCStaggerMult;
+	static float StaminaCost;
 };
 
 struct Settings
@@ -41,6 +42,7 @@ struct InputSettings
 	static unsigned KeyCodeTL;
 	static unsigned KeyCodeBL;
 	static unsigned KeyCodeBR;
+	static unsigned KeyCodeFeint;
 };
 
 struct WeaponSettings
@@ -52,6 +54,7 @@ struct WeaponSettings
 	static float SwordSpeed;
 	static float AxeSpeed;
 	static float WeaponSpeedMult;
+	static float BowSpeedMult;
 
 	// unneeded as battleaxes and warhammers are treated as polearms in this mod
 	static float HalberdSpeed;
@@ -92,6 +95,7 @@ struct UISettings
 	static float Length;
 	static float Thickness;
 	static float DisplayDistance;
+	static bool ShowUI;
 };
 
 class SettingsLoader

@@ -21,6 +21,15 @@ bool AttackHandler::CanAttack(RE::Actor* actor)
 	
 }
 
+void AttackHandler::HandleFeint(RE::Actor* actor)
+{
+	if (ChamberWindow.contains(actor->GetHandle()))
+	{
+		actor->NotifyAnimationGraph("attackStop");
+		ChamberWindow.erase(actor->GetHandle());
+	}
+}
+
 void AttackHandler::AddChamberWindow(RE::Actor* actor)
 {
 	// masterstrike window must be a fixed time, otherwise slower attack speeds actually make it easier to masterstrike

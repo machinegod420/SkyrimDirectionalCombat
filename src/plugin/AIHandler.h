@@ -30,6 +30,7 @@ public:
 		Riposte,
 		Block,
 		ProBlock,
+		Feint,
 		Bash
 	};
 
@@ -48,16 +49,20 @@ public:
 	void TryRiposte(RE::Actor* actor);
 	void TryBlock(RE::Actor* actor, RE::Actor* attacker);
 	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force);
+	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target);
 	void TryAttack(RE::Actor* actor);
+	
+	void SwitchToNextAttack(RE::Actor* actor);
 
 	bool CanAct(RE::Actor* actor) const;
-	void DidAct(RE::Actor* actor);
 	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
+	void DidAttack(RE::Actor* actor);
 	Difficulty CalcAndInsertDifficulty(RE::Actor* actor);
 
 
 	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
 	void SignalBadThing(RE::Actor* actor, Directions attackedDir);
+	void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
 
 	// if something stopped combat, make sure they get removed from the map
 	void RemoveActor(RE::Actor* actor)
@@ -77,6 +82,7 @@ private:
 	void AddAction(RE::Actor* actor, Actions toDo, bool force = false);
 	float CalcUpdateTimer(RE::Actor* actor);
 	float CalcActionTimer(RE::Actor* actor);
+	void DidAct(RE::Actor* actor);
 
 	struct Action
 	{
@@ -95,7 +101,7 @@ private:
 		// Decrement if we fail an action (missing a block, attack was blocked)
 		float mistakeRatio = 0.f;
 		// keep a list of the last 5 directions attacked by 
-		// if there is an obvious pattern, become way harder
+		// if there is an obvious pattern, become harder or easier
 		// todo: circular array
 		std::vector<Directions> lastDirectionsEncountered;
 
@@ -109,6 +115,15 @@ private:
 		float targetSwitchTimer = 0.f;
 		Directions targetLastDir;
 		RE::ActorHandle currentTarget;
+
+		// percent chance it may switch to a specific direction to emulate anticipation of attacks
+		std::unordered_map<Directions, int> directionChangeChance;
+
+		// AI should attack in specific patterns, just like people do
+		// todo: use uint16_t, every 2 bits represents a direction for fast access and generation of patterns
+		// the actual random generation for this would be difficult as you would want a spread of bits versus true random
+		std::vector<Directions> attackPattern;
+		unsigned currentAttackIdx = 0u;
 	};
 
 	RE::NiPointer<RE::BGSAttackData> FindActorAttackData(RE::Actor* actor);

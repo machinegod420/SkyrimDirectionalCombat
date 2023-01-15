@@ -1,5 +1,6 @@
 #include "InputHandler.h"
 #include "DirectionHandler.h"
+#include "AttackHandler.h"
 
 RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>* a_eventSource)
 {
@@ -54,6 +55,10 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			else if (key == InputSettings::KeyCodeBR)
 			{
 				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+			}
+			else if (key == InputSettings::KeyCodeFeint)
+			{
+				AttackHandler::GetSingleton()->HandleFeint(Player);
 			}
 		}
 

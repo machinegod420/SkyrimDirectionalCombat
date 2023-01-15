@@ -3,12 +3,16 @@
 #include "SettingsLoader.h"
 #include "AttackHandler.h"
 
+#include <random>
+
+static std::mt19937 mt_rand(0);
+
 constexpr int MaxDirs = 5;
 
 // MUST be higher than the direction switch time otherwise it will try to switch directions too quickly and freeze
 constexpr float LowestTime = 0.13f;
 // have to be very careful with this number
-constexpr float AIJitterRange = 0.04f;
+constexpr float AIJitterRange = 0.08f;
 
 void AIHandler::InitializeValues()
 {
@@ -89,6 +93,22 @@ bool AIHandler::CanAct(RE::Actor* actor) const
 	return true;
 }
 
+void AIHandler::DidAttack(RE::Actor* actor)
+{
+	if (DifficultyMap.contains(actor->GetHandle()))
+	{
+		int idx = DifficultyMap[actor->GetHandle()].currentAttackIdx;
+		idx++;
+
+		if (idx > DifficultyMap[actor->GetHandle()].attackPattern.size())
+		{
+			idx = 0;
+		}
+		//logger::info("{} next attack is {} idx {}", actor->GetName(), (int)DifficultyMap[actor->GetHandle()].attackPattern[idx], idx);
+		DifficultyMap[actor->GetHandle()].currentAttackIdx = idx;
+	}
+}
+
 void AIHandler::DidAct(RE::Actor* actor)
 {
 	// increment timer by difficulty
@@ -112,7 +132,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				// Actions that occur outside of the normal tick (such as reactions) happen here
 				float TargetDist = target->GetPosition().GetSquaredDistance(actor->GetPosition());
 
-				if (TargetDist < 60000)
+				if (TargetDist < 70000)
 				{
 					// always attack if have perk
 					if (DirHandler->IsUnblockable(actor))
@@ -159,12 +179,13 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				if (CanAct(actor))
 				{
 
-					if (TargetDist < 60000)
+					if (TargetDist < 70000)
 					{
 
 						if (actor->IsAttacking())
 						{
-							DirHandler->SwitchToNewDirection(actor, actor);
+							//SwitchToNewDirection(actor, actor);
+							SwitchToNextAttack(actor);
 						}
 						else
 						{
@@ -191,7 +212,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							}
 							if (!ShouldDirectionMatch)
 							{
-								DirHandler->SwitchToNewDirection(actor, target);
+								SwitchToNewDirection(actor, target);
 							}
 							else
 							{
@@ -206,22 +227,16 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					else 
 					{
 						//logger::info("NPC out of range");
-
-
-						int rand = std::rand() % 10;
-						if (rand == 1)
+						if (DifficultyMap.contains(actor->GetHandle()))
 						{
-							DirHandler->WantToSwitchTo(actor, Directions::TR);
-						}
-						else if (rand == 2)
-						{
-							DirHandler->WantToSwitchTo(actor, Directions::BR);
-						}
-						else if (rand == 3)
-						{
-							DirHandler->WantToSwitchTo(actor, Directions::BL);
+							DifficultyMap[actor->GetHandle()].mistakeRatio = 0.f;
+							DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = 0;
+							DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = 0;
+							DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = 0;
+							DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = 0;
 						}
 
+						SwitchToNewDirection(actor, target);
 					}
 
 					DidAct(actor);
@@ -234,27 +249,43 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 
 bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 {
-	if (DirectionHandler::GetSingleton()->HasBlockAngle(actor, target))
+	if (!DifficultyMap.contains(actor->GetHandle()))
 	{
-		// jitter this based on difficulty of target
-		// and influence based on if the target is blocking or not
-		
-		int mod = (int)CalcAndInsertDifficulty(actor);
-		if (target->IsBlocking())
-		{
-			mod += 2;
-		}
-
-		int val = std::rand() % mod;
-
-		if (val < 1)
-		{
-			return true;
-		}
-		return false;
+		CalcAndInsertDifficulty(actor);
 	}
 
-	return true;
+	if (DirectionHandler::GetSingleton()->GetCurrentDirection(actor) == 
+		DifficultyMap[actor->GetHandle()].attackPattern[DifficultyMap[actor->GetHandle()].currentAttackIdx])
+	{
+		if (DirectionHandler::GetSingleton()->HasBlockAngle(actor, target))
+		{
+			// jitter this based on difficulty of target
+			// and influence based on if the target is blocking or not
+
+			int mod = (int)CalcAndInsertDifficulty(actor);
+			if (target->IsBlocking())
+			{
+				mod += 2;
+			}
+
+			int val = mt_rand() % mod;
+
+			if (val < 1)
+			{
+				return true;
+			}
+			return false;
+		}
+		return true;
+	}
+	// some RNG to attack anyways
+	if (mt_rand() % 3 < 1 && !DirectionHandler::GetSingleton()->HasBlockAngle(actor, target))
+	{
+		return true;
+	}
+	SwitchToNextAttack(actor);
+
+	return false;
 }
 
 void AIHandler::TryRiposte(RE::Actor* actor)
@@ -266,9 +297,10 @@ void AIHandler::TryRiposte(RE::Actor* actor)
 	mod += 3;
 	mod *= 3;
 	mod = (int)(mod * 0.5);
-	int val = std::rand() % mod;
+	int val = mt_rand() % mod;
 	if (val > 0)
 	{
+		SwitchToNextAttack(actor);
 		AddAction(actor, AIHandler::Actions::Riposte, true);
 	}
 }
@@ -278,7 +310,7 @@ void AIHandler::TryBlock(RE::Actor* actor, RE::Actor* attacker)
 	int mod = (int)CalcAndInsertDifficulty(actor);
 	mod += 3;
 	mod *= 4; 
-	int val = std::rand() % mod;
+	int val = mt_rand() % mod;
 	if (val > 0)
 	{
 		// try direction match
@@ -300,13 +332,73 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 	// follow last tracked direction isntead of the targets current direction
 	// the AI is too easy to confuse with this though, since they can lag behind a bit
 	Directions ToCounter = DifficultyMap[actor->GetHandle()].lastDirectionTracked;
-	
-	// add some RNG to mix it up
-	int mod = (int)CalcAndInsertDifficulty(actor);
-	// 33% chance of legendary AI switching immediately
-	mod = (int)(mod * 0.5);
-	int val = std::rand() % mod;
-	if (val > 0)
+	Directions CurrentTargetDir = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
+
+	// if we have to switch directions, then add a chance to make a mistkae
+	// simulates conditioning the AI to block in certain directions
+	if (ToCounter != CurrentTargetDir)
+	{
+		int random = mt_rand() % 10;
+		if (random > 0)
+		{
+			random = mt_rand() % 100;
+			// add some RNG to mix it up
+			// have a chance to switch to a direction they anticipate instead
+			
+			int TR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR];
+			int TL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL];
+			int BL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL];
+			int BR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR];
+			bool found = false;
+			random -= TR;
+			if (!found && random <= 0)
+			{
+				ToCounter = Directions::TR;
+				found = true;
+			}
+			random -= TL;
+			if (!found && random <= 0)
+			{
+				ToCounter = Directions::TL;
+				found = true;
+			}
+			random -= BL;
+			if (!found && random <= 0)
+			{
+				ToCounter = Directions::BL;
+				found = true;
+			}
+			random -= BR;
+			if (!found && random <= 0)
+			{
+				ToCounter = Directions::BR;
+				found = true;
+			}
+
+			if (found)
+			{
+				CurrentTargetDir = ToCounter;
+				TR -= 5;
+				TR = std::max(0, TR);
+				TL -= 5;
+				TL = std::max(0, TL);
+				BL -= 5;
+				BL = std::max(0, BL);
+				BR -= 5;
+				BR = std::max(0, BR);
+				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = TR;
+				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = TL;
+				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = BL;
+				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = BR;
+			}
+
+		}
+	}
+
+
+	// small chance to correctly choose as well
+	int random = mt_rand() % 100;
+	if (random < (int)CalcAndInsertDifficulty(actor))
 	{
 		ToCounter = DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(target));
 	}
@@ -327,9 +419,63 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		ToSwitch = Directions::BR;
 		break;
 	}
-	DifficultyMap[actor->GetHandle()].lastDirectionTracked = 
-		DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(target));
+	DifficultyMap[actor->GetHandle()].lastDirectionTracked = CurrentTargetDir;
 	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch, force);
+}
+
+void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target)
+{
+	// This will queue up this event if you cant switch instead
+
+	Directions ToAvoid = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
+	Directions ToSwitch = ToAvoid;
+	int rand = mt_rand() % 2;
+	switch (ToAvoid)
+	{
+	case Directions::TR:
+		if (rand == 0)
+		{
+			ToSwitch = Directions::TR;
+		}
+		else {
+			ToSwitch = Directions::BL;
+		}
+
+		break;
+	case Directions::TL:
+		if (rand == 0)
+		{
+			ToSwitch = Directions::TL;
+		}
+		else
+		{
+			ToSwitch = Directions::BR;
+		}
+		break;
+	case Directions::BL:
+		if (rand == 0)
+		{
+			ToSwitch = Directions::TR;
+		}
+		else
+		{
+			ToSwitch = Directions::BL;
+		}
+		break;
+	case Directions::BR:
+		if (rand == 0)
+		{
+			ToSwitch = Directions::TL;
+		}
+		else
+		{
+			ToSwitch = Directions::BR;
+		}
+
+		break;
+	}
+	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch, true);
+
 }
 
 void AIHandler::TryAttack(RE::Actor* actor)
@@ -343,6 +489,19 @@ void AIHandler::TryAttack(RE::Actor* actor)
 		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kSwing;
 		actor->NotifyAnimationGraph("attackStart");
 	}
+}
+
+void AIHandler::SwitchToNextAttack(RE::Actor* actor)
+{
+	if (!DifficultyMap.contains(actor->GetHandle()))
+	{
+		CalcAndInsertDifficulty(actor);
+	}
+	int idx = DifficultyMap[actor->GetHandle()].currentAttackIdx;
+
+	Directions dir = DifficultyMap[actor->GetHandle()].attackPattern[idx];
+
+	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, dir, true);
 }
 
 
@@ -377,7 +536,8 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 	}
 	else 
 	{
-		// doesn't seem to do anything
+		actor->GetActorBase()->combatStyle->generalData.defensiveMult *= 0.5f;
+		actor->GetActorBase()->combatStyle->generalData.offensiveMult *= 1.5f;
 		actor->GetActorBase()->combatStyle->meleeData.powerAttackBlockingMult = 0.f;
 		actor->GetActorBase()->combatStyle->meleeData.specialAttackMult = 0.f;
 		actor->GetActorBase()->SetCombatStyle(actor->GetActorBase()->combatStyle);
@@ -433,6 +593,22 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 			logger::info("{} has basic attack data", actor->GetName());
 			DifficultyMap[actor->GetHandle()].cachedBasicAttackData = AttackData;
 		}
+
+		// generate attack patterns ahead of time
+		// instead of using rand, use their native handle as that is unique per actor and is the same between saves
+		// so you can learn after dying
+		uint32_t handle = actor->GetHandle().native_handle();
+		unsigned size = handle % 3 + 2;
+		for (unsigned i = 0; i < size; ++i)
+		{
+			//logger::info("{} has attack pattern {}", actor->GetName(), size);
+			// gross
+			// grab the least significant 2 bits, cast to direction, then shift
+			Directions newDir = (Directions)(handle & 0x3);
+			handle >>= 2;
+			DifficultyMap[actor->GetHandle()].attackPattern.push_back(newDir);
+		}
+
 	}
 
 	return ret;
@@ -456,17 +632,13 @@ void AIHandler::SignalBadThing(RE::Actor* actor, Directions attackDir)
 		Iter->second.lastDirectionsEncountered.erase(Iter->second.lastDirectionsEncountered.begin());
 	}
 
-	std::unordered_set<Directions> dirs;
-	for (auto dir : Iter->second.lastDirectionsEncountered)
-	{
-		dirs.insert(dir);
-	}
-	int dupes = (int)(Num - dirs.size());
-	dupes = std::max(1, dupes);
-	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio - (AISettings::AIGrowthFactor * dupes);
+	// increase percentage of blocking this location
+	IncreaseBlockChance(actor, attackDir, mt_rand() % 30 + 10, 2);
+
+	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio - (AISettings::AIGrowthFactor);
 	NewMistakeRatio = std::min(NewMistakeRatio, 0.1f);
 	NewMistakeRatio = std::max(NewMistakeRatio, -0.1f);
-	DifficultyMap[actor->GetHandle()].mistakeRatio += NewMistakeRatio;
+	DifficultyMap[actor->GetHandle()].mistakeRatio = NewMistakeRatio;
 }
 
 void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
@@ -489,11 +661,53 @@ void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 	{
 		dirs.insert(dir);
 	}
+	// increase percentage of blocking this location
+	IncreaseBlockChance(actor, attackedDir, mt_rand() % 20 + 10, 3);
+	
+
 	unsigned size = std::max(1u, (unsigned)dirs.size());
 	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio + (AISettings::AIGrowthFactor * size);
 	NewMistakeRatio = std::min(NewMistakeRatio, 0.1f);
 	NewMistakeRatio = std::max(NewMistakeRatio, -0.1f);
-	DifficultyMap[actor->GetHandle()].mistakeRatio += NewMistakeRatio;;
+	DifficultyMap[actor->GetHandle()].mistakeRatio = NewMistakeRatio;
+}
+
+void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier)
+{
+	if (!DifficultyMap.contains(actor->GetHandle()))
+	{
+		// this will populate the map
+		CalcAndInsertDifficulty(actor);
+	}
+	DifficultyMap[actor->GetHandle()].directionChangeChance[dir] += percent;
+	DifficultyMap[actor->GetHandle()].directionChangeChance[dir] = std::min(90, DifficultyMap[actor->GetHandle()].directionChangeChance[dir]);
+	switch (dir)
+	{
+	case Directions::TR:
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] -= percent / modifier;
+		break;
+	case Directions::TL:
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] -= percent / modifier;
+		break;
+	case Directions::BL:
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] -= percent / modifier;
+		break;
+	case Directions::BR:
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] -= percent / modifier;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] -= percent / modifier;
+		break;
+	}
+	DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = std::max(0, DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR]);
+	DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = std::max(0, DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL]);
+	DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = std::max(0, DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL]);
+	DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = std::max(0, DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR]);
 }
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
@@ -503,7 +717,7 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 	base += mistakeRatio;
 	// add jitter
 	// so ugly
-	float result = (float)(std::rand()) / ((float)(RAND_MAX / (AIJitterRange * 2.f)));
+	float result = (float)(mt_rand()) / ((float)(mt_rand.max() / (AIJitterRange * 2.f)));
 	result -= AIJitterRange;
 	base += result;
 	// don't break animation direction switching by letting AI flicker changes
@@ -517,7 +731,7 @@ float AIHandler::CalcActionTimer(RE::Actor* actor)
 	float mistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio;
 	mistakeRatio *= 0.5;
 	base += mistakeRatio;
-	float result = (float)(std::rand()) / ((float)(RAND_MAX / (AIJitterRange * 2.f)));
+	float result = (float)(mt_rand()) / ((float)(mt_rand.max() / (AIJitterRange * 2.f)));
 	result -= AIJitterRange;
 	base += result;
 	base = std::max(base, LowestTime);
@@ -584,6 +798,10 @@ void AIHandler::Update(float delta)
 			else if (ActionQueueIter->second.toDo == Actions::Bash)
 			{
 				actor->NotifyAnimationGraph("bashStart");
+			}
+			else if (ActionQueueIter->second.toDo == Actions::Feint)
+			{
+				AttackHandler::GetSingleton()->HandleFeint(actor);
 			}
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor

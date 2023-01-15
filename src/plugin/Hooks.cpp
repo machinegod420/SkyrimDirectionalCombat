@@ -6,7 +6,7 @@
 
 // precalc powers
 // lets be honest here, was this really necessary?
-static float StaminaPowerTable[4] = { 0.1f, 0.2f, 0.4f, 0.8f };
+static float StaminaPowerTable[4] = { 0.12f, 0.24f, 0.48f, 0.8f };
 
 namespace Hooks
 {
@@ -31,21 +31,9 @@ namespace Hooks
 			// you are safe during attack windup
 			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
-				if (DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
+				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
-					// potential collision issue here where these two events may happen close to the same time
-					// so we check if a character is staggered first to determine if the masterstrike already happened
-					bool targetStaggering = false;
-					bool attackerStaggering = false;
-					target->GetGraphVariableBool("IsStaggering", targetStaggering);
-					attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
-					if (!targetStaggering && !attackerStaggering)
-					{
-						FXHandler::GetSingleton()->PlayMasterstrike(target);
-						ret.bIgnoreHit = true;
-						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
-					}
-
+					ret.bIgnoreHit = true;
 				}
 			}
 		}
@@ -91,6 +79,10 @@ namespace Hooks
 				if (DirectionHandler::GetSingleton()->IsUnblockable(actor))
 				{
 					hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
+					// restore stamina as well
+					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, 
+						actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.1f);
+
 				}
 				// prccess hit first in case there are bonuses for attacking staggered characters
 				// and we want to process the hit before we remove the unblockable bonuses
@@ -105,10 +97,9 @@ namespace Hooks
 					// lockout for NPC AI to not overcommit
 					if (!actor->IsPlayerRef())
 					{
-						AttackHandler::GetSingleton()->AddNPCSmallLockout(actor);
+						//AttackHandler::GetSingleton()->AddNPCSmallLockout(actor);
 					}
 				}
-
 				BlockHandler::GetSingleton()->CauseStagger(victim, actor, 0.f);
 				
 				if (!victim->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(victim))
@@ -161,18 +152,9 @@ namespace Hooks
 			// make attacks 'safe', a chamber/masterstroke mechanic
 			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
-				if (DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
+				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
-					bool targetStaggering = false;
-					bool attackerStaggering = false;
-					target->GetGraphVariableBool("IsStaggering", targetStaggering);
-					attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
-					if (!targetStaggering && !attackerStaggering)
-					{
-						FXHandler::GetSingleton()->PlayMasterstrike(target);
-						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
-						return;
-					}
+					return;
 				}
 			}
 		}
@@ -207,10 +189,7 @@ namespace Hooks
 		{
 			if (a_this->IsBlocking() || a_this->IsAttacking())
 			{
-
-				// sometimes AI too dumb so they have faster regen rate
-
-				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, 2.f);
+				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, 0.f);
 			}
 			else
 			{
@@ -233,7 +212,7 @@ namespace Hooks
 		{
 			if (a_this->IsBlocking() || a_this->IsAttacking())
 			{
-				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, 1.f);
+				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, 0.f);
 			}
 			else
 			{
@@ -450,7 +429,7 @@ namespace Hooks
 					int val = std::rand() % 3;
 					if (val == 0)
 					{
-						DirectionHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
+						AIHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
 					}
 					
 				}
@@ -518,6 +497,11 @@ namespace Hooks
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 
+			// use this to signal that an attack did happen with the AI
+			if (!actor->IsPlayerRef())
+			{
+				AIHandler::GetSingleton()->DidAttack(actor);
+			}
 		}
 		else if (str == "MCO_WinOpen"_h)
 		{
@@ -563,6 +547,30 @@ namespace Hooks
 	{
 		ProcessCharacterEvent(a_sink, a_event, a_eventSource);
 		return _ProcessEvent_PC(a_sink, a_event, a_eventSource);
+	}
+
+	void Hooks::Install()
+	{
+		logger::info("Installing hooks...");
+		SKSE::AllocTrampoline(128);
+		HookOnMeleeHit::Install();
+		HookProjectileHit::Install();
+		HookBeginMeleeHit::Install();
+		HookUpdate::Install();
+		HookCharacter::Install();
+		HookPlayerCharacter::Install();
+		HookMouseMovement::Install();
+		HookOnAttackAction::Install();
+		HookHasAttackAngle::Install();
+		HookAttackHandler::Install();
+		HookAnimEvent::Install();
+		logger::info("All hooks installed");
+
+		StaminaPowerTable[0] = DifficultySettings::StaminaCost;
+		for (int i = 1; i < 4; i++)
+		{
+			StaminaPowerTable[i] = StaminaPowerTable[i - 1] * 2.f;
+		}
 	}
 }
 

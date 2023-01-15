@@ -18,6 +18,7 @@ public:
 	void AddChamberWindow(RE::Actor* actor);
 
 	void AddLockout(RE::Actor* actor);
+	void HandleFeint(RE::Actor* actor);
 
 	// This is really gross since this class should never have any AI logic
 	// But this is the easiest place to put this, as we don't want NPCs to attack in very 

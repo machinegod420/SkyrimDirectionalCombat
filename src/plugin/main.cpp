@@ -48,7 +48,9 @@ void OnDataLoad()
 
 
 	Hooks::Hooks::Install();
-
+	DirectionHandler::GetSingleton()->Initialize();
+	FXHandler::GetSingleton()->Initialize();
+	BlockHandler::GetSingleton()->Initialize();
 	MenuOpenCloseEventHandler::Register();
 	InputEventHandler::Register();
 	UIMenu::RegisterMenu();

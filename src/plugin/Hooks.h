@@ -230,26 +230,7 @@ namespace Hooks
 	class Hooks
 	{
 	public:
-		static void Install()
-		{
-			logger::info("Installing hooks...");
-			SKSE::AllocTrampoline(128);
-			HookOnMeleeHit::Install();
-			HookProjectileHit::Install();
-			DirectionHandler::GetSingleton()->Initialize();
-			FXHandler::GetSingleton()->Initialize();
-			BlockHandler::GetSingleton()->Initialize();
-			HookBeginMeleeHit::Install();
-			HookUpdate::Install();
-			HookCharacter::Install();
-			HookPlayerCharacter::Install();
-			HookMouseMovement::Install();
-			HookOnAttackAction::Install();
-			HookHasAttackAngle::Install();
-			HookAttackHandler::Install();
-			HookAnimEvent::Install();
-			logger::info("All hooks installed");
-		}
+		static void Install();
 	};
 
 }

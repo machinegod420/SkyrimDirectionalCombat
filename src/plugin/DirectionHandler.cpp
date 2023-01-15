@@ -63,6 +63,10 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target)
 
 void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 {
+	if (!UISettings::ShowUI)
+	{
+		return;
+	}
 	RE::SpellItem* Perk = GetDirectionalPerk(actor);
 	if (Perk != nullptr)
 	{
@@ -229,8 +233,39 @@ bool DirectionHandler::CanSwitch(RE::Actor* actor)
 
 void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir)
 {
-	RemoveDirectionalPerks(actor);
-	actor->AddSpell(DirectionToPerk(dir));
+	// ever since the perks were switched to spells, there has been some async problems where there can be a 
+	// race condition that when removing all spells, the character update gets called and adds new spells before
+	// the replacement can be added
+	// it's likely that the removespell function is asynchronous, so we should make sure that there shouldn't be a point
+	// where a spell does not exist on the actor. fortunately, the addspell()  function does return on success
+	//RemoveDirectionalPerks(actor);
+	RE::SpellItem* DirectionSpell = DirectionToPerk(dir);
+	if (!actor->HasSpell(DirectionSpell))
+	{
+		if (actor->AddSpell(DirectionSpell))
+		{
+			if (dir != Directions::TR)
+			{
+				actor->RemoveSpell(TR);
+			}
+			if (dir != Directions::TL)
+			{
+				actor->RemoveSpell(TL);
+			}
+			if (dir != Directions::BL)
+			{
+				actor->RemoveSpell(BL);
+			}
+			if (dir != Directions::BR)
+			{
+				actor->RemoveSpell(BR);
+			}
+		}
+		else 
+		{
+			logger::info("error: {} could not add spell", actor->GetName());
+		}
+	}
 }
 
 void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
@@ -282,60 +317,6 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 	}
 }
 
-void DirectionHandler::SwitchToNewDirection(RE::Actor* attacker, RE::Actor* target)
-{
-	// This will queue up this event if you cant switch instead
-
-	Directions ToAvoid = PerkToDirection(GetDirectionalPerk(target));
-	Directions ToSwitch = ToAvoid;
-	int rand = std::rand() % 2;
-	switch (ToAvoid)
-	{
-	case Directions::TR:
-		if (rand == 0)
-		{
-			ToSwitch = Directions::TR;
-		}
-		else {
-			ToSwitch = Directions::BL;
-		}
-		
-		break;
-	case Directions::TL:
-		if (rand == 0)
-		{
-			ToSwitch = Directions::TL;
-		}
-		else 
-		{
-			ToSwitch = Directions::BR;
-		}
-		break;
-	case Directions::BL:
-		if (rand == 0)
-		{
-			ToSwitch = Directions::TR;
-		}
-		else
-		{
-			ToSwitch = Directions::BL;
-		}
-		break;
-	case Directions::BR:
-		if (rand == 0)
-		{
-			ToSwitch = Directions::TL;
-		}
-		else
-		{
-			ToSwitch = Directions::BR;
-		}
-		
-		break;
-	}
-	WantToSwitchTo(attacker, ToSwitch, true);
-
-}
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force)
 {
@@ -421,6 +402,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	{
 		if (HasDirectionalPerks(actor))
 		{
+			logger::info("{} removed cause too far", actor->GetName());
 			CleanupActor(actor);
 		}
 		return;
@@ -494,7 +476,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			AddDirectional(actor, Weapon);
 			// temporary
 			//actor->AsActorValueOwner()->SetBaseActorValue(RE::ActorValue::kWeaponSpeedMult, 0.1f);
-			logger::info("gave {} perks", actor->GetName());
+			logger::info("gave {} {} perks", actor->GetName(), actor->GetHandle().native_handle());
 		}
 		else
 		{
@@ -514,7 +496,6 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 
 void DirectionHandler::CleanupActor(RE::Actor* actor)
 {
-
 	RemoveDirectionalPerks(actor);
 	if (actor->HasSpell(Unblockable))
 	{

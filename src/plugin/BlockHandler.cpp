@@ -44,8 +44,16 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	// make sure we can stagger them
 	// todo: make sure we can only stagger NPCs since the staggering of trolls and shit totally breaks the game
 	// since they can't block
-	if (StaggerTimer.find(actor->GetHandle()) == StaggerTimer.end() 
-		&& !DirectionHandler::GetSingleton()->IsUnblockable(actor))
+	bool ShouldStagger = StaggerTimer.find(actor->GetHandle()) == StaggerTimer.end()
+		&& !DirectionHandler::GetSingleton()->IsUnblockable(actor);
+
+	// always stagger if attacker has unblock
+	if (DirectionHandler::GetSingleton()->IsUnblockable(heading))
+	{
+		ShouldStagger = true;
+		magnitude = 0.5f;
+	}
+	if (ShouldStagger)
 	{
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
@@ -53,7 +61,7 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
 		actor->NotifyAnimationGraph("staggerStart");
 
-		if (actor->HasKeyword(NPCKeyword))
+		if (actor->GetRace()->HasKeyword(NPCKeyword))
 		{
 			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
 		}
@@ -102,7 +110,6 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		{
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
 			AIHandler::GetSingleton()->TryRiposte(target);
-			DirectionHandler::GetSingleton()->SwitchToNewDirection(target, attacker);
 			AIHandler::GetSingleton()->SignalGoodThing(target, 
 				DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(attacker)));
 		}

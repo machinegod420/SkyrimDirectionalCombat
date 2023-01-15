@@ -11,6 +11,7 @@ float DifficultySettings::StaminaRegenMult = 0.2f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
+float DifficultySettings::StaminaCost = 0.12f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -24,6 +25,7 @@ unsigned InputSettings::KeyCodeTR = 2;
 unsigned InputSettings::KeyCodeTL = 3;
 unsigned InputSettings::KeyCodeBL = 4;
 unsigned InputSettings::KeyCodeBR = 5;
+unsigned InputSettings::KeyCodeFeint = 16;
 
 bool WeaponSettings::RebalanceWeapons = true;
 float WeaponSettings::WarhammerSpeed = 0.72f;
@@ -32,6 +34,7 @@ float WeaponSettings::GreatSwordSpeed = 0.77f;
 float WeaponSettings::SwordSpeed = 0.8f;
 float WeaponSettings::AxeSpeed = 0.8f;
 float WeaponSettings::WeaponSpeedMult = 0.9f;
+float WeaponSettings::BowSpeedMult = 0.4f;
 
 float AISettings::AIWaitTimer = 3.f;
 int AISettings::LegendaryLvl = 11;
@@ -61,6 +64,7 @@ float UISettings::Size = 300.f;
 float UISettings::Length = 13.f;
 float UISettings::Thickness = 7.f;
 float UISettings::DisplayDistance = 2000.0;
+bool UISettings::ShowUI = true;
 
 void SettingsLoader::InitializeDefaultValues()
 {
@@ -75,6 +79,7 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::AttackTimeoutTime = 1.0f;
 	DifficultySettings::AttacksCostStamina = true;
 	DifficultySettings::NonNPCStaggerMult = 2.f;
+	DifficultySettings::StaminaCost = 0.12f;
 
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
@@ -88,6 +93,7 @@ void SettingsLoader::InitializeDefaultValues()
 	InputSettings::KeyCodeTL = 3;
 	InputSettings::KeyCodeBL = 4;
 	InputSettings::KeyCodeBR = 5;
+	InputSettings::KeyCodeFeint = 16;
 
 	WeaponSettings::RebalanceWeapons = true;
 	WeaponSettings::WarhammerSpeed = 0.75f;
@@ -96,6 +102,7 @@ void SettingsLoader::InitializeDefaultValues()
 	WeaponSettings::SwordSpeed = 0.9f;
 	WeaponSettings::AxeSpeed = 0.8f;
 	WeaponSettings::WeaponSpeedMult = 0.9f;
+	WeaponSettings::BowSpeedMult = 0.4f;
 
 	AISettings::AIWaitTimer = 3.f;
 	AISettings::LegendaryLvl = 11;
@@ -125,6 +132,7 @@ void SettingsLoader::InitializeDefaultValues()
 	UISettings::Length = 13.f;
 	UISettings::Thickness = 7.f;
 	UISettings::DisplayDistance = 2000.0;
+	UISettings::ShowUI = true;
 }
 
 void SettingsLoader::Load(const std::string& path)
@@ -198,6 +206,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, InputSettings::KeyCodeBR);
 				}
+				else if (fieldName == "KeyCodeFeint")
+				{
+					int newval = field.as<unsigned>();
+					InputSettings::KeyCodeFeint = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, InputSettings::KeyCodeFeint);
+				}
 			}
 			else if (sectionName == "Difficulty")
 			{
@@ -257,6 +272,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::NonNPCStaggerMult = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::NonNPCStaggerMult);
+				}
+				else if (fieldName == "StaminaRegenMult")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::StaminaRegenMult = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::StaminaRegenMult);
 				}
 			}
 			else if (sectionName == "AI")
@@ -432,6 +454,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, UISettings::DisplayDistance);
 				}
+				else if (fieldName == "ShowUI")
+				{
+					bool newval = field.as<bool>();
+					UISettings::ShowUI = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, UISettings::ShowUI);
+				}
 			}
 			else if (sectionName == "Settings")
 			{
@@ -510,6 +539,10 @@ void SettingsLoader::Load(const std::string& path)
 		{
 			weap->weaponData.speed = weap->weaponData.speed * WeaponSettings::WeaponSpeedMult;
 		}
+		else if (weap->IsBow() || weap->IsCrossbow())
+		{
+			weap->weaponData.speed *= WeaponSettings::BowSpeedMult;
+		}
 	}
 }
 
@@ -525,6 +558,10 @@ float SettingsLoader::CalcDamage(float diff)
 void SettingsLoader::RebalanceWeapons()
 {
 	logger::info("Rebalancing weapons!");
+	for (auto& combat : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESCombatStyle>())
+	{
+		combat->generalData.meleeScoreMult *= 1.5f;
+	}
 	for (auto& weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())
 	{
 		if (weap->IsMelee())

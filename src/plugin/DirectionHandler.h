@@ -38,11 +38,14 @@ public:
 	void SwitchDirectionUp(RE::Actor* actor);
 	void SwitchDirectionDown(RE::Actor* actor);
 	void SwitchDirectionRight(RE::Actor* actor);
-	void SwitchToNewDirection(RE::Actor* attacker, RE::Actor* target);
 	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false);
 	RE::SpellItem* DirectionToPerk(Directions dir) const;
 	RE::SpellItem* GetDirectionalPerk(RE::Actor* actor) const;
 	Directions PerkToDirection(RE::SpellItem* perk) const;
+	inline Directions GetCurrentDirection(RE::Actor* actor) const
+	{
+		return (PerkToDirection(GetDirectionalPerk(actor)));
+	}
 	void RemoveDirectionalPerks(RE::Actor* actor);
 	void UIDrawAngles(RE::Actor* actor);
 	bool DetermineMirrored(RE::Actor* actor);
