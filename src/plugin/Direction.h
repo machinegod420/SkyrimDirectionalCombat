@@ -1,7 +1,7 @@
 #pragma once
 
 // should be unique tbh
-enum class Directions : uint8_t
+enum class Directions : int
 {
 	TR = 0,
 	TL = 1,

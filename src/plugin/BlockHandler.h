@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include "Direction.h"
 #include "Utils.h"
+#include "parallel_hashmap/phmap.h"
 
 class BlockHandler
 {
@@ -16,7 +17,7 @@ public:
 	}
 	void Update(float delta);
 	void ApplyBlockDamage(RE::Actor* actor, RE::HitData &hitData);
-	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f);
+	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
 	void CauseRecoil(RE::Actor* actor);
 	void GiveHyperarmor(RE::Actor* actor);
 	inline bool HasHyperarmor(RE::Actor* actor)
@@ -33,7 +34,7 @@ public:
 	}
 private:
 	RE::BGSKeyword* NPCKeyword;
-	std::unordered_map<RE::ActorHandle, float> StaggerTimer;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, float> StaggerTimer;
 	
-	std::unordered_map<RE::ActorHandle, float> HyperArmorTimer;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
 };

@@ -35,31 +35,35 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 
 			auto Player = RE::PlayerCharacter::GetSingleton();
 
-			if (key == InputSettings::KeyModifierCode)
+			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(Player))
 			{
-				KeyModifierDown = true;
+				if (key == InputSettings::KeyModifierCode)
+				{
+					KeyModifierDown = true;
+				}
+
+				if (key == InputSettings::KeyCodeTR)
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+				}
+				else if (key == InputSettings::KeyCodeTL)
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
+				}
+				else if (key == InputSettings::KeyCodeBL)
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+				}
+				else if (key == InputSettings::KeyCodeBR)
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+				}
+				else if (key == InputSettings::KeyCodeFeint)
+				{
+					AttackHandler::GetSingleton()->HandleFeint(Player);
+				}
 			}
 
-			if (key == InputSettings::KeyCodeTR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
-			}
-			else if (key == InputSettings::KeyCodeTL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
-			}
-			else if (key == InputSettings::KeyCodeBL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
-			}
-			else if (key == InputSettings::KeyCodeBR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
-			}
-			else if (key == InputSettings::KeyCodeFeint)
-			{
-				AttackHandler::GetSingleton()->HandleFeint(Player);
-			}
 		}
 
 		if (event->AsButtonEvent()->IsUp())

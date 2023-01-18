@@ -2,6 +2,7 @@
 #include "Direction.h"
 #include "Utils.h"
 #include <unordered_map>
+#include "parallel_hashmap/phmap.h"
 
 class AttackHandler
 {
@@ -33,8 +34,9 @@ public:
 	}
 	void Update(float delta);
 private:
-	std::unordered_map<RE::ActorHandle, float> ChamberWindow;
-	std::unordered_map<RE::ActorHandle, float> AttackLockout;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, float> ChamberWindow;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, float> AttackLockout;
+	
 
 	// Player is special case cause it should be accessed way more
 	float PlayerLockoutTimer;

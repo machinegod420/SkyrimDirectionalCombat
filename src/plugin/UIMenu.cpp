@@ -117,7 +117,10 @@ void UIMenu::AdvanceMovie(float interval, std::uint32_t a_currentTime)
 			active = 0xFF4040;
 			break;
 		case UIDirectionState::Blocking:
-			active = 0x4040FF;
+			active = 0x3030FF;
+			break;
+		case UIDirectionState::ImperfectBlock:
+			active = 0x40E0D0;
 			break;
 		case UIDirectionState::Unblockable:
 			white = 0xFF6600;

@@ -5,6 +5,7 @@
 #include <shared_mutex>
 #include "Direction.h"
 #include "Utils.h"
+#include "parallel_hashmap/phmap.h"
 
 class AIHandler
 {
@@ -30,7 +31,8 @@ public:
 		Riposte,
 		Block,
 		ProBlock,
-		Feint,
+		StartFeint,
+		EndFeint,
 		Bash
 	};
 
@@ -53,7 +55,7 @@ public:
 	void TryAttack(RE::Actor* actor);
 	
 	void SwitchToNextAttack(RE::Actor* actor);
-
+	void SwitchTarget(RE::Actor* actor, RE::Actor* newTarget);
 	bool CanAct(RE::Actor* actor) const;
 	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
 	void DidAttack(RE::Actor* actor);
@@ -63,6 +65,8 @@ public:
 	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
 	void SignalBadThing(RE::Actor* actor, Directions attackedDir);
 	void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
+
+	void ReduceDifficulty(RE::Actor* actor);
 
 	// if something stopped combat, make sure they get removed from the map
 	void RemoveActor(RE::Actor* actor)
@@ -117,7 +121,7 @@ private:
 		RE::ActorHandle currentTarget;
 
 		// percent chance it may switch to a specific direction to emulate anticipation of attacks
-		std::unordered_map<Directions, int> directionChangeChance;
+		phmap::parallel_flat_hash_map<Directions, int> directionChangeChance;
 
 		// AI should attack in specific patterns, just like people do
 		// todo: use uint16_t, every 2 bits represents a direction for fast access and generation of patterns
@@ -128,10 +132,10 @@ private:
 
 	RE::NiPointer<RE::BGSAttackData> FindActorAttackData(RE::Actor* actor);
 
-	std::unordered_map<RE::ActorHandle,Action> ActionQueue;
-	std::unordered_map<RE::ActorHandle, float> UpdateTimer;
-	std::unordered_map<RE::ActorHandle, AIDifficulty> DifficultyMap;
+	phmap::parallel_flat_hash_map<RE::ActorHandle,Action> ActionQueue;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, float> UpdateTimer;
+	phmap::parallel_flat_hash_map<RE::ActorHandle, AIDifficulty> DifficultyMap;
 
-	std::unordered_map<Difficulty, float> DifficultyUpdateTimer;
-	std::unordered_map<Difficulty, float> DifficultyActionTimer;
+	phmap::parallel_flat_hash_map<Difficulty, float> DifficultyUpdateTimer;
+	phmap::parallel_flat_hash_map<Difficulty, float> DifficultyActionTimer;
 };

@@ -1,5 +1,6 @@
 #include "AttackHandler.h"
 #include "SettingsLoader.h"
+#include "DirectionHandler.h"
 
 constexpr float NPCLockoutTime = 0.15f;
 
@@ -27,6 +28,16 @@ void AttackHandler::HandleFeint(RE::Actor* actor)
 	{
 		actor->NotifyAnimationGraph("attackStop");
 		ChamberWindow.erase(actor->GetHandle());
+		Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+		if (dir == Directions::TR || dir == Directions::BR)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL, true);
+		}
+		else
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR, true);
+		}
+		
 	}
 }
 

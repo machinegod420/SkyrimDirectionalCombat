@@ -11,7 +11,7 @@ float DifficultySettings::StaminaRegenMult = 0.2f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
-float DifficultySettings::StaminaCost = 0.12f;
+float DifficultySettings::StaminaCost = 0.14f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -79,7 +79,7 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::AttackTimeoutTime = 1.0f;
 	DifficultySettings::AttacksCostStamina = true;
 	DifficultySettings::NonNPCStaggerMult = 2.f;
-	DifficultySettings::StaminaCost = 0.12f;
+	DifficultySettings::StaminaCost = 0.14f;
 
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
@@ -279,6 +279,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::StaminaRegenMult = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::StaminaRegenMult);
+				}
+				else if (fieldName == "StaminaCost")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::StaminaCost = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::StaminaCost);
 				}
 			}
 			else if (sectionName == "AI")

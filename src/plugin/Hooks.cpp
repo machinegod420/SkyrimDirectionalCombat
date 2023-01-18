@@ -23,6 +23,12 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && 
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
+			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
+			{
+				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
+				ret.bIgnoreHit = true;
+				return ret;
+			}
 			if (target->IsBlocking())
 			{
 				BlockHandler::GetSingleton()->HandleBlock(attacker, target);
@@ -41,77 +47,85 @@ namespace Hooks
 		return ret; 
 	}
 
-	void HookOnMeleeHit::OnMeleeHit(RE::Actor* victim, RE::HitData& hitData)
+	void HookOnMeleeHit::OnMeleeHit(RE::Actor* target, RE::HitData& hitData)
 	{
-		RE::Actor* actor = hitData.aggressor.get().get();
-
-		if (actor && victim)
+		
+		RE::Actor* attacker = hitData.aggressor.get().get();
+		if (attacker && target)
 		{
 			// ignore hit if was bash attack against attacking character
 			// bash can be used to open up enemies but will fail if you bash after an attack started
-			if (victim->IsAttacking() && hitData.flags.any(RE::HitData::Flag::kBash))
+			if (target->IsAttacking() && hitData.flags.any(RE::HitData::Flag::kBash))
 			{
-				BlockHandler::GetSingleton()->CauseStagger(actor, victim, 1.f);
+				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
 				//return;
 			}
-			DirectionHandler::GetSingleton()->DebuffActor(actor);
+			DirectionHandler::GetSingleton()->DebuffActor(attacker);
+			bool AttackerUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(attacker);
+			bool TargetUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(target);
+			hitData.totalDamage *= DifficultySettings::MeleeDamageMult;
+
+			if (AttackerUnblockable)
+			{
+				hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
+				// restore stamina as well
+				attacker->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina,
+					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.1f);
+
+			}
+			if (TargetUnblockable)
+			{
+				hitData.totalDamage *= 0.3f;
+				hitData.stagger = 0;
+			}
 			// do no health damage if hit was blocked
 			// for some reason this flag is the only flag that gets set
 			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 			{
 				hitData.stagger = 0;
-				BlockHandler::GetSingleton()->ApplyBlockDamage(victim, hitData);
+				BlockHandler::GetSingleton()->ApplyBlockDamage(target, hitData);
 				// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 				// riposte instead of being gambled
 
-				if (actor->IsPlayerRef())
+				if (attacker->IsPlayerRef())
 				{
 					AttackHandler::GetSingleton()->LockoutPlayer();
 				}
 				else 
 				{
-					AttackHandler::GetSingleton()->AddLockout(actor);
+					AttackHandler::GetSingleton()->AddLockout(attacker);
 				}
 			}
 			else
-			{
-				hitData.totalDamage *= DifficultySettings::MeleeDamageMult;
-				if (DirectionHandler::GetSingleton()->IsUnblockable(actor))
-				{
-					hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
-					// restore stamina as well
-					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, 
-						actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.1f);
-
-				}
+			{ 
 				// prccess hit first in case there are bonuses for attacking staggered characters
 				// and we want to process the hit before we remove the unblockable bonuses
-				_OnMeleeHit(victim, hitData);
-
+				_OnMeleeHit(target, hitData);
+				if (!TargetUnblockable)
+				{
+					float magnitude = 0.f;
+					if (AttackerUnblockable)
+					{
+						magnitude = 0.5f;
+					}
+					BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
+				}
+				
 				// only for NPCs with directional attacks. do not need enemy to have directions
-				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(actor))
+				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 				{
 					// attack successfully landed, so the attacker gets to add to their combo
-					DirectionHandler::GetSingleton()->AddCombo(actor);
-
-					// lockout for NPC AI to not overcommit
-					if (!actor->IsPlayerRef())
-					{
-						//AttackHandler::GetSingleton()->AddNPCSmallLockout(actor);
-					}
+					DirectionHandler::GetSingleton()->AddCombo(attacker);
 				}
-				BlockHandler::GetSingleton()->CauseStagger(victim, actor, 0.f);
-				
-				if (!victim->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(victim))
+				if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 				{
 					// mostly prevents follow ups
-					AIHandler::GetSingleton()->TryBlock(victim, actor);
+					AIHandler::GetSingleton()->TryBlock(target, attacker);
 				}
 				return;
 			}
 		}
-
-		_OnMeleeHit(victim, hitData);
+		_OnMeleeHit(target, hitData);
 	}
 
 	void HookProjectileHit::OnArrowHit(RE::Projectile* a_this, RE::hkpAllCdPointCollector* a_AllCdPointCollector)
@@ -182,6 +196,10 @@ namespace Hooks
 		}
 		auto currentProcess = a_this->GetActorRuntimeData().currentProcess;
 		if ((!currentProcess || !currentProcess->InHighProcess()) && !a_this->IsPlayerRef()) 
+		{
+			return;
+		}
+		if (!a_this->GetActorRuntimeData().combatController)
 		{
 			return;
 		}
@@ -485,7 +503,8 @@ namespace Hooks
 			{
 				unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
 				repeatCombos = std::min(3u, repeatCombos);
-				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * -StaminaPowerTable[repeatCombos]);
+				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, 
+					actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * -StaminaPowerTable[repeatCombos]);
 
 			}
 
@@ -549,6 +568,14 @@ namespace Hooks
 		return _ProcessEvent_PC(a_sink, a_event, a_eventSource);
 	}
 
+	bool HookNotifyAnimationGraph::NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
+	{
+		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
+	}
+	bool HookNotifyAnimationGraph::NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
+	{
+		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
+	}
 	void Hooks::Install()
 	{
 		logger::info("Installing hooks...");
@@ -564,6 +591,7 @@ namespace Hooks
 		HookHasAttackAngle::Install();
 		HookAttackHandler::Install();
 		HookAnimEvent::Install();
+		HookNotifyAnimationGraph::Install();
 		logger::info("All hooks installed");
 
 		StaminaPowerTable[0] = DifficultySettings::StaminaCost;

@@ -24,6 +24,14 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
 	float Damage = hitData.totalDamage;
 	float ActorStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 	float FinalDamage = 0.f;
+
+	//take damage if it was imperfect as well as increased stamina damage
+	if (DirectionHandler::GetSingleton()->HasImperfectParry(actor))
+	{
+		FinalDamage = Damage * 0.5f;
+		Damage *= 1.5f;
+	}
+
 	// breaks stamina
 	if (Damage > ActorStamina)
 	{
@@ -34,25 +42,27 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
 		}
 		FinalDamage *= DifficultySettings::MeleeDamageMult;
 	}
+	hitData.attackDataSpell = nullptr;
+	hitData.criticalEffect = nullptr;
+	hitData.attackData->data.attackSpell = nullptr;
+	
 	actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
 	hitData.totalDamage = FinalDamage;
 
 }
 
-void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude)
+void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude, bool force)
 {
 	// make sure we can stagger them
 	// todo: make sure we can only stagger NPCs since the staggering of trolls and shit totally breaks the game
 	// since they can't block
-	bool ShouldStagger = StaggerTimer.find(actor->GetHandle()) == StaggerTimer.end()
-		&& !DirectionHandler::GetSingleton()->IsUnblockable(actor);
+	bool ShouldStagger = !StaggerTimer.contains(actor->GetHandle());
 
-	// always stagger if attacker has unblock
-	if (DirectionHandler::GetSingleton()->IsUnblockable(heading))
+	if (force)
 	{
 		ShouldStagger = true;
-		magnitude = 0.5f;
 	}
+
 	if (ShouldStagger)
 	{
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
@@ -90,10 +100,11 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		{
 			if (!target->IsPlayerRef())
 			{
-				Directions dir = DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(attacker));
+				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
 				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 				{
 					AIHandler::GetSingleton()->SignalBadThing(target, dir);
+					AIHandler::GetSingleton()->SwitchTarget(target, attacker);
 				}
 				
 			}
@@ -111,7 +122,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
 			AIHandler::GetSingleton()->TryRiposte(target);
 			AIHandler::GetSingleton()->SignalGoodThing(target, 
-				DirectionHandler::GetSingleton()->PerkToDirection(DirectionHandler::GetSingleton()->GetDirectionalPerk(attacker)));
+				DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
 		}
 	}
 }

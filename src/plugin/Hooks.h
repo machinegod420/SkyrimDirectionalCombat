@@ -29,7 +29,7 @@ namespace Hooks
 			_OnMeleeHit = Trampoline.write_call<5>(hook.address() + REL::VariantOffset(0x3C0, 0x4A8, 0).offset(), OnMeleeHit);
 			logger::info("Hook OnMeleeHit");
 		}
-		static void OnMeleeHit(RE::Actor* victim, RE::HitData& hitData);
+		static void OnMeleeHit(RE::Actor* target, RE::HitData& hitData);
 		static inline REL::Relocation<decltype(OnMeleeHit)> _OnMeleeHit;
 	};
 
@@ -197,17 +197,29 @@ namespace Hooks
 		static inline REL::Relocation<decltype(ProcessAttackHook)> _ProcessAttackHook;
 	};
 
-
+	class HookNotifyAnimationGraph
+	{
+	public:
+		static void Install()
+		{
+			REL::Relocation<uintptr_t> AnimGraphVtbl_PC { RE::VTABLE_PlayerCharacter[3] };
+			REL::Relocation<uintptr_t> AnimGraphVtbl_NPC{ RE::VTABLE_Character[3] };
+			_NotifyAnimationGraph_PC = AnimGraphVtbl_PC.write_vfunc(0x1, NotifyAnimationGraph_PC);
+			_NotifyAnimationGraph_NPC = AnimGraphVtbl_PC.write_vfunc(0x1, NotifyAnimationGraph_NPC);
+		}
+		static bool NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName);
+		static bool NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName);
+		static inline REL::Relocation<decltype(NotifyAnimationGraph_PC)> _NotifyAnimationGraph_PC;
+		static inline REL::Relocation<decltype(NotifyAnimationGraph_NPC)> _NotifyAnimationGraph_NPC;
+	};
 
 	class HookAnimEvent
 	{
 	public:
 		static void Install()
 		{
-			
 			REL::Relocation<uintptr_t> AnimEventVtbl_NPC{ RE::VTABLE_Character[2] };
 			REL::Relocation<uintptr_t> AnimEventVtbl_PC{ RE::VTABLE_PlayerCharacter[2] };
-
 			_ProcessEvent_NPC = AnimEventVtbl_NPC.write_vfunc(0x1, ProcessEvent_NPC);
 			_ProcessEvent_PC = AnimEventVtbl_PC.write_vfunc(0x1, ProcessEvent_PC);
 

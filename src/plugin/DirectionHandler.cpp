@@ -26,37 +26,37 @@ void DirectionHandler::Initialize()
 
 bool DirectionHandler::HasDirectionalPerks(RE::Actor* actor) const
 {
-	return actor->HasSpell(TR) 
-		|| actor->HasSpell(TL)
-		|| actor->HasSpell(BL)
-		|| actor->HasSpell(BR);
+	return (ActiveDirections.contains(actor->GetHandle()));
 }
 
-bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target)
+bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) const
 {
 	// never can block this
-	if (attacker->HasSpell(Unblockable))
+	if (IsUnblockable(attacker))
+	{
+		return false;
+	}
+	if (!ActiveDirections.contains(target->GetHandle()) || !ActiveDirections.contains(attacker->GetHandle()))
 	{
 		return false;
 	}
 	// opposite side angle
-	if (attacker->HasSpell(TR))
+	if(ActiveDirections.at(attacker->GetHandle()) == Directions::TR)
 	{
-		return target->HasSpell(TL);
+		return ActiveDirections.at(target->GetHandle()) == Directions::TL;
 	}
-	if (attacker->HasSpell(TL))
+	if (ActiveDirections.at(attacker->GetHandle()) == Directions::TL)
 	{
-		return target->HasSpell(TR);
+		return ActiveDirections.at(target->GetHandle()) == Directions::TR;
 	}
-	if (attacker->HasSpell(BL))
+	if (ActiveDirections.at(attacker->GetHandle()) == Directions::BL)
 	{
-		return target->HasSpell(BR);
+		return ActiveDirections.at(target->GetHandle()) == Directions::BR;
 	}
-	if (attacker->HasSpell(BR))
+	if (ActiveDirections.at(attacker->GetHandle()) == Directions::BR)
 	{
-		return target->HasSpell(BL);
+		return ActiveDirections.at(target->GetHandle()) == Directions::BL;
 	}
-
 	// if no Spell then any angle blocks
 	return true;
 }
@@ -67,31 +67,32 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 	{
 		return;
 	}
-	RE::SpellItem* Perk = GetDirectionalPerk(actor);
-	if (Perk != nullptr)
+	if (!actor->IsPlayerRef())
 	{
-		if (!actor->IsPlayerRef())
+		// ignore ui past setting distance
+		float TargetDist = RE::PlayerCamera::GetSingleton()->pos.GetSquaredDistance(actor->GetPosition());
+		if (TargetDist > (UISettings::DisplayDistance * UISettings::DisplayDistance))
 		{
-			// ignore ui past setting distance
-			float TargetDist = RE::PlayerCamera::GetSingleton()->pos.GetSquaredDistance(actor->GetPosition());
-			if (TargetDist > (UISettings::DisplayDistance * UISettings::DisplayDistance))
-			{
-				return;
-			}
+			return;
 		}
-
-
+	}
+	if(ActiveDirections.contains(actor->GetHandle()))
+	{
 		UIDirectionState state = UIDirectionState::Default;
 		UIHostileState hostileState = UIHostileState::Neutral;
 		if (actor->IsBlocking())
 		{
 			state = UIDirectionState::Blocking;
 		}
+		if (ImperfectParry.contains(actor->GetHandle()))
+		{
+			state = UIDirectionState::ImperfectBlock;
+		}
 		if (actor->IsAttacking())
 		{
 			state = UIDirectionState::Attacking;
 		}
-		if (actor->HasSpell(Unblockable))
+		if (IsUnblockable(actor))
 		{
 			state = UIDirectionState::Unblockable;
 		}
@@ -128,7 +129,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 
 		// since this waits for a mutex we add a task graph command for it
 		SKSE::GetTaskInterface()->AddTask([=] {
-			UIMenu::AddDrawCommand(Position, PerkToDirection(Perk), Mirror, state, hostileState, FirstPerson, Lockout);
+			UIMenu::AddDrawCommand(Position, ActiveDirections[actor->GetHandle()], Mirror, state, hostileState, FirstPerson, Lockout);
 		});
 		
 	}
@@ -177,11 +178,6 @@ RE::SpellItem* DirectionHandler::DirectionToPerk(Directions dir) const
 
 RE::SpellItem* DirectionHandler::GetDirectionalPerk(RE::Actor* actor) const
 {
-	
-	if (actor->HasSpell(Unblockable))
-	{
-		return Unblockable;
-	}
 	if (actor->HasSpell(TR))
 	{
 		return TR;
@@ -219,11 +215,12 @@ Directions DirectionHandler::PerkToDirection(RE::SpellItem* perk) const
 	{
 		return Directions::BR;
 	}
-	else
+	else if (perk == Unblockable)
 	{
 		return Directions::Unblockable;
 	}
-
+	// wrong but graceful out
+	return Directions::TR;
 }
 
 bool DirectionHandler::CanSwitch(RE::Actor* actor)
@@ -236,82 +233,90 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 	// ever since the perks were switched to spells, there has been some async problems where there can be a 
 	// race condition that when removing all spells, the character update gets called and adds new spells before
 	// the replacement can be added
-	// it's likely that the removespell function is asynchronous, so we should make sure that there shouldn't be a point
-	// where a spell does not exist on the actor. fortunately, the addspell()  function does return on success
-	//RemoveDirectionalPerks(actor);
-	RE::SpellItem* DirectionSpell = DirectionToPerk(dir);
-	if (!actor->HasSpell(DirectionSpell))
+	//RE::SpellItem* DirectionSpell = DirectionToPerk(dir);
+	// This is a totally synchronous function, but will break since asynchronous spell adds will cause segfaults/race conditions
+	//actor->GetActorRuntimeData().addedSpells.push_back(DirectionSpell);
+
+	// This is why everything got switched to a map that this plugin maintains. Skyrim behavior does not support or is too unpredictable
+	ActiveDirections[actor->GetHandle()] = dir;
+
+	RE::SpellItem* DirectionSpell = GetDirectionalPerk(actor);
+	RE::SpellItem* SpellToAdd = DirectionToPerk(dir);
+	if (!DirectionSpell)
 	{
-		if (actor->AddSpell(DirectionSpell))
-		{
-			if (dir != Directions::TR)
-			{
-				actor->RemoveSpell(TR);
-			}
-			if (dir != Directions::TL)
-			{
-				actor->RemoveSpell(TL);
-			}
-			if (dir != Directions::BL)
-			{
-				actor->RemoveSpell(BL);
-			}
-			if (dir != Directions::BR)
-			{
-				actor->RemoveSpell(BR);
-			}
-		}
-		else 
-		{
-			logger::info("error: {} could not add spell", actor->GetName());
-		}
+		actor->AddSpell(SpellToAdd);
 	}
+
+	if (PerkToDirection(DirectionSpell) != ActiveDirections[actor->GetHandle()])
+	{
+		if (actor->HasSpell(TR))
+		{
+			actor->RemoveSpell(TR);
+		}
+		if (actor->HasSpell(TL))
+		{
+			actor->RemoveSpell(TL);
+		}
+		if (actor->HasSpell(BL))
+		{
+			actor->RemoveSpell(BL);
+		}
+		if (actor->HasSpell(BR))
+		{
+			actor->RemoveSpell(BR);
+		}
+		actor->AddSpell(SpellToAdd);
+	}
+
+	// if blocking they have an imperfect parry
+	if (actor->IsBlocking())
+	{
+		ImperfectParry.insert(actor->GetHandle());
+	}
+	
+
 }
 
 void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
 {
-
-	if (GetDirectionalPerk(actor) == TR)
+	if (ActiveDirections.at(actor->GetHandle()) == Directions::TR)
 	{
 		WantToSwitchTo(actor, Directions::TL);
 	}
-	else if (GetDirectionalPerk(actor) == BR)
+	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BR)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
 }
 void DirectionHandler::SwitchDirectionRight(RE::Actor* actor)
 {
-
-	if (GetDirectionalPerk(actor) == TL)
+	if (ActiveDirections.at(actor->GetHandle()) == Directions::TL)
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
-	else if (GetDirectionalPerk(actor) == BL)
+	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BL)
 	{
 		WantToSwitchTo(actor, Directions::BR);
 	}
 }
 void DirectionHandler::SwitchDirectionUp(RE::Actor* actor)
 {
-
-	if (GetDirectionalPerk(actor) == BR)
+	if (ActiveDirections.at(actor->GetHandle()) == Directions::BR)
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
-	else if (GetDirectionalPerk(actor) == BL)
+	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BL)
 	{
 		WantToSwitchTo(actor, Directions::TL);
 	}
 }
 void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 {
-
-	if (GetDirectionalPerk(actor) == TR)
+	if (ActiveDirections.at(actor->GetHandle()) == Directions::TR)
 	{
 		WantToSwitchTo(actor, Directions::BR);
 	}
-	else if (GetDirectionalPerk(actor) == TL)
+	else if (ActiveDirections.at(actor->GetHandle()) == Directions::TL)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
@@ -320,13 +325,22 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force)
 {
+	if ((int)dir >= 4)
+	{
+		logger::info("{} had error switching {}", actor->GetName(), (int)dir);
+	}
+	// skip if we try to switch to the same dir
+	if (ActiveDirections.contains(actor->GetHandle()) && ActiveDirections.at(actor->GetHandle()) == dir)
+	{
+		return;
+	}
 	auto Iter = DirectionTimers.find(actor->GetHandle());
 	// skip if we already have a direction to switch to that is the same
 	if (Iter != DirectionTimers.end() && Iter->second.dir == dir)
 	{
 		return;
 	}
-	if (force || DirectionTimers.find(actor->GetHandle()) == DirectionTimers.end())
+	if (force || Iter == DirectionTimers.end())
 	{
 		DirectionSwitch ToDir;
 		ToDir.dir = dir;
@@ -342,26 +356,30 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 	// battleaxes are thrusting polearms so they get BR
 	if (!weapon)
 	{
+		ActiveDirections[actor->GetHandle()] = Directions::TR;
 		actor->AddSpell(TR);
 	}
 	else if (weapon->HasKeyword(BattleaxeKeyword))
 	{
+		ActiveDirections[actor->GetHandle()] = Directions::BR;
 		actor->AddSpell(BR);
 	}
 	else if (PikeKeyword && weapon->HasKeyword(PikeKeyword))
 	{
+		ActiveDirections[actor->GetHandle()] = Directions::BR;
 		actor->AddSpell(BR);
 	}
 	else
 	{
+		ActiveDirections[actor->GetHandle()] = Directions::TR;
 		actor->AddSpell(TR);
 	}
-	
 
 }
 
 void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
 {
+	ActiveDirections.erase(actor->GetHandle());
 	if (actor->HasSpell(TR))
 	{
 		actor->RemoveSpell(TR);
@@ -378,6 +396,7 @@ void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
 	{
 		actor->RemoveSpell(BR);
 	}
+	
 	if (actor->HasPerk(Debuff))
 	{
 		actor->RemovePerk(Debuff);
@@ -388,17 +407,13 @@ void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
 
 void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 {
-	// There is an extremely serious bug here. Some, very specific NPCs in skyrim can flicker in between the
-	// sheathed and drawn states while having their weapon drawn. There is no obvious reason why this happens.
-	// This is almost certainly an issue with skyrim and there is no easy fix for this.
-
-	// One fix could be to add perks on the Drawing and Sheathing states instead of Drawn and Sheathed.
-	// This can lead to edge cases where if the Sheathed state doesn't get hit you will have perks or vise versa
 	RE::WEAPON_STATE WeaponState = actor->AsActorState()->GetWeaponState();
 	float SQDist = RE::PlayerCharacter::GetSingleton()->GetPosition().GetSquaredDistance(actor->GetPosition());
 	// too far causes problems
 	// square dist
-	if (SQDist > Settings::ActiveDistance * Settings::ActiveDistance)
+	float FarDelta = Settings::ActiveDistance + 200.f;
+
+	if (SQDist > FarDelta * FarDelta)
 	{
 		if (HasDirectionalPerks(actor))
 		{
@@ -407,11 +422,19 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 		return;
 	}
+	else if (SQDist > Settings::ActiveDistance * Settings::ActiveDistance)
+	{
+		if (!HasDirectionalPerks(actor))
+		{
+			// don't do anything if we're not ready to be added yet
+			return;
+		}
+	}
 	if (WeaponState != RE::WEAPON_STATE::kDrawn)
 	{
 		if (HasDirectionalPerks(actor))
 		{
-			logger::info("{} removed cause weapon is not drawn {}", actor->GetName(), (int)WeaponState);
+			logger::info("{} removed cause weapon is not drawn", actor->GetName());
 			CleanupActor(actor);
 
 		}
@@ -480,7 +503,12 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 		else
 		{
+
 			UIDrawAngles(actor);
+			if (!actor->IsBlocking() && ImperfectParry.contains(actor->GetHandle()))
+			{
+				ImperfectParry.erase(actor->GetHandle());
+			}
 		}
 
 	}
@@ -497,15 +525,14 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 void DirectionHandler::CleanupActor(RE::Actor* actor)
 {
 	RemoveDirectionalPerks(actor);
-	if (actor->HasSpell(Unblockable))
-	{
-		actor->RemoveSpell(Unblockable);
-	}
+	UnblockableActors.erase(actor->GetHandle());
 	DirectionTimers.erase(actor->GetHandle());
 	AnimationTimer.erase(actor->GetHandle());
 	ComboDatas.erase(actor->GetHandle());
 	InAttackWin.erase(actor->GetHandle());
+	ActiveDirections.erase(actor->GetHandle());
 	AIHandler::GetSingleton()->RemoveActor(actor);
+	ImperfectParry.erase(actor->GetHandle());
 }
 
 void DirectionHandler::Cleanup()
@@ -514,6 +541,9 @@ void DirectionHandler::Cleanup()
 	AnimationTimer.clear();
 	ComboDatas.clear();
 	InAttackWin.clear();
+	ActiveDirections.clear();
+	UnblockableActors.clear();
+	ImperfectParry.clear();
 }
 
 void DirectionHandler::Update(float delta)
@@ -632,9 +662,9 @@ void DirectionHandler::Update(float delta)
 			ComboData& data = ComboIter->second;
 			data.size--;
 			data.size = std::max(0, data.size);
-			if (actor->HasSpell(Unblockable))
+			if (UnblockableActors.contains(actor->GetHandle()))
 			{
-				actor->RemoveSpell(Unblockable);
+				UnblockableActors.erase(actor->GetHandle());
 			}
 			if (data.size == 0)
 			{
@@ -657,7 +687,23 @@ void DirectionHandler::Update(float delta)
 		ComboIter++;
 	}
 
+	auto DirIter = ActiveDirections.begin();
+	while (DirIter != ActiveDirections.end())
+	{
+		if (!DirIter->first)
+		{
+			DirIter = ActiveDirections.erase(DirIter);
+			continue;
+		}
+		RE::Actor* actor = DirIter->first.get().get();
+		if (!actor)
+		{
+			DirIter = ActiveDirections.erase(DirIter);
+			continue;
+		}
 
+		DirIter++;
+	}
 
 }
 
@@ -685,24 +731,27 @@ void DirectionHandler::DebuffActor(RE::Actor* actor)
 
 void DirectionHandler::AddCombo(RE::Actor* actor)
 {
-	if (actor->HasSpell(Unblockable))
+
+	if (UnblockableActors.contains(actor->GetHandle()))
 	{
-		actor->RemoveSpell(Unblockable);
+		UnblockableActors.erase(actor->GetHandle());
 		return;
 	}
 	// insert first if doesnt exist
 	constexpr int comboSize = 2;
 	if (!ComboDatas.contains(actor->GetHandle()))
 	{
+		ComboDatas[actor->GetHandle()].currentIdx = 0;
+		ComboDatas[actor->GetHandle()].repeatCount = 0;
+		ComboDatas[actor->GetHandle()].timeLeft = 0.f;
 		ComboDatas[actor->GetHandle()].lastAttackDirs.resize(comboSize);
 	}
 	auto Iter = ComboDatas.find(actor->GetHandle());
-	// wait for the unblockable attack to end before starting new combo
-	if (Iter != ComboDatas.end() && !actor->HasSpell(Unblockable))
+	if (Iter != ComboDatas.end())
 	{
 		ComboData& data = Iter->second;
 		// assume we have enough space for 3 as it should be prereserved
-		data.lastAttackDirs[data.currentIdx] = PerkToDirection(GetDirectionalPerk(actor));
+		data.lastAttackDirs[data.currentIdx] = ActiveDirections[actor->GetHandle()];
 		if (data.size > 0)
 		{
 			int lastIdx = data.currentIdx - 1;
@@ -733,7 +782,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 		// clean up all combo stuff if we can apply it
 		if (data.size >= 2 && data.repeatCount == 0)
 		{
-			actor->AddSpell(Unblockable);
+			UnblockableActors.insert(actor->GetHandle());
 			data.currentIdx = 0;
 			data.size = 0;
 			data.repeatCount = 0;
