@@ -517,6 +517,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	// AI stuff
 	if (!actor->IsPlayerRef() && HasDirectionalPerks(actor))
 	{
+		UNUSED(delta);
 		AIHandler::GetSingleton()->RunActor(actor, delta);
 	}
 

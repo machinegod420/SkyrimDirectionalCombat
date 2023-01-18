@@ -13,7 +13,10 @@ bool AttackHandler::CanAttack(RE::Actor* actor)
 {
 	if (actor->IsPlayerRef())
 	{
-		return !PlayerLockout;
+		PlayerMtx.lock_shared();
+		bool ret = !PlayerLockout;
+		PlayerMtx.unlock_shared();
+		return ret;
 	}
 	else
 	{
@@ -63,20 +66,36 @@ void AttackHandler::AddLockout(RE::Actor* actor)
 
 void AttackHandler::LockoutPlayer()
 {
+	PlayerMtx.lock();
 	PlayerLockout = true;
 	PlayerLockoutTimer = DifficultySettings::AttackTimeoutTime;
+	PlayerMtx.unlock();
+}
+
+void AttackHandler::Cleanup()
+{
+	PlayerMtx.lock();
+	PlayerLockout = false;
+	PlayerMtx.unlock();
+
+	ChamberWindow.clear();
+	AttackLockout.clear();
+
 }
 
 void AttackHandler::Update(float delta)
 {
+	PlayerMtx.lock();
 	if (PlayerLockout)
 	{
 		PlayerLockoutTimer -= delta;
-		if (PlayerLockoutTimer < 0)
+		if (PlayerLockoutTimer < 0.f)
 		{
 			PlayerLockout = false;
 		}
 	}
+	PlayerMtx.unlock();
+
 	auto ChamberIter = ChamberWindow.begin();
 	while (ChamberIter != ChamberWindow.end())
 	{

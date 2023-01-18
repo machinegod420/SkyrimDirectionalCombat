@@ -28,11 +28,16 @@ public:
 	void AddNPCSmallLockout(RE::Actor* actor);
 
 	void LockoutPlayer();
-	bool IsPlayerLocked()
+	bool IsPlayerLocked() const
 	{
-		return PlayerLockout;
+		PlayerMtx.lock_shared();
+		bool ret = PlayerLockout;
+		PlayerMtx.unlock_shared();
+		return ret;
 	}
 	void Update(float delta);
+
+	void Cleanup();
 private:
 	phmap::parallel_flat_hash_map<RE::ActorHandle, float> ChamberWindow;
 	phmap::parallel_flat_hash_map<RE::ActorHandle, float> AttackLockout;
@@ -41,4 +46,5 @@ private:
 	// Player is special case cause it should be accessed way more
 	float PlayerLockoutTimer;
 	bool PlayerLockout;
+	mutable std::shared_mutex PlayerMtx;
 };

@@ -64,6 +64,7 @@ void OnPostLoad()
 	AIHandler::GetSingleton()->Cleanup();
 	DirectionHandler::GetSingleton()->Cleanup();
 	BlockHandler::GetSingleton()->Cleanup();
+	AttackHandler::GetSingleton()->Cleanup();
 	UIMenu::HideMenu();
 	UIMenu::ShowMenu();
 }

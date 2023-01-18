@@ -133,12 +133,6 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 
 				if (TargetDist < 70000)
 				{
-					// always attack if have perk
-					if (DirHandler->IsUnblockable(actor))
-					{
-						TryAttack(actor);
-					}
-
 					// keep track of target direction switches so we can try to snipe their opposing directions
 					// thsi sits outside the usual action cycle
 					if (DifficultyMap.contains(actor->GetHandle()))
@@ -174,6 +168,11 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 
 					if (TargetDist < 70000)
 					{
+						// always attack if have perk
+						if (DirHandler->IsUnblockable(actor))
+						{
+							TryAttack(actor);
+						}
 
 						if (actor->IsAttacking())
 						{
@@ -540,7 +539,7 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 	}
 	else 
 	{
-		actor->GetActorBase()->combatStyle->generalData.defensiveMult = 0.f;
+		actor->GetActorBase()->combatStyle->generalData.defensiveMult *= 0.1f;
 		actor->GetActorBase()->combatStyle->generalData.offensiveMult *= 1.5f;
 		actor->GetActorBase()->combatStyle->meleeData.powerAttackBlockingMult = 0.f;
 		actor->GetActorBase()->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.f;
@@ -721,8 +720,8 @@ void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percen
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 {
-	float base = DifficultyUpdateTimer[CalcAndInsertDifficulty(actor)];
-	float mistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio;
+	float base = DifficultyUpdateTimer.at(CalcAndInsertDifficulty(actor));
+	float mistakeRatio = DifficultyMap.at(actor->GetHandle()).mistakeRatio;
 	base += mistakeRatio;
 	// add jitter
 	// so ugly
@@ -735,8 +734,8 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 
 float AIHandler::CalcActionTimer(RE::Actor* actor)
 {
-	float base = DifficultyActionTimer[CalcAndInsertDifficulty(actor)];
-	float mistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio;
+	float base = DifficultyActionTimer.at(CalcAndInsertDifficulty(actor));
+	float mistakeRatio = DifficultyMap.at(actor->GetHandle()).mistakeRatio;
 	mistakeRatio *= 0.5;
 	base += mistakeRatio;
 	//float result = (float)(mt_rand()) / ((float)(mt_rand.max() / (AIJitterRange * 2.f)));
@@ -765,9 +764,6 @@ void AIHandler::Cleanup()
 	ActionQueue.clear();
 	UpdateTimer.clear();
 	DifficultyMap.clear();
-
-	DifficultyUpdateTimer.clear();
-	DifficultyActionTimer.clear();
 }
 
 
@@ -810,9 +806,15 @@ void AIHandler::Update(float delta)
 			{
 				actor->NotifyAnimationGraph("bashStart");
 			}
+			else if (ActionQueueIter->second.toDo == Actions::StartFeint)
+			{
+				TryAttack(actor);
+				
+			}
 			else if (ActionQueueIter->second.toDo == Actions::EndFeint)
 			{
 				AttackHandler::GetSingleton()->HandleFeint(actor);
+				// queue another attack
 			}
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor
