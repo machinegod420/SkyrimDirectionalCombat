@@ -11,7 +11,8 @@ float DifficultySettings::StaminaRegenMult = 0.2f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
-float DifficultySettings::StaminaCost = 0.14f;
+float DifficultySettings::StaminaCost = 0.1f;
+float DifficultySettings::WeaponWeightStaminaMult = 0.33f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -79,7 +80,8 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::AttackTimeoutTime = 1.0f;
 	DifficultySettings::AttacksCostStamina = true;
 	DifficultySettings::NonNPCStaggerMult = 2.f;
-	DifficultySettings::StaminaCost = 0.14f;
+	DifficultySettings::StaminaCost = 0.1f;
+	DifficultySettings::WeaponWeightStaminaMult = 0.33f;
 
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
@@ -565,9 +567,39 @@ float SettingsLoader::CalcDamage(float diff)
 void SettingsLoader::RebalanceWeapons()
 {
 	logger::info("Rebalancing weapons!");
-	for (auto& combat : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESCombatStyle>())
+	for (auto& actor : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESNPC>())
 	{
-		combat->generalData.meleeScoreMult *= 1.5f;
+		if (actor && actor->combatStyle)
+		{
+			// these have caps so do not break them
+
+			float meleeScoreMult = actor->combatStyle->generalData.meleeScoreMult * 2.f;
+			meleeScoreMult = std::min(9.99f, meleeScoreMult);
+			actor->combatStyle->generalData.meleeScoreMult = meleeScoreMult;
+
+			float defensiveMult = actor->combatStyle->generalData.defensiveMult * 0.15f;
+			defensiveMult = std::min(0.99f, defensiveMult);
+			actor->combatStyle->generalData.defensiveMult = defensiveMult;
+
+
+			float offensiveMult = actor->combatStyle->generalData.offensiveMult * 1.5f;
+			offensiveMult = std::min(0.99f, offensiveMult);
+			actor->combatStyle->generalData.offensiveMult = offensiveMult;
+
+
+			actor->combatStyle->meleeData.powerAttackBlockingMult = 0.f;
+			actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.f;
+			actor->combatStyle->meleeData.specialAttackMult = 0.f;
+
+			float circleMult = actor->combatStyle->closeRangeData.circleMult * 4.f;
+			circleMult = std::min(0.99f, circleMult);
+			actor->combatStyle->closeRangeData.circleMult = circleMult;
+
+			float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 4.f;
+			fallbackMult = std::min(0.99f, fallbackMult);
+			actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
+		}
+
 	}
 	for (auto& weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())
 	{

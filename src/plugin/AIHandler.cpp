@@ -6,6 +6,13 @@
 #include <random>
 
 static std::mt19937 mt_rand(0);
+static std::shared_mutex mt_randMtx;
+
+int GetRand()
+{
+	std::unique_lock lock(mt_randMtx);
+	return mt_rand();
+}
 
 constexpr int MaxDirs = 5;
 
@@ -64,6 +71,7 @@ void AIHandler::InitializeValues()
 
 void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
 {
+	std::unique_lock lock(ActionQueueMtx);
 	auto Iter = ActionQueue.find(actor->GetHandle());
 	// don't do anything if we already have the same action queued
 	if (Iter != ActionQueue.end() && Iter->second.toDo == toDo)
@@ -84,6 +92,7 @@ void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
 
 bool AIHandler::CanAct(RE::Actor* actor) const
 {
+	std::shared_lock lock(UpdateTimerMtx);
 	auto Iter = UpdateTimer.find(actor->GetHandle());
 	if (Iter != UpdateTimer.end())
 	{
@@ -95,6 +104,7 @@ bool AIHandler::CanAct(RE::Actor* actor) const
 
 void AIHandler::DidAttack(RE::Actor* actor)
 {
+	DifficultyMapMtx.lock();
 	if (DifficultyMap.contains(actor->GetHandle()))
 	{
 		int idx = DifficultyMap.at(actor->GetHandle()).currentAttackIdx;
@@ -107,12 +117,15 @@ void AIHandler::DidAttack(RE::Actor* actor)
 		//logger::info("{} next attack is {} idx {}", actor->GetName(), (int)DifficultyMap[actor->GetHandle()].attackPattern[idx], idx);
 		DifficultyMap[actor->GetHandle()].currentAttackIdx = idx;
 	}
+	DifficultyMapMtx.unlock();
 }
 
 void AIHandler::DidAct(RE::Actor* actor)
 {
 	// increment timer by difficulty
+	UpdateTimerMtx.lock();
 	UpdateTimer[actor->GetHandle()] = CalcUpdateTimer(actor);
+	UpdateTimerMtx.unlock();
 }
 
 void AIHandler::RunActor(RE::Actor* actor, float delta)
@@ -130,7 +143,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 
 				// Actions that occur outside of the normal tick (such as reactions) happen here
 				float TargetDist = target->GetPosition().GetSquaredDistance(actor->GetPosition());
-
+				DifficultyMapMtx.lock();
 				if (TargetDist < 70000)
 				{
 					// keep track of target direction switches so we can try to snipe their opposing directions
@@ -226,6 +239,10 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					else 
 					{
 						//logger::info("NPC out of range");
+						if (actor->IsBlocking())
+						{
+							actor->NotifyAnimationGraph("blockStop");
+						}
 						if (DifficultyMap.contains(actor->GetHandle()))
 						{
 							ReduceDifficulty(actor);
@@ -237,6 +254,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					DidAct(actor);
 				}
 
+				DifficultyMapMtx.unlock();
 			}
 		}
 	}
@@ -246,22 +264,30 @@ void AIHandler::SwitchTarget(RE::Actor * actor, RE::Actor * newTarget)
 {
 	RE::Actor * currentTarget = actor->GetActorRuntimeData().currentCombatTarget.get().get();
 	if (currentTarget)
-		{
-		float TargetDist = actor->GetPosition().GetSquaredDistance(currentTarget->GetPosition());
-		if (TargetDist > 70000)
+	{
+		if (newTarget->GetActorRuntimeData().currentCombatTarget == actor->GetHandle())
 		{
 			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
 		}
+		else
+		{
+			float TargetDist = actor->GetPosition().GetSquaredDistance(currentTarget->GetPosition());
+			if (TargetDist > 70000)
+			{
+				actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
+			}
+		}
+
 	}
 }
 
 
 bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 {
-	if (!DifficultyMap.contains(actor->GetHandle()))
-	{
-		CalcAndInsertDifficulty(actor);
-	}
+	std::unique_lock lock(DifficultyMapMtx);
+
+	CalcAndInsertDifficulty(actor);
+
 
 	if (DirectionHandler::GetSingleton()->GetCurrentDirection(actor) == 
 		DifficultyMap[actor->GetHandle()].attackPattern[DifficultyMap[actor->GetHandle()].currentAttackIdx])
@@ -299,6 +325,7 @@ bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 
 void AIHandler::TryRiposte(RE::Actor* actor)
 {
+	std::unique_lock lock(DifficultyMapMtx);
 	int mod = (int)CalcAndInsertDifficulty(actor);
 	// 12 - 27 range
 	// 6 - 13
@@ -316,6 +343,7 @@ void AIHandler::TryRiposte(RE::Actor* actor)
 
 void AIHandler::TryBlock(RE::Actor* actor, RE::Actor* attacker)
 {
+	std::unique_lock lock(DifficultyMapMtx);
 	int mod = (int)CalcAndInsertDifficulty(actor);
 	mod += 3;
 	mod *= 4; 
@@ -333,10 +361,8 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 {
 	// direction match
 	// really follow the last direction tracked then update it
-	if (!DifficultyMap.contains(actor->GetHandle()))
-	{
-		CalcAndInsertDifficulty(actor);
-	}
+	int mod = (int)CalcAndInsertDifficulty(actor);
+
 	// follow last tracked direction isntead of the targets current direction
 	// the AI is too easy to confuse with this though, since they can lag behind a bit
 	Directions ToCounter = DifficultyMap[actor->GetHandle()].lastDirectionTracked;
@@ -406,7 +432,7 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 
 	// small chance to correctly choose as well
 	int random = mt_rand() % 100;
-	if (random < (int)CalcAndInsertDifficulty(actor))
+	if (random < mod)
 	{
 		ToCounter = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
 	}
@@ -512,18 +538,11 @@ void AIHandler::LoadCachedAttack(RE::Actor* actor)
 {
 	if (!actor->GetActorRuntimeData().currentProcess->high->attackData)
 	{
-		if (DifficultyMap.contains(actor->GetHandle()))
-		{
-			actor->GetActorRuntimeData().currentProcess->high->attackData =
-				DifficultyMap[actor->GetHandle()].cachedBasicAttackData;
-		}
-		else 
-		{
-			// seems strange at this point that difficulty is not already created
-			CalcAndInsertDifficulty(actor);
-			actor->GetActorRuntimeData().currentProcess->high->attackData =
-				DifficultyMap[actor->GetHandle()].cachedBasicAttackData;
-		}
+		// seems strange at this point that difficulty is not already created
+		CalcAndInsertDifficulty(actor);
+		actor->GetActorRuntimeData().currentProcess->high->attackData =
+			DifficultyMap[actor->GetHandle()].cachedBasicAttackData;
+
 	}
 }
 
@@ -539,12 +558,6 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 	}
 	else 
 	{
-		actor->GetActorBase()->combatStyle->generalData.defensiveMult *= 0.1f;
-		actor->GetActorBase()->combatStyle->generalData.offensiveMult *= 1.5f;
-		actor->GetActorBase()->combatStyle->meleeData.powerAttackBlockingMult = 0.f;
-		actor->GetActorBase()->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.f;
-		actor->GetActorBase()->combatStyle->meleeData.specialAttackMult = 0.f;
-		actor->GetActorBase()->SetCombatStyle(actor->GetActorBase()->combatStyle);
 		// difficulty is only a factor of player level
 		uint16_t MyLvl = actor->GetLevel();
 		uint16_t PlayerLvl = RE::PlayerCharacter::GetSingleton()->GetLevel();
@@ -625,11 +638,10 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 
 void AIHandler::SignalBadThing(RE::Actor* actor, Directions attackDir)
 {
-	if (!DifficultyMap.contains(actor->GetHandle()))
-	{
-		// this will populate the map
-		CalcAndInsertDifficulty(actor);
-	}
+	DifficultyMapMtx.lock();
+	// this will populate the map
+	CalcAndInsertDifficulty(actor);
+
 	auto Iter = DifficultyMap.find(actor->GetHandle());
 	Iter->second.lastDirectionsEncountered.push_back(attackDir);
 	// update what the last direction was cause we just got hit
@@ -647,15 +659,15 @@ void AIHandler::SignalBadThing(RE::Actor* actor, Directions attackDir)
 	NewMistakeRatio = std::min(NewMistakeRatio, 0.16f);
 	NewMistakeRatio = std::max(NewMistakeRatio, -0.16f);
 	DifficultyMap[actor->GetHandle()].mistakeRatio = NewMistakeRatio;
+	DifficultyMapMtx.unlock();
 }
 
 void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 {
-	if (!DifficultyMap.contains(actor->GetHandle()))
-	{
-		// this will populate the map
-		CalcAndInsertDifficulty(actor);
-	}
+	DifficultyMapMtx.lock();
+	// this will populate the map
+	CalcAndInsertDifficulty(actor);
+
 	auto Iter = DifficultyMap.find(actor->GetHandle());
 	Iter->second.lastDirectionsEncountered.push_back(attackedDir);
 	size_t Num = Iter->second.lastDirectionsEncountered.size();
@@ -664,7 +676,7 @@ void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 		Iter->second.lastDirectionsEncountered.erase(Iter->second.lastDirectionsEncountered.begin());
 	}
 	// if the player landed complex attack patterns then it gets easier
-	std::unordered_set<Directions> dirs;
+	phmap::parallel_flat_hash_set<Directions> dirs;
 	for (auto dir : Iter->second.lastDirectionsEncountered)
 	{
 		dirs.insert(dir);
@@ -678,6 +690,7 @@ void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 	NewMistakeRatio = std::min(NewMistakeRatio, 0.16f);
 	NewMistakeRatio = std::max(NewMistakeRatio, -0.16f);
 	DifficultyMap[actor->GetHandle()].mistakeRatio = NewMistakeRatio;
+	DifficultyMapMtx.unlock();
 }
 
 void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier)
@@ -720,7 +733,9 @@ void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percen
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 {
+	DifficultyUpdateTimerMtx.lock_shared();
 	float base = DifficultyUpdateTimer.at(CalcAndInsertDifficulty(actor));
+	DifficultyUpdateTimerMtx.unlock_shared();
 	float mistakeRatio = DifficultyMap.at(actor->GetHandle()).mistakeRatio;
 	base += mistakeRatio;
 	// add jitter
@@ -734,9 +749,11 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 
 float AIHandler::CalcActionTimer(RE::Actor* actor)
 {
+	DifficultyActionTimerMtx.lock_shared();
 	float base = DifficultyActionTimer.at(CalcAndInsertDifficulty(actor));
+	DifficultyActionTimerMtx.unlock_shared();
 	float mistakeRatio = DifficultyMap.at(actor->GetHandle()).mistakeRatio;
-	mistakeRatio *= 0.5;
+	//mistakeRatio *= 0.5;
 	base += mistakeRatio;
 	//float result = (float)(mt_rand()) / ((float)(mt_rand.max() / (AIJitterRange * 2.f)));
 	//result -= AIJitterRange;
@@ -761,15 +778,24 @@ RE::NiPointer<RE::BGSAttackData> AIHandler::FindActorAttackData(RE::Actor* actor
 
 void AIHandler::Cleanup()
 {
+	ActionQueueMtx.lock();
 	ActionQueue.clear();
+	ActionQueueMtx.unlock();
+
+	UpdateTimerMtx.lock();
 	UpdateTimer.clear();
+	UpdateTimerMtx.unlock();
+
+	DifficultyMapMtx.lock();
 	DifficultyMap.clear();
+	DifficultyMapMtx.unlock();
 }
 
 
 void AIHandler::Update(float delta)
 {
 	// two seperate actions to handle
+	ActionQueueMtx.lock();
 	auto ActionQueueIter = ActionQueue.begin();
 	while (ActionQueueIter != ActionQueue.end())
 	{
@@ -826,7 +852,9 @@ void AIHandler::Update(float delta)
 		}
 		ActionQueueIter++;
 	}
+	ActionQueueMtx.unlock();
 
+	UpdateTimerMtx.lock();
 	// spread out AI actions to control difficulty
 	auto UpdateTimerIter = UpdateTimer.begin();
 	while (UpdateTimerIter != UpdateTimer.end())
@@ -857,25 +885,7 @@ void AIHandler::Update(float delta)
 		}
 		UpdateTimerIter++;
 	}
-
-	// This is mostly cleanup since actors die/get unloaded
-	// Theorectically this may memory leak
-	auto DifficultyMapIter = DifficultyMap.begin();
-	while (DifficultyMapIter != DifficultyMap.end())
-	{
-		if (!DifficultyMapIter->first)
-		{
-			DifficultyMapIter = DifficultyMap.erase(DifficultyMapIter);
-			continue;
-		}
-		RE::Actor* actor = DifficultyMapIter->first.get().get();
-		if (!actor)
-		{
-			DifficultyMapIter = DifficultyMap.erase(DifficultyMapIter);
-			continue;
-		}
-		DifficultyMapIter++;
-	}
+	UpdateTimerMtx.unlock();
 }
 
 

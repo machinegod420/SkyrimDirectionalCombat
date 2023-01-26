@@ -83,7 +83,7 @@ namespace Hooks
 			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 			{
 				hitData.stagger = 0;
-				BlockHandler::GetSingleton()->ApplyBlockDamage(target, hitData);
+				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 				// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 				// riposte instead of being gambled
 
@@ -116,11 +116,6 @@ namespace Hooks
 				{
 					// attack successfully landed, so the attacker gets to add to their combo
 					DirectionHandler::GetSingleton()->AddCombo(attacker);
-				}
-				if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
-				{
-					// mostly prevents follow ups
-					AIHandler::GetSingleton()->TryBlock(target, attacker);
 				}
 				return;
 			}
@@ -195,14 +190,11 @@ namespace Hooks
 			return;
 		}
 		auto currentProcess = a_this->GetActorRuntimeData().currentProcess;
-		if ((!currentProcess || !currentProcess->InHighProcess()) && !a_this->IsPlayerRef()) 
+		if ((!currentProcess || !currentProcess->InHighProcess())) 
 		{
 			return;
 		}
-		if (!a_this->GetActorRuntimeData().combatController)
-		{
-			return;
-		}
+
 		if (DifficultySettings::AttacksCostStamina)
 		{
 			if (a_this->IsBlocking() || a_this->IsAttacking())
@@ -503,8 +495,13 @@ namespace Hooks
 			{
 				unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
 				repeatCombos = std::min(3u, repeatCombos);
-				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, 
-					actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * -StaminaPowerTable[repeatCombos]);
+				float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[repeatCombos];
+				auto Equipped = actor->GetEquippedObject(false);
+				if (Equipped)
+				{
+					staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
+				}
+				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 
 			}
 

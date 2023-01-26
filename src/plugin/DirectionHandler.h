@@ -45,14 +45,17 @@ public:
 	Directions PerkToDirection(RE::SpellItem* perk) const;
 	inline Directions GetCurrentDirection(RE::Actor* actor) const
 	{
+		Directions ret = Directions::TR;
+		ActiveDirectionsMtx.lock_shared();
 		auto Iter = ActiveDirections.find(actor->GetHandle());
 		if (Iter != ActiveDirections.end())
 		{
-			return Iter->second;
+			ret = Iter->second;
 		}
-		return Directions::TR;
+		ActiveDirectionsMtx.unlock_shared();
+		return ret;
 	}
-	void RemoveDirectionalPerks(RE::Actor* actor);
+	void RemoveDirectionalPerks(RE::ActorHandle handle);
 	void UIDrawAngles(RE::Actor* actor);
 	bool DetermineMirrored(RE::Actor* actor);
 
@@ -64,37 +67,52 @@ public:
 	void AddCombo(RE::Actor* actor);
 	inline unsigned GetRepeatCount(RE::Actor* actor) const
 	{
+		unsigned ret = 0;
+		ComboDatasMtx.lock_shared();
 		auto Iter = ComboDatas.find(actor->GetHandle());
 		if (Iter != ComboDatas.end())
 		{
-			return Iter->second.repeatCount;
+			ret = Iter->second.repeatCount;
 		}
-		return 0;
+		ComboDatasMtx.unlock_shared();
+		return ret;
 	}
 	inline bool IsUnblockable(RE::Actor* actor) const
 	{
-		return UnblockableActors.contains(actor->GetHandle());
+		bool ret = false;
+		UnblockableActorsMtx.lock_shared();
+		ret = UnblockableActors.contains(actor->GetHandle());
+		UnblockableActorsMtx.unlock_shared();
+		return ret;
 	}
 	inline bool HasImperfectParry(RE::Actor* actor) const
 	{
-		return ImperfectParry.contains(actor->GetHandle());
+		bool ret = false;
+		UnblockableActorsMtx.lock_shared();
+		ret = ImperfectParry.contains(actor->GetHandle());
+		UnblockableActorsMtx.unlock_shared();
+		return ret;
 	}
 
 	void Cleanup();
 
-	void StartedAttackWindow(RE::Actor* actor)
+	inline void StartedAttackWindow(RE::Actor* actor)
 	{
 		SendAnimationEvent(actor);
+		InAttackWinMtx.lock();
 		InAttackWin.insert(actor->GetHandle());
+		InAttackWinMtx.unlock();
 	}
 
-	void EndedAttackWindow(RE::Actor* actor)
+	inline void EndedAttackWindow(RE::Actor* actor)
 	{
 		SendAnimationEvent(actor);
+		InAttackWinMtx.lock();
 		InAttackWin.erase(actor->GetHandle());
+		InAttackWinMtx.unlock();
 	}
 private:
-	void CleanupActor(RE::Actor* actor);
+	void CleanupActor(RE::ActorHandle actor);
 	RE::SpellItem* TR;
 	RE::SpellItem* TL;
 	RE::SpellItem* BL;
@@ -123,12 +141,14 @@ private:
 		float timeLeft;
 	};
 	// The direction switches are queued as we don't want instant guard switches
-	phmap::parallel_flat_hash_map<RE::ActorHandle, DirectionSwitch> DirectionTimers;
+	phmap::flat_hash_map<RE::ActorHandle, DirectionSwitch> DirectionTimers;
+	mutable std::shared_mutex DirectionTimersMtx;
 
 	// The transition is slower than the actual guard break time since it looks better,
 	// so we need to queue the forceidle events as skyrim does not allow blending multiple animations
 	// during blending another animation transition
-	phmap::parallel_flat_hash_map<RE::ActorHandle, std::queue<float>> AnimationTimer;
+	phmap::flat_hash_map<RE::ActorHandle, std::queue<float>> AnimationTimer;
+	mutable std::shared_mutex AnimationTimerMtx;
 
 	struct ComboData
 	{
@@ -141,19 +161,31 @@ private:
 	};
 
 	// Metadata to handle combos and punishing repeated attacks
-	phmap::parallel_flat_hash_map<RE::ActorHandle, ComboData> ComboDatas;
+	phmap::flat_hash_map<RE::ActorHandle, ComboData> ComboDatas;
+	mutable std::shared_mutex ComboDatasMtx;
 
 	// To switch directions after the hitframe but still in attack state for fluid animations
 	// set uses hash so is fast?
-	phmap::parallel_flat_hash_set<RE::ActorHandle> InAttackWin;
+	phmap::flat_hash_set<RE::ActorHandle> InAttackWin;
+	mutable std::shared_mutex InAttackWinMtx;
 
 	// Have to record directions here
 	// Because of the way skyrim handles spells, we need these to be totally synchronous
-	phmap::parallel_flat_hash_map<RE::ActorHandle, Directions> ActiveDirections;
+	phmap::flat_hash_map<RE::ActorHandle, Directions> ActiveDirections;
+	mutable std::shared_mutex ActiveDirectionsMtx;
 
 	// Set to determine who is unblockable
-	phmap::parallel_flat_hash_set<RE::ActorHandle> UnblockableActors;
+	phmap::flat_hash_set<RE::ActorHandle> UnblockableActors;
+	mutable std::shared_mutex UnblockableActorsMtx;
 
 	// Determine who has an imperfect parry
-	phmap::parallel_flat_hash_set<RE::ActorHandle> ImperfectParry;
+	phmap::flat_hash_set<RE::ActorHandle> ImperfectParry;
+	mutable std::shared_mutex ImperfectParryMtx;
+
+	phmap::flat_hash_set<RE::ActorHandle> ToAdd;
+	mutable std::shared_mutex ToAddMtx;
+
+	phmap::flat_hash_set<RE::ActorHandle> ToRemove;
+	mutable std::shared_mutex ToRemoveMtx;
+
 };

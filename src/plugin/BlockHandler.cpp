@@ -4,9 +4,12 @@
 #include "SettingsLoader.h"
 #include "FXHandler.h"
 
+constexpr float MultiattackTimer = 5.f;
+
 BlockHandler::BlockHandler()
 {
 	NPCKeyword = nullptr;
+	MultiAttackerFX = nullptr;
 }
 
 void BlockHandler::Initialize()
@@ -16,17 +19,37 @@ void BlockHandler::Initialize()
 		RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 		NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
 	}
+	if (!MultiAttackerFX)
+	{
+	}
 }
 
 
-void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
+void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData& hitData)
 {
 	float Damage = hitData.totalDamage;
-	float ActorStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+	float ActorStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 	float FinalDamage = 0.f;
 
+	// weapon stamina modifiers
+	auto AttackerWeapon = attacker->GetEquippedObject(false);
+	float AttackerWeaponWeight = AttackerWeapon ? AttackerWeapon->GetWeight() : 0.f;
+	auto DefenderWeapon = target->GetEquippedObject(false);
+	float DefenderWeaponWeight = DefenderWeapon ? DefenderWeapon->GetWeight() : 0.f;
+	auto DefenderShield = target->GetEquippedObject(true);
+	bool hasShield = DefenderShield ? DefenderShield->IsArmor() : false;
+	if (!hasShield && AttackerWeaponWeight > DefenderWeaponWeight)
+	{
+		Damage += (AttackerWeaponWeight - DefenderWeaponWeight);
+	}
+	float a = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock);
+	a = std::min(a, 99.f);
+	float skillMod = 0.6f + (0.2f) * ((100.f - a) / 100.f);
+
+	Damage *= skillMod;
+
 	//take damage if it was imperfect as well as increased stamina damage
-	if (DirectionHandler::GetSingleton()->HasImperfectParry(actor))
+	if (DirectionHandler::GetSingleton()->HasImperfectParry(target))
 	{
 		FinalDamage = Damage * 0.5f;
 		Damage *= 1.5f;
@@ -36,17 +59,14 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* actor, RE::HitData& hitData)
 	if (Damage > ActorStamina)
 	{
 		FinalDamage = Damage - ActorStamina;
-		if (actor->IsBlocking())
+		if (target->IsBlocking())
 		{
-			CauseStagger(actor, hitData.aggressor.get().get(), 1.f);
+			CauseStagger(target, hitData.aggressor.get().get(), 1.f);
 		}
 		FinalDamage *= DifficultySettings::MeleeDamageMult;
 	}
-	hitData.attackDataSpell = nullptr;
-	hitData.criticalEffect = nullptr;
-	hitData.attackData->data.attackSpell = nullptr;
 	
-	actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
+	target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
 	hitData.totalDamage = FinalDamage;
 
 }
@@ -56,8 +76,9 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	// make sure we can stagger them
 	// todo: make sure we can only stagger NPCs since the staggering of trolls and shit totally breaks the game
 	// since they can't block
-	bool ShouldStagger = !StaggerTimer.contains(actor->GetHandle());
 
+	StaggerTimerMtx.lock();
+	bool ShouldStagger = !StaggerTimer.contains(actor->GetHandle());
 	if (force)
 	{
 		ShouldStagger = true;
@@ -81,9 +102,10 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		}
 		
 	}
+	StaggerTimerMtx.unlock();
 }
 
-void BlockHandler::CauseRecoil(RE::Actor* actor)
+void BlockHandler::CauseRecoil(RE::Actor* actor) const
 {
 	actor->NotifyAnimationGraph("recoilLargeStart");
 }
@@ -100,11 +122,13 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		{
 			if (!target->IsPlayerRef())
 			{
+				// AI stuff here
 				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
 				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 				{
 					AIHandler::GetSingleton()->SignalBadThing(target, dir);
 					AIHandler::GetSingleton()->SwitchTarget(target, attacker);
+					AIHandler::GetSingleton()->TryBlock(target, attacker);
 				}
 				
 			}
@@ -113,7 +137,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	else
 	{
 		// wnot sure why we have to reimpelment recoil here
-		attacker->NotifyAnimationGraph("recoilStart");
+		//attacker->NotifyAnimationGraph("recoilStart");
 		// succesffully blocked so give hyperarmor
 		GiveHyperarmor(target);
 
@@ -122,9 +146,46 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
 			AIHandler::GetSingleton()->TryRiposte(target);
 			AIHandler::GetSingleton()->SignalGoodThing(target, 
-				DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
+			DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
 		}
 	}
+}
+
+void BlockHandler::AddNewAttacker(RE::Actor* actor, RE::Actor* attacker)
+{
+	if (!actor->IsHostileToActor(attacker))
+	{
+		return;
+	}
+	// only directional perks have this
+	if (!DirectionHandler::GetSingleton()->HasDirectionalPerks(actor))
+	{
+		return;
+	}
+	std::unique_lock lock(AttackersMapMtx);
+	if (actor->GetActorRuntimeData().currentCombatTarget)
+	{
+		if (attacker->GetHandle() != actor->GetActorRuntimeData().currentCombatTarget)
+		{
+			AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
+			AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+		}
+	}
+	else
+	{
+		AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
+		AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+	}
+}
+
+int BlockHandler::GetNumberAttackers(RE::Actor* actor) const
+{
+	std::shared_lock lock(AttackersMapMtx);
+	if (AttackersMap.contains(actor->GetHandle()))
+	{
+		return (int)AttackersMap.at(actor->GetHandle()).attackers.size();
+	}
+	return 0;
 }
 
 bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
@@ -138,7 +199,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		if (!targetStaggering && !attackerStaggering)
 		{
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
-			BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
+			CauseStagger(attacker, target, 1.f);
 			return true;
 		}
 	}
@@ -147,11 +208,26 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 
 void BlockHandler::GiveHyperarmor(RE::Actor* actor)
 {
+	HyperArmorTimerMtx.lock();
 	HyperArmorTimer[actor->GetHandle()] = DifficultySettings::HyperarmorTimer;
+	HyperArmorTimerMtx.unlock();
+}
+
+void BlockHandler::RemoveActor(RE::ActorHandle actor)
+{
+	HyperArmorTimerMtx.lock();
+	HyperArmorTimer.erase(actor);
+	HyperArmorTimerMtx.unlock();
+
+	StaggerTimerMtx.lock();
+	StaggerTimer.erase(actor);
+	StaggerTimerMtx.unlock();
+
 }
 
 void BlockHandler::Update(float delta)
 {
+	StaggerTimerMtx.lock();
 	auto Iter = StaggerTimer.begin();
 	while (Iter != StaggerTimer.end())
 	{
@@ -175,7 +251,9 @@ void BlockHandler::Update(float delta)
 		}
 		Iter++;
 	}
+	StaggerTimerMtx.unlock();
 
+	HyperArmorTimerMtx.lock();
 	auto HAIter = HyperArmorTimer.begin();
 	while (HAIter != HyperArmorTimer.end())
 	{
@@ -199,4 +277,37 @@ void BlockHandler::Update(float delta)
 		}
 		HAIter++;
 	}
+	HyperArmorTimerMtx.unlock();
+
+	AttackersMapMtx.lock();
+	auto AttackersIter = AttackersMap.begin();
+	while (AttackersIter != AttackersMap.end())
+	{
+		if (!AttackersIter->first)
+		{
+			AttackersIter = AttackersMap.erase(AttackersIter);
+			continue;
+		}
+		RE::Actor* actor = AttackersIter->first.get().get();
+		if (!actor)
+		{
+			AttackersIter = AttackersMap.erase(AttackersIter);
+			continue;
+		}
+		AttackersIter->second.timeLeft -= delta;
+		if (AttackersIter->second.timeLeft <= 0)
+		{
+			if (AttackersIter->second.attackers.size() > 0)
+			{
+				AttackersIter->second.attackers.erase(AttackersIter->second.attackers.begin());
+				AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+			}
+			if (AttackersIter->second.attackers.size() == 0)
+			{
+				AttackersMap.erase(AttackersIter);
+			}
+		}
+		AttackersIter++;
+	}
+	AttackersMapMtx.unlock();
 }

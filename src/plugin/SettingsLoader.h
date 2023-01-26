@@ -16,6 +16,7 @@ struct DifficultySettings
 	static bool AttacksCostStamina;
 	static float NonNPCStaggerMult;
 	static float StaminaCost;
+	static float WeaponWeightStaminaMult;
 };
 
 struct Settings

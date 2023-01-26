@@ -16,25 +16,52 @@ public:
 		return std::addressof(obj);
 	}
 	void Update(float delta);
-	void ApplyBlockDamage(RE::Actor* actor, RE::HitData &hitData);
+	void ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData &hitData);
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
-	void CauseRecoil(RE::Actor* actor);
+	void CauseRecoil(RE::Actor* actor) const;
 	void GiveHyperarmor(RE::Actor* actor);
-	inline bool HasHyperarmor(RE::Actor* actor)
+	inline bool HasHyperarmor(RE::Actor* actor) const
 	{
-		return HyperArmorTimer.contains(actor->GetHandle());
+		HyperArmorTimerMtx.lock_shared();
+		bool ret = HyperArmorTimer.contains(actor->GetHandle());
+		HyperArmorTimerMtx.unlock_shared();
+		return ret;
 	}
 	void HandleBlock(RE::Actor* attacker, RE::Actor* target);
 	bool HandleMasterstrike(RE::Actor* attacker, RE::Actor* target);
+
+	void AddNewAttacker(RE::Actor* actor, RE::Actor* attacker);
+	int GetNumberAttackers(RE::Actor* actor) const;
+
+	void RemoveActor(RE::ActorHandle actor);
 	
 	void Cleanup()
 	{
+		StaggerTimerMtx.lock();
 		StaggerTimer.clear();
+		StaggerTimerMtx.unlock();
+
+		HyperArmorTimerMtx.lock();
 		HyperArmorTimer.clear();
+		HyperArmorTimerMtx.unlock();
 	}
 private:
 	RE::BGSKeyword* NPCKeyword;
-	phmap::parallel_flat_hash_map<RE::ActorHandle, float> StaggerTimer;
+	RE::SpellItem* MultiAttackerFX;
+
+	phmap::flat_hash_map<RE::ActorHandle, float> StaggerTimer;
+	mutable std::shared_mutex StaggerTimerMtx;
 	
-	phmap::parallel_flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
+	phmap::flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
+	mutable std::shared_mutex HyperArmorTimerMtx;
+
+	struct MultipleAttackers
+	{
+		// must NOT be current target
+		phmap::flat_hash_set<RE::ActorHandle> attackers;
+		// time before we remove an attacker
+		float timeLeft;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, MultipleAttackers> AttackersMap;
+	mutable std::shared_mutex AttackersMapMtx;
 };

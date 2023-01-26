@@ -48,36 +48,55 @@ public:
 	}
 	void Update(float delta);
 	void RunActor(RE::Actor* actor, float delta);
+	// called from other thread
 	void TryRiposte(RE::Actor* actor);
 	void TryBlock(RE::Actor* actor, RE::Actor* attacker);
-	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force);
+	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
+	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
+	void SignalBadThing(RE::Actor* actor, Directions attackedDir);
+	void SwitchTarget(RE::Actor* actor, RE::Actor* newTarget);
+
+	void DidAttack(RE::Actor* actor);
+	//
+
 	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target);
 	void TryAttack(RE::Actor* actor);
 	
-	void SwitchToNextAttack(RE::Actor* actor);
-	void SwitchTarget(RE::Actor* actor, RE::Actor* newTarget);
+
+	
 	bool CanAct(RE::Actor* actor) const;
-	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
-	void DidAttack(RE::Actor* actor);
+
+
+	// WARNING - lower level function do not lock
 	Difficulty CalcAndInsertDifficulty(RE::Actor* actor);
-
-
-	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
-	void SignalBadThing(RE::Actor* actor, Directions attackedDir);
-	void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
-
+	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force);
+	inline void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
 	void ReduceDifficulty(RE::Actor* actor);
-
-	// if something stopped combat, make sure they get removed from the map
-	void RemoveActor(RE::Actor* actor)
-	{
-		DifficultyMap.erase(actor->GetHandle());
-		UpdateTimer.erase(actor->GetHandle());
-		ActionQueue.erase(actor->GetHandle());
-	}
+	void SwitchToNextAttack(RE::Actor* actor);
 
 	// Load attackdata so our attackstart event is processed correctly as an attack
 	void LoadCachedAttack(RE::Actor* actor);
+	//
+
+
+
+	// if something stopped combat, make sure they get removed from the map
+	void RemoveActor(RE::ActorHandle actor)
+	{
+		DifficultyActionTimerMtx.lock();
+		DifficultyMap.erase(actor);
+		DifficultyActionTimerMtx.unlock();
+
+		UpdateTimerMtx.lock();
+		UpdateTimer.erase(actor);
+		UpdateTimerMtx.unlock();
+
+		ActionQueueMtx.lock();
+		ActionQueue.erase(actor);
+		ActionQueueMtx.unlock();
+	}
+
+
 
 	void Cleanup();
 private:
@@ -121,7 +140,7 @@ private:
 		RE::ActorHandle currentTarget;
 
 		// percent chance it may switch to a specific direction to emulate anticipation of attacks
-		phmap::parallel_flat_hash_map<Directions, int> directionChangeChance;
+		phmap::flat_hash_map<Directions, int> directionChangeChance;
 
 		// AI should attack in specific patterns, just like people do
 		// todo: use uint16_t, every 2 bits represents a direction for fast access and generation of patterns
@@ -132,10 +151,19 @@ private:
 
 	RE::NiPointer<RE::BGSAttackData> FindActorAttackData(RE::Actor* actor);
 
-	phmap::parallel_flat_hash_map<RE::ActorHandle,Action> ActionQueue;
-	phmap::parallel_flat_hash_map<RE::ActorHandle, float> UpdateTimer;
-	phmap::parallel_flat_hash_map<RE::ActorHandle, AIDifficulty> DifficultyMap;
+	phmap::flat_hash_map<RE::ActorHandle,Action> ActionQueue;
+	mutable std::shared_mutex ActionQueueMtx;
 
-	phmap::parallel_flat_hash_map<Difficulty, float> DifficultyUpdateTimer;
-	phmap::parallel_flat_hash_map<Difficulty, float> DifficultyActionTimer;
+	phmap::flat_hash_map<RE::ActorHandle, float> UpdateTimer;
+	mutable std::shared_mutex UpdateTimerMtx;
+
+	phmap::flat_hash_map<RE::ActorHandle, AIDifficulty> DifficultyMap;
+	mutable std::shared_mutex DifficultyMapMtx;
+
+	phmap::flat_hash_map<Difficulty, float> DifficultyUpdateTimer;
+	mutable std::shared_mutex DifficultyUpdateTimerMtx;
+
+	phmap::flat_hash_map<Difficulty, float> DifficultyActionTimer; 
+	mutable std::shared_mutex DifficultyActionTimerMtx;
+
 };

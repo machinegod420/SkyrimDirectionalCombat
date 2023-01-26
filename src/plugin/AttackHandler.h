@@ -7,6 +7,11 @@
 class AttackHandler
 {
 public:
+	AttackHandler()
+	{
+		PlayerLockout = false;
+		PlayerLockoutTimer = 0.f;
+	}
 	static AttackHandler* GetSingleton()
 	{
 		static AttackHandler obj;
@@ -37,11 +42,15 @@ public:
 	}
 	void Update(float delta);
 
+	void RemoveActor(RE::ActorHandle actor);
+
 	void Cleanup();
 private:
-	phmap::parallel_flat_hash_map<RE::ActorHandle, float> ChamberWindow;
-	phmap::parallel_flat_hash_map<RE::ActorHandle, float> AttackLockout;
-	
+	phmap::flat_hash_map<RE::ActorHandle, float> ChamberWindow;
+	mutable std::shared_mutex ChamberWindowMtx;
+
+	phmap::flat_hash_map<RE::ActorHandle, float> AttackLockout;
+	mutable std::shared_mutex AttackLockoutMtx;
 
 	// Player is special case cause it should be accessed way more
 	float PlayerLockoutTimer;

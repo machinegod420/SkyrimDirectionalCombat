@@ -2,7 +2,7 @@
 #include "AIHandler.h"
 #include "SettingsLoader.h"
 #include "AttackHandler.h"
-
+#include "BlockHandler.h"
 
 // in seconds
 // slow time should be a multiple as it affects animation events and we don't want to get stuck in the wrong idle
@@ -26,7 +26,11 @@ void DirectionHandler::Initialize()
 
 bool DirectionHandler::HasDirectionalPerks(RE::Actor* actor) const
 {
-	return (ActiveDirections.contains(actor->GetHandle()));
+	bool ret = false;
+	ActiveDirectionsMtx.lock_shared();
+	ret = (ActiveDirections.contains(actor->GetHandle()));
+	ActiveDirectionsMtx.unlock_shared();
+	return ret;
 }
 
 bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) const
@@ -36,11 +40,14 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 	{
 		return false;
 	}
+
+	std::shared_lock lock(ActiveDirectionsMtx);
 	if (!ActiveDirections.contains(target->GetHandle()) || !ActiveDirections.contains(attacker->GetHandle()))
 	{
 		return false;
 	}
 	// opposite side angle
+
 	if(ActiveDirections.at(attacker->GetHandle()) == Directions::TR)
 	{
 		return ActiveDirections.at(target->GetHandle()) == Directions::TL;
@@ -76,6 +83,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 			return;
 		}
 	}
+	ActiveDirectionsMtx.lock_shared();
 	if(ActiveDirections.contains(actor->GetHandle()))
 	{
 		UIDirectionState state = UIDirectionState::Default;
@@ -129,11 +137,11 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 
 		// since this waits for a mutex we add a task graph command for it
 		SKSE::GetTaskInterface()->AddTask([=] {
-			UIMenu::AddDrawCommand(Position, ActiveDirections[actor->GetHandle()], Mirror, state, hostileState, FirstPerson, Lockout);
+			UIMenu::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout);
 		});
 		
 	}
-
+	ActiveDirectionsMtx.unlock_shared();
 }
 
 bool DirectionHandler::DetermineMirrored(RE::Actor* actor)
@@ -225,6 +233,7 @@ Directions DirectionHandler::PerkToDirection(RE::SpellItem* perk) const
 
 bool DirectionHandler::CanSwitch(RE::Actor* actor)
 {
+	std::shared_lock lock(InAttackWinMtx);
 	return !(actor->IsAttacking() && !InAttackWin.contains(actor->GetHandle()));
 }
 
@@ -238,7 +247,9 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 	//actor->GetActorRuntimeData().addedSpells.push_back(DirectionSpell);
 
 	// This is why everything got switched to a map that this plugin maintains. Skyrim behavior does not support or is too unpredictable
+	ActiveDirectionsMtx.lock();
 	ActiveDirections[actor->GetHandle()] = dir;
+	ActiveDirectionsMtx.unlock();
 
 	RE::SpellItem* DirectionSpell = GetDirectionalPerk(actor);
 	RE::SpellItem* SpellToAdd = DirectionToPerk(dir);
@@ -271,7 +282,9 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 	// if blocking they have an imperfect parry
 	if (actor->IsBlocking())
 	{
+		ImperfectParryMtx.lock();
 		ImperfectParry.insert(actor->GetHandle());
+		ImperfectParryMtx.unlock();
 	}
 	
 
@@ -279,44 +292,52 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 
 void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
 {
-	if (ActiveDirections.at(actor->GetHandle()) == Directions::TR)
+	Directions dir = GetCurrentDirection(actor);
+
+	if (dir == Directions::TR)
 	{
 		WantToSwitchTo(actor, Directions::TL);
 	}
-	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BR)
+	else if (dir == Directions::BR)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
 }
 void DirectionHandler::SwitchDirectionRight(RE::Actor* actor)
 {
-	if (ActiveDirections.at(actor->GetHandle()) == Directions::TL)
+	Directions dir = GetCurrentDirection(actor);
+
+	if (dir == Directions::TL)
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
-	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BL)
+	else if (dir == Directions::BL)
 	{
 		WantToSwitchTo(actor, Directions::BR);
 	}
 }
 void DirectionHandler::SwitchDirectionUp(RE::Actor* actor)
 {
-	if (ActiveDirections.at(actor->GetHandle()) == Directions::BR)
+	Directions dir = GetCurrentDirection(actor);
+
+	if (dir == Directions::BR)
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
-	else if (ActiveDirections.at(actor->GetHandle()) == Directions::BL)
+	else if (dir == Directions::BL)
 	{
 		WantToSwitchTo(actor, Directions::TL);
 	}
 }
 void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 {
-	if (ActiveDirections.at(actor->GetHandle()) == Directions::TR)
+	Directions dir = GetCurrentDirection(actor);
+
+	if (dir == Directions::TR)
 	{
 		WantToSwitchTo(actor, Directions::BR);
 	}
-	else if (ActiveDirections.at(actor->GetHandle()) == Directions::TL)
+	else if (dir == Directions::TL)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
@@ -325,19 +346,19 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force)
 {
-	if ((int)dir >= 4)
-	{
-		logger::info("{} had error switching {}", actor->GetName(), (int)dir);
-	}
 	// skip if we try to switch to the same dir
+	std::shared_lock lock(ActiveDirectionsMtx);
 	if (ActiveDirections.contains(actor->GetHandle()) && ActiveDirections.at(actor->GetHandle()) == dir)
 	{
 		return;
 	}
+
+	DirectionTimersMtx.lock();
 	auto Iter = DirectionTimers.find(actor->GetHandle());
 	// skip if we already have a direction to switch to that is the same
 	if (Iter != DirectionTimers.end() && Iter->second.dir == dir)
 	{
+		DirectionTimersMtx.unlock();
 		return;
 	}
 	if (force || Iter == DirectionTimers.end())
@@ -347,13 +368,14 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 		ToDir.timeLeft = TimeBetweenChanges;
 		DirectionTimers[actor->GetHandle()] = ToDir;
 	}
-
+	DirectionTimersMtx.unlock();
 }
 
 void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon)
 {
 	// top right by default
 	// battleaxes are thrusting polearms so they get BR
+	ActiveDirectionsMtx.lock();
 	if (!weapon)
 	{
 		ActiveDirections[actor->GetHandle()] = Directions::TR;
@@ -374,12 +396,20 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 		ActiveDirections[actor->GetHandle()] = Directions::TR;
 		actor->AddSpell(TR);
 	}
-
+	ActiveDirectionsMtx.unlock();
 }
 
-void DirectionHandler::RemoveDirectionalPerks(RE::Actor* actor)
+void DirectionHandler::RemoveDirectionalPerks(RE::ActorHandle handle)
 {
-	ActiveDirections.erase(actor->GetHandle());
+	ActiveDirectionsMtx.lock();
+	ActiveDirections.erase(handle);
+	ActiveDirectionsMtx.unlock();
+
+	RE::Actor* actor = handle.get().get();
+	if (!actor)
+	{
+		return;
+	}
 	if (actor->HasSpell(TR))
 	{
 		actor->RemoveSpell(TR);
@@ -411,14 +441,16 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	float SQDist = RE::PlayerCharacter::GetSingleton()->GetPosition().GetSquaredDistance(actor->GetPosition());
 	// too far causes problems
 	// square dist
-	float FarDelta = Settings::ActiveDistance + 200.f;
+	float FarDelta = Settings::ActiveDistance + 400.f;
 
 	if (SQDist > FarDelta * FarDelta)
 	{
 		if (HasDirectionalPerks(actor))
 		{
 			logger::info("{} removed cause too far", actor->GetName());
-			CleanupActor(actor);
+			ToRemoveMtx.lock();
+			ToRemove.insert(actor->GetHandle());
+			ToRemoveMtx.unlock();
 		}
 		return;
 	}
@@ -435,7 +467,33 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		if (HasDirectionalPerks(actor))
 		{
 			logger::info("{} removed cause weapon is not drawn", actor->GetName());
-			CleanupActor(actor);
+			ToRemoveMtx.lock();
+			ToRemove.insert(actor->GetHandle());
+			ToRemoveMtx.unlock();
+
+		}
+		return;
+	}
+	if (actor->IsDead())
+	{
+		if (HasDirectionalPerks(actor))
+		{
+			logger::info("{} removed cause dead", actor->GetName());
+			ToRemoveMtx.lock();
+			ToRemove.insert(actor->GetHandle());
+			ToRemoveMtx.unlock();
+
+		}
+		return;
+	}
+	if (actor->IsMarkedForDeletion())
+	{
+		if (HasDirectionalPerks(actor))
+		{
+			logger::info("{} removed cause dead", actor->GetName());
+			ToRemoveMtx.lock();
+			ToRemove.insert(actor->GetHandle());
+			ToRemoveMtx.unlock();
 
 		}
 		return;
@@ -454,7 +512,9 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 				if (HasDirectionalPerks(actor))
 				{
 					logger::info("{} removed cause of lack of weapon", actor->GetName());
-					CleanupActor(actor);
+					ToRemoveMtx.lock();
+					ToRemove.insert(actor->GetHandle());
+					ToRemoveMtx.unlock();
 				}
 				return;
 			} 
@@ -486,8 +546,9 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		if (HasDirectionalPerks(actor))
 		{
 			logger::info("{} removed cause wepaon is not melee", actor->GetName());
-			CleanupActor(actor);
-
+			ToRemoveMtx.lock();
+			ToRemove.insert(actor->GetHandle());
+			ToRemoveMtx.unlock();
 		}
 
 		return;
@@ -505,9 +566,14 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		{
 
 			UIDrawAngles(actor);
-			if (!actor->IsBlocking() && ImperfectParry.contains(actor->GetHandle()))
+			if (!actor->IsBlocking())
 			{
-				ImperfectParry.erase(actor->GetHandle());
+				ImperfectParryMtx.lock();
+				if (ImperfectParry.contains(actor->GetHandle()))
+				{
+					ImperfectParry.erase(actor->GetHandle());
+				}
+				ImperfectParryMtx.unlock();
 			}
 		}
 
@@ -523,17 +589,43 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 
 }
 
-void DirectionHandler::CleanupActor(RE::Actor* actor)
+void DirectionHandler::CleanupActor(RE::ActorHandle actor)
 {
+	
 	RemoveDirectionalPerks(actor);
-	UnblockableActors.erase(actor->GetHandle());
-	DirectionTimers.erase(actor->GetHandle());
-	AnimationTimer.erase(actor->GetHandle());
-	ComboDatas.erase(actor->GetHandle());
-	InAttackWin.erase(actor->GetHandle());
-	ActiveDirections.erase(actor->GetHandle());
+
+	UnblockableActorsMtx.lock();
+	UnblockableActors.erase(actor);
+	UnblockableActorsMtx.unlock();
+
+	DirectionTimersMtx.lock();
+	DirectionTimers.erase(actor);
+	DirectionTimersMtx.unlock();
+
+	AnimationTimerMtx.lock();
+	AnimationTimer.erase(actor);
+	AnimationTimerMtx.unlock();
+
+	ComboDatasMtx.lock();
+	ComboDatas.erase(actor);
+	ComboDatasMtx.unlock();
+
+	InAttackWinMtx.lock();
+	InAttackWin.erase(actor);
+	InAttackWinMtx.unlock();
+
+	ActiveDirectionsMtx.lock();
+	ActiveDirections.erase(actor);
+	ActiveDirectionsMtx.unlock();
+
 	AIHandler::GetSingleton()->RemoveActor(actor);
-	ImperfectParry.erase(actor->GetHandle());
+
+	ImperfectParryMtx.lock();
+	ImperfectParry.erase(actor);
+	ImperfectParryMtx.unlock();
+
+	BlockHandler::GetSingleton()->RemoveActor(actor);
+	AttackHandler::GetSingleton()->RemoveActor(actor);
 }
 
 void DirectionHandler::Cleanup()
@@ -549,8 +641,17 @@ void DirectionHandler::Cleanup()
 
 void DirectionHandler::Update(float delta)
 {
+	// synchronously remove to avoid any possible race conditions
+	ToRemoveMtx.lock();
+	for (auto handle : ToRemove)
+	{
+		CleanupActor(handle);
+	}
+	ToRemove.clear();
+	ToRemoveMtx.unlock();
 
 	// prevent instant direction switches
+	DirectionTimersMtx.lock();
 	auto Iter = DirectionTimers.begin();
 	while (Iter != DirectionTimers.end())
 	{
@@ -608,7 +709,9 @@ void DirectionHandler::Update(float delta)
 		
 		Iter++;
 	}
+	DirectionTimersMtx.unlock();
 
+	AnimationTimerMtx.lock();
 	// slow down animations
 	auto AnimIter = AnimationTimer.begin();
 	while (AnimIter != AnimationTimer.end())
@@ -641,7 +744,10 @@ void DirectionHandler::Update(float delta)
 		}
 		AnimIter++;
 	}
+	AnimationTimerMtx.unlock();
 
+
+	ComboDatasMtx.lock();
 	auto ComboIter = ComboDatas.begin();
 	while (ComboIter != ComboDatas.end())
 	{
@@ -687,7 +793,9 @@ void DirectionHandler::Update(float delta)
 
 		ComboIter++;
 	}
+	ComboDatasMtx.unlock();
 
+	ActiveDirectionsMtx.lock();
 	auto DirIter = ActiveDirections.begin();
 	while (DirIter != ActiveDirections.end())
 	{
@@ -705,6 +813,7 @@ void DirectionHandler::Update(float delta)
 
 		DirIter++;
 	}
+	ActiveDirectionsMtx.unlock();
 
 }
 
@@ -784,6 +893,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 		if (data.size >= 2 && data.repeatCount == 0)
 		{
 			UnblockableActors.insert(actor->GetHandle());
+			actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(Unblockable, false, actor, 0.f, false, 0.f, nullptr);
 			data.currentIdx = 0;
 			data.size = 0;
 			data.repeatCount = 0;

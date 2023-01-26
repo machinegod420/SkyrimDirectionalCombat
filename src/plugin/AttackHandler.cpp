@@ -6,27 +6,34 @@ constexpr float NPCLockoutTime = 0.15f;
 
 bool AttackHandler::InChamberWindow(RE::Actor* actor)
 {
-	return ChamberWindow.contains(actor->GetHandle());
+	bool ret = false;
+	ChamberWindowMtx.lock_shared();
+	ret = ChamberWindow.contains(actor->GetHandle());
+	ChamberWindowMtx.unlock_shared();
+	return ret;
 }
 
 bool AttackHandler::CanAttack(RE::Actor* actor)
 {
+	bool ret = false;
 	if (actor->IsPlayerRef())
 	{
 		PlayerMtx.lock_shared();
-		bool ret = !PlayerLockout;
+		ret = !PlayerLockout;
 		PlayerMtx.unlock_shared();
-		return ret;
 	}
 	else
 	{
-		return !AttackLockout.contains(actor->GetHandle());
+		AttackLockoutMtx.lock_shared();
+		ret = !AttackLockout.contains(actor->GetHandle());
+		AttackLockoutMtx.unlock_shared();
 	}
-	
+	return ret;
 }
 
 void AttackHandler::HandleFeint(RE::Actor* actor)
 {
+	ChamberWindowMtx.lock();
 	if (ChamberWindow.contains(actor->GetHandle()))
 	{
 		actor->NotifyAnimationGraph("attackStop");
@@ -42,26 +49,32 @@ void AttackHandler::HandleFeint(RE::Actor* actor)
 		}
 		
 	}
+	ChamberWindowMtx.unlock();
 }
 
 void AttackHandler::AddChamberWindow(RE::Actor* actor)
 {
 	// masterstrike window must be a fixed time, otherwise slower attack speeds actually make it easier to masterstrike
+	ChamberWindowMtx.lock();
 	ChamberWindow[actor->GetHandle()] = DifficultySettings::ChamberWindowTime;
+	ChamberWindowMtx.unlock();
 }
 
 void AttackHandler::AddNPCSmallLockout(RE::Actor* actor)
 {
+	AttackLockoutMtx.lock();
 	if (AttackLockout.contains(actor->GetHandle()))
 	{
 		AttackLockout[actor->GetHandle()] = NPCLockoutTime;
 	}
-	
+	AttackLockoutMtx.unlock();
 }
 
 void AttackHandler::AddLockout(RE::Actor* actor)
 {
+	AttackLockoutMtx.lock();
 	AttackLockout[actor->GetHandle()] = DifficultySettings::AttackTimeoutTime;
+	AttackLockoutMtx.unlock();
 }
 
 void AttackHandler::LockoutPlayer()
@@ -78,9 +91,25 @@ void AttackHandler::Cleanup()
 	PlayerLockout = false;
 	PlayerMtx.unlock();
 
+	ChamberWindowMtx.lock();
 	ChamberWindow.clear();
-	AttackLockout.clear();
+	ChamberWindowMtx.unlock();
 
+	AttackLockoutMtx.lock();
+	AttackLockout.clear();
+	AttackLockoutMtx.unlock();
+
+}
+
+void AttackHandler::RemoveActor(RE::ActorHandle actor)
+{
+
+	ChamberWindowMtx.lock();
+	ChamberWindow.erase(actor);
+	ChamberWindowMtx.unlock();
+	AttackLockoutMtx.lock();
+	AttackLockout.erase(actor);
+	AttackLockoutMtx.unlock();
 }
 
 void AttackHandler::Update(float delta)
@@ -96,6 +125,7 @@ void AttackHandler::Update(float delta)
 	}
 	PlayerMtx.unlock();
 
+	ChamberWindowMtx.lock();
 	auto ChamberIter = ChamberWindow.begin();
 	while (ChamberIter != ChamberWindow.end())
 	{
@@ -118,7 +148,9 @@ void AttackHandler::Update(float delta)
 		}
 		ChamberIter++;
 	}
+	ChamberWindowMtx.unlock();
 
+	AttackLockoutMtx.lock();
 	auto AttackIter = AttackLockout.begin();
 	while (AttackIter != AttackLockout.end())
 	{
@@ -141,4 +173,5 @@ void AttackHandler::Update(float delta)
 		}
 		AttackIter++;
 	}
+	AttackLockoutMtx.unlock();
 }
