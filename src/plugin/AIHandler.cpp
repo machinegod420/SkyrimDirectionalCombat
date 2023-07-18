@@ -2,6 +2,7 @@
 #include "DirectionHandler.h"
 #include "SettingsLoader.h"
 #include "AttackHandler.h"
+#include "BlockHandler.h"
 
 #include <random>
 
@@ -130,7 +131,6 @@ void AIHandler::DidAct(RE::Actor* actor)
 
 void AIHandler::RunActor(RE::Actor* actor, float delta)
 {
-
 	if (actor->GetActorRuntimeData().currentCombatTarget)
 	{
 		DirectionHandler* DirHandler = DirectionHandler::GetSingleton();
@@ -157,19 +157,31 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
 
 							logger::info("adding new targets");
+							ResetDifficulty(actor);
 						}
 						else
 						{
-							if (DifficultyMap[actor->GetHandle()].targetLastDir == DirHandler->GetCurrentDirection(target))
+							if (target->GetHandle() != DifficultyMap[actor->GetHandle()].currentTarget)
 							{
-								DifficultyMap[actor->GetHandle()].targetSwitchTimer += delta;
-								//logger::info("old angle from target{}", (int)DirHandler->PerkToDirection(perk));
+								DifficultyMap[actor->GetHandle()].currentTarget = target->GetHandle();
+								DifficultyMap[actor->GetHandle()].targetLastDir = DirHandler->GetCurrentDirection(target);
+								DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
+								logger::info("switching targets");
+								ResetDifficulty(actor);
 							}
 							else
 							{
-								DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
-								DifficultyMap[actor->GetHandle()].targetLastDir = DirHandler->GetCurrentDirection(target);
-								//logger::info("new angle from target{}", (int)DirHandler->PerkToDirection(perk));
+								if (DifficultyMap[actor->GetHandle()].targetLastDir == DirHandler->GetCurrentDirection(target))
+								{
+									DifficultyMap[actor->GetHandle()].targetSwitchTimer += delta;
+									//logger::info("old angle from target{}", (int)DirHandler->PerkToDirection(perk));
+								}
+								else
+								{
+									DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
+									DifficultyMap[actor->GetHandle()].targetLastDir = DirHandler->GetCurrentDirection(target);
+									//logger::info("new angle from target{}", (int)DirHandler->PerkToDirection(perk));
+								}
 							}
 						}
 					}
@@ -200,7 +212,10 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								//logger::info("NPC in range");
 								AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::Block);
 							}
-
+							else if (actor->IsBlocking() && DirHandler->HasImperfectParry(actor))
+							{
+								actor->NotifyAnimationGraph("blockStop");
+							}
 							// if they are blocking theyre probably not attacking
 							bool ShouldDirectionMatch = !target->IsBlocking();
 							// if the target takes too long in one guard, try switching
@@ -260,24 +275,31 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 	}
 }
 
-void AIHandler::SwitchTarget(RE::Actor * actor, RE::Actor * newTarget)
+void AIHandler::SwitchTarget(RE::Actor *actor, RE::Actor *newTarget)
 {
-	RE::Actor * currentTarget = actor->GetActorRuntimeData().currentCombatTarget.get().get();
+	if (!actor->IsHostileToActor(newTarget))
+	{
+		return;
+	}
+
+	RE::Actor* currentTarget = actor->GetActorRuntimeData().currentCombatTarget.get().get();
+	if (newTarget->IsPlayerRef())
+	{
+		actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
+		return;
+	}
+	
 	if (currentTarget)
 	{
-		if (newTarget->GetActorRuntimeData().currentCombatTarget == actor->GetHandle())
+		float TargetDist = actor->GetPosition().GetSquaredDistance(currentTarget->GetPosition());
+		if (TargetDist > 70000)
 		{
 			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
 		}
-		else
+		else if (BlockHandler::GetSingleton()->GetNumberAttackers(newTarget) < BlockHandler::GetSingleton()->GetNumberAttackers(newTarget))
 		{
-			float TargetDist = actor->GetPosition().GetSquaredDistance(currentTarget->GetPosition());
-			if (TargetDist > 70000)
-			{
-				actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
-			}
+			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
 		}
-
 	}
 }
 
@@ -286,6 +308,11 @@ bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 {
 	std::unique_lock lock(DifficultyMapMtx);
 
+	// don't contribute if they have too many attackers
+	if (BlockHandler::GetSingleton()->GetNumberAttackers(target) > 1)
+	{
+		return false;
+	}
 	CalcAndInsertDifficulty(actor);
 
 
@@ -498,6 +525,22 @@ void AIHandler::ReduceDifficulty(RE::Actor* actor)
 
 }
 
+void AIHandler::ResetDifficulty(RE::Actor* actor)
+{
+	if (DifficultyMap.contains(actor->GetHandle()))
+	{
+
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = 0;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = 0;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = 0;
+		DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = 0;
+
+		DifficultyMap[actor->GetHandle()].mistakeRatio = 0.f;
+
+	}
+
+}
+
 void AIHandler::TryAttack(RE::Actor* actor)
 {
 	// since this is a forced attack, it happens outside of the normal AI attack loop so we need to add checks here as well
@@ -653,7 +696,7 @@ void AIHandler::SignalBadThing(RE::Actor* actor, Directions attackDir)
 	}
 
 	// increase percentage of blocking this location
-	IncreaseBlockChance(actor, attackDir, mt_rand() % 30 + 10, 2);
+	IncreaseBlockChance(actor, attackDir, mt_rand() % 20 + 10, 2);
 
 	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio - (AISettings::AIGrowthFactor);
 	NewMistakeRatio = std::min(NewMistakeRatio, 0.16f);
@@ -682,7 +725,7 @@ void AIHandler::SignalGoodThing(RE::Actor* actor, Directions attackedDir)
 		dirs.insert(dir);
 	}
 	// increase percentage of blocking this location
-	IncreaseBlockChance(actor, attackedDir, mt_rand() % 20 + 10, 3);
+	IncreaseBlockChance(actor, attackedDir, mt_rand() % 16 + 8, 3);
 	
 
 	unsigned size = std::max(1u, (unsigned)dirs.size());

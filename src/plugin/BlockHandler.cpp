@@ -4,7 +4,7 @@
 #include "SettingsLoader.h"
 #include "FXHandler.h"
 
-constexpr float MultiattackTimer = 5.f;
+constexpr float MultiattackTimer = 2.5f;
 
 BlockHandler::BlockHandler()
 {
@@ -14,13 +14,15 @@ BlockHandler::BlockHandler()
 
 void BlockHandler::Initialize()
 {
+
+	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 	if (!NPCKeyword)
 	{
-		RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 		NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
 	}
 	if (!MultiAttackerFX)
 	{
+		MultiAttackerFX = DataHandler->LookupForm<RE::SpellItem>(0x6E60, "DirectionMod.esp");
 	}
 }
 
@@ -38,20 +40,28 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	float DefenderWeaponWeight = DefenderWeapon ? DefenderWeapon->GetWeight() : 0.f;
 	auto DefenderShield = target->GetEquippedObject(true);
 	bool hasShield = DefenderShield ? DefenderShield->IsArmor() : false;
+
+	float AdditionalStamDamage = 0;
 	if (!hasShield && AttackerWeaponWeight > DefenderWeaponWeight)
 	{
-		Damage += (AttackerWeaponWeight - DefenderWeaponWeight);
+		AdditionalStamDamage = 0.75f * (AttackerWeaponWeight - DefenderWeaponWeight);
+		AdditionalStamDamage = std::min(AdditionalStamDamage, 10.f);
 	}
 	float a = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock);
 	a = std::min(a, 99.f);
-	float skillMod = 0.6f + (0.2f) * ((100.f - a) / 100.f);
-
+	float skillMod = 0.5f + (0.2f) * ((100.f - a) / 100.f);
+	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
+	
 	Damage *= skillMod;
-
-	//take damage if it was imperfect as well as increased stamina damage
-	if (DirectionHandler::GetSingleton()->HasImperfectParry(target))
+	if (!Imperfect)
 	{
-		FinalDamage = Damage * 0.5f;
+		Damage += AdditionalStamDamage;
+	}
+	else
+	{
+		//take damage if it was imperfect as well as increased stamina damage
+		FinalDamage = Damage;
+		Damage += AdditionalStamDamage;
 		Damage *= 1.5f;
 	}
 
@@ -79,11 +89,15 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 
 	StaggerTimerMtx.lock();
 	bool ShouldStagger = !StaggerTimer.contains(actor->GetHandle());
+	if (!actor->IsAttacking())
+	{
+		ShouldStagger = false;
+	}
 	if (force)
 	{
 		ShouldStagger = true;
 	}
-
+	
 	if (ShouldStagger)
 	{
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
@@ -91,7 +105,7 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		actor->SetGraphVariableFloat("staggerDirection", direction);
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
 		actor->NotifyAnimationGraph("staggerStart");
-
+		actor->NotifyAnimationGraph("attackStop");
 		if (actor->GetRace()->HasKeyword(NPCKeyword))
 		{
 			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
@@ -112,6 +126,7 @@ void BlockHandler::CauseRecoil(RE::Actor* actor) const
 
 void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 {
+
 	if (!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
 	{
 		target->SetGraphVariableBool("IsBlocking", false);
@@ -146,7 +161,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
 			AIHandler::GetSingleton()->TryRiposte(target);
 			AIHandler::GetSingleton()->SignalGoodThing(target, 
-			DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
+				DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
 		}
 	}
 }
@@ -163,18 +178,16 @@ void BlockHandler::AddNewAttacker(RE::Actor* actor, RE::Actor* attacker)
 		return;
 	}
 	std::unique_lock lock(AttackersMapMtx);
-	if (actor->GetActorRuntimeData().currentCombatTarget)
+
+	AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
+	AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+
+
+	if (AttackersMap[actor->GetHandle()].attackers.size() > 2)
 	{
-		if (attacker->GetHandle() != actor->GetActorRuntimeData().currentCombatTarget)
-		{
-			AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
-			AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
-		}
-	}
-	else
-	{
-		AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
-		AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+		//logger::info("has multiple attackers");
+		CauseStagger(attacker, actor, 0.5f);
+		actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(MultiAttackerFX, false, actor, 0.f, false, 0.f, nullptr);
 	}
 }
 
@@ -188,6 +201,15 @@ int BlockHandler::GetNumberAttackers(RE::Actor* actor) const
 	return 0;
 }
 
+void BlockHandler::ParriedAttacker(RE::Actor* actor, RE::Actor* attacker)
+{
+	LastParriedMapMtx.lock();
+
+	LastParriedMap[actor->GetHandle()].lastParried = attacker->GetHandle();
+	LastParriedMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+	LastParriedMapMtx.unlock();
+}
+
 bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 {
 	if (DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
@@ -199,7 +221,9 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		if (!targetStaggering && !attackerStaggering)
 		{
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
-			CauseStagger(attacker, target, 1.f);
+			CauseStagger(attacker, target, 0.5f);
+			// masterstriker gets invulnerability during MS
+			GiveHyperarmor(target);
 			return true;
 		}
 	}
@@ -310,4 +334,23 @@ void BlockHandler::Update(float delta)
 		AttackersIter++;
 	}
 	AttackersMapMtx.unlock();
+
+	LastParriedMapMtx.lock();
+	auto LastParriedMapIter = LastParriedMap.begin();
+	while (LastParriedMapIter != LastParriedMap.end())
+	{
+		if (!LastParriedMapIter->first)
+		{
+			LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
+			continue;
+		}
+		RE::Actor* actor = LastParriedMapIter->first.get().get();
+		if (!actor)
+		{
+			LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
+			continue;
+		}
+		LastParriedMapIter++;
+	}
+	LastParriedMapMtx.unlock();
 }

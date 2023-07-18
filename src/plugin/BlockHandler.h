@@ -33,6 +33,9 @@ public:
 	void AddNewAttacker(RE::Actor* actor, RE::Actor* attacker);
 	int GetNumberAttackers(RE::Actor* actor) const;
 
+	void ParriedAttacker(RE::Actor* actor, RE::Actor* attacker);
+	
+
 	void RemoveActor(RE::ActorHandle actor);
 	
 	void Cleanup()
@@ -64,4 +67,12 @@ private:
 	};
 	phmap::flat_hash_map<RE::ActorHandle, MultipleAttackers> AttackersMap;
 	mutable std::shared_mutex AttackersMapMtx;
+
+	struct LastParried
+	{
+		RE::ActorHandle lastParried;
+		float timeLeft;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, LastParried> LastParriedMap;
+	mutable std::shared_mutex LastParriedMapMtx;
 };

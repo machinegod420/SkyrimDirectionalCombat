@@ -82,7 +82,22 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		{
 			return;
 		}
+
+		if (UISettings::OnlyShowTargetted)
+		{
+			auto player = RE::PlayerCharacter::GetSingleton();
+			if (!actor->IsHostileToActor(player))
+			{
+				return;
+
+			}
+			if (actor->GetActorRuntimeData().currentCombatTarget != player->GetHandle())
+			{
+				return;
+			}
+		}
 	}
+
 	ActiveDirectionsMtx.lock_shared();
 	if(ActiveDirections.contains(actor->GetHandle()))
 	{
@@ -564,8 +579,10 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 		else
 		{
-
+	
 			UIDrawAngles(actor);
+			
+			
 			if (!actor->IsBlocking())
 			{
 				ImperfectParryMtx.lock();
@@ -835,7 +852,7 @@ void DirectionHandler::DebuffActor(RE::Actor* actor)
 {
 	if (!actor->HasPerk(Debuff))
 	{
-		actor->AddPerk(Debuff);
+		//actor->AddPerk(Debuff);
 	}
 }
 

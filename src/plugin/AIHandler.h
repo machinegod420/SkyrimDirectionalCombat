@@ -72,6 +72,7 @@ public:
 	void DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force);
 	inline void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
 	void ReduceDifficulty(RE::Actor* actor);
+	void ResetDifficulty(RE::Actor* actor);
 	void SwitchToNextAttack(RE::Actor* actor);
 
 	// Load attackdata so our attackstart event is processed correctly as an attack

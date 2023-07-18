@@ -7,6 +7,7 @@
 #include "Utils.h"
 #include "InputHandler.h"
 #include "3rdparty/PrecisionAPI.h"
+#include "RE/C/CombatController.h"
 
 namespace Hooks
 {
@@ -130,6 +131,7 @@ namespace Hooks
 			logger::info("Hook MouseMovement");
 		}
 		// shared implementation
+		static void SharedInputMNB(int x, int y);
 		static void SharedInput(int x, int y);
 		static void ProcessThumbstick(RE::LookHandler* a_this, RE::ThumbstickEvent* a_event, RE::PlayerControlsData* a_data);
 		static void ProcessMouseMove(RE::LookHandler* a_this, RE::MouseMoveEvent* a_event, RE::PlayerControlsData* a_data);
@@ -156,6 +158,10 @@ namespace Hooks
 		static bool PerformAttackAction(RE::TESActionData* a_actionData);
 
 		static inline REL::Relocation<decltype(PerformAttackAction)> _PerformAttackAction;
+	};
+	class HookAttackRange
+	{
+
 	};
 
 	//https://github.com/max-su-2019/SCAR/blob/main/src/Hook_AttackStart.h#L95
@@ -196,6 +202,7 @@ namespace Hooks
 
 		static inline REL::Relocation<decltype(ProcessAttackHook)> _ProcessAttackHook;
 	};
+
 
 	class HookNotifyAnimationGraph
 	{

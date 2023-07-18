@@ -13,11 +13,12 @@ bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
 float DifficultySettings::StaminaCost = 0.1f;
 float DifficultySettings::WeaponWeightStaminaMult = 0.33f;
+float DifficultySettings::KnockbackMult = 2.f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
-bool Settings::InvertY = false;
 bool Settings::EnableForH2H = true;
+bool Settings::MNBMode = false;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -27,6 +28,7 @@ unsigned InputSettings::KeyCodeTL = 3;
 unsigned InputSettings::KeyCodeBL = 4;
 unsigned InputSettings::KeyCodeBR = 5;
 unsigned InputSettings::KeyCodeFeint = 16;
+bool InputSettings::InvertY = false;
 
 bool WeaponSettings::RebalanceWeapons = true;
 float WeaponSettings::WarhammerSpeed = 0.72f;
@@ -35,7 +37,7 @@ float WeaponSettings::GreatSwordSpeed = 0.77f;
 float WeaponSettings::SwordSpeed = 0.8f;
 float WeaponSettings::AxeSpeed = 0.8f;
 float WeaponSettings::WeaponSpeedMult = 0.9f;
-float WeaponSettings::BowSpeedMult = 0.4f;
+float WeaponSettings::BowSpeedMult = 0.6f;
 
 float AISettings::AIWaitTimer = 3.f;
 int AISettings::LegendaryLvl = 11;
@@ -66,6 +68,7 @@ float UISettings::Length = 13.f;
 float UISettings::Thickness = 7.f;
 float UISettings::DisplayDistance = 2000.0;
 bool UISettings::ShowUI = true;
+bool UISettings::OnlyShowTargetted = true;
 
 void SettingsLoader::InitializeDefaultValues()
 {
@@ -82,11 +85,12 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::NonNPCStaggerMult = 2.f;
 	DifficultySettings::StaminaCost = 0.1f;
 	DifficultySettings::WeaponWeightStaminaMult = 0.33f;
+	DifficultySettings::KnockbackMult = 2.f;
 
 	Settings::ActiveDistance = 4000.f;
 	Settings::HasPrecision = false;
-	Settings::InvertY = false;
 	Settings::EnableForH2H = true;
+	Settings::MNBMode = false;
 
 	InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 	InputSettings::MouseSens = 5;
@@ -96,6 +100,7 @@ void SettingsLoader::InitializeDefaultValues()
 	InputSettings::KeyCodeBL = 4;
 	InputSettings::KeyCodeBR = 5;
 	InputSettings::KeyCodeFeint = 16;
+	InputSettings::InvertY = false;
 
 	WeaponSettings::RebalanceWeapons = true;
 	WeaponSettings::WarhammerSpeed = 0.75f;
@@ -104,7 +109,7 @@ void SettingsLoader::InitializeDefaultValues()
 	WeaponSettings::SwordSpeed = 0.9f;
 	WeaponSettings::AxeSpeed = 0.8f;
 	WeaponSettings::WeaponSpeedMult = 0.9f;
-	WeaponSettings::BowSpeedMult = 0.4f;
+	WeaponSettings::BowSpeedMult = 0.6f;
 
 	AISettings::AIWaitTimer = 3.f;
 	AISettings::LegendaryLvl = 11;
@@ -215,6 +220,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, InputSettings::KeyCodeFeint);
 				}
+				else if (fieldName == "InvertY")
+				{
+					bool newval = field.as<bool>();
+					InputSettings::InvertY = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, InputSettings::InvertY);
+				}
 			}
 			else if (sectionName == "Difficulty")
 			{
@@ -288,6 +300,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::StaminaCost = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::StaminaCost);
+				}
+				else if (fieldName == "KnockbackMult")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::KnockbackMult = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::KnockbackMult);
 				}
 			}
 			else if (sectionName == "AI")
@@ -470,6 +489,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, UISettings::ShowUI);
 				}
+				else if (fieldName == "OnlyShowTargettedEnemies")
+				{
+					bool newval = field.as<bool>();
+					UISettings::OnlyShowTargetted = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, UISettings::OnlyShowTargetted);
+				}
 			}
 			else if (sectionName == "Settings")
 			{
@@ -479,6 +505,13 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::ActiveDistance = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::ActiveDistance);
+				}
+				else if (fieldName == "MNBMode")
+				{
+					bool newval = field.as<bool>();
+					Settings::MNBMode = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::MNBMode);
 				}
 			}
 			else if (sectionName == "Weapons")
@@ -532,6 +565,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, WeaponSettings::AxeSpeed);
 				}
+				else if (fieldName == "BowSpeed")
+				{
+					float newval = field.as<float>();
+					WeaponSettings::BowSpeedMult = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, WeaponSettings::BowSpeedMult);
+				}
 			}
 		}
 	}
@@ -573,11 +613,15 @@ void SettingsLoader::RebalanceWeapons()
 		{
 			// these have caps so do not break them
 
-			float meleeScoreMult = actor->combatStyle->generalData.meleeScoreMult * 2.f;
-			meleeScoreMult = std::min(9.99f, meleeScoreMult);
+			float meleeScoreMult = actor->combatStyle->generalData.meleeScoreMult * 1.2f;
+			meleeScoreMult = std::min(0.99f, meleeScoreMult);
 			actor->combatStyle->generalData.meleeScoreMult = meleeScoreMult;
 
-			float defensiveMult = actor->combatStyle->generalData.defensiveMult * 0.15f;
+			float rangedScoreMult = actor->combatStyle->generalData.rangedScoreMult * 0.8f;
+			rangedScoreMult = std::min(0.99f, rangedScoreMult);
+			actor->combatStyle->generalData.rangedScoreMult = rangedScoreMult;
+
+			float defensiveMult = 0.f;
 			defensiveMult = std::min(0.99f, defensiveMult);
 			actor->combatStyle->generalData.defensiveMult = defensiveMult;
 
@@ -591,13 +635,13 @@ void SettingsLoader::RebalanceWeapons()
 			actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.f;
 			actor->combatStyle->meleeData.specialAttackMult = 0.f;
 
-			float circleMult = actor->combatStyle->closeRangeData.circleMult * 4.f;
+			float circleMult = actor->combatStyle->closeRangeData.circleMult * 1.f;
 			circleMult = std::min(0.99f, circleMult);
 			actor->combatStyle->closeRangeData.circleMult = circleMult;
 
-			float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 4.f;
-			fallbackMult = std::min(0.99f, fallbackMult);
-			actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
+			//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 4.f;
+			//fallbackMult = std::min(0.99f, fallbackMult);
+			//actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
 		}
 
 	}

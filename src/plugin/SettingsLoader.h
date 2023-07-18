@@ -17,14 +17,15 @@ struct DifficultySettings
 	static float NonNPCStaggerMult;
 	static float StaminaCost;
 	static float WeaponWeightStaminaMult;
+	static float KnockbackMult;
 };
 
 struct Settings
 {
 	static float ActiveDistance;
 	static bool HasPrecision;
-	static bool InvertY;
 	static bool EnableForH2H;
+	static bool MNBMode;
 };
 
 struct InputSettings
@@ -44,6 +45,7 @@ struct InputSettings
 	static unsigned KeyCodeBL;
 	static unsigned KeyCodeBR;
 	static unsigned KeyCodeFeint;
+	static bool InvertY;
 };
 
 struct WeaponSettings
@@ -97,6 +99,7 @@ struct UISettings
 	static float Thickness;
 	static float DisplayDistance;
 	static bool ShowUI;
+	static bool OnlyShowTargetted;
 };
 
 class SettingsLoader

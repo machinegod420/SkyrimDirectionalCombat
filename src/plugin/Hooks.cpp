@@ -23,6 +23,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && 
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
+			BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
 			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
@@ -40,6 +41,21 @@ namespace Hooks
 				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
 					ret.bIgnoreHit = true;
+				}
+			}
+			else
+			{
+				if (!target->IsPlayerRef())
+				{
+					// AI stuff here
+					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
+					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+					{
+						AIHandler::GetSingleton()->SignalBadThing(target, dir);
+						AIHandler::GetSingleton()->SwitchTarget(target, attacker);
+						AIHandler::GetSingleton()->TryBlock(target, attacker);
+					}
+
 				}
 			}
 		}
@@ -73,16 +89,43 @@ namespace Hooks
 					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.1f);
 
 			}
+			int numAttackersTarget = (BlockHandler::GetSingleton()->GetNumberAttackers(target));
+			if (numAttackersTarget > 1)
+			{
+				hitData.totalDamage *= 0.75f;
+			}
+			int numAttackersAttacker = (BlockHandler::GetSingleton()->GetNumberAttackers(attacker));
+			if (numAttackersAttacker > 1)
+			{
+				hitData.totalDamage *= 1.25f;
+			}
+			
 			if (TargetUnblockable)
 			{
 				hitData.totalDamage *= 0.3f;
 				hitData.stagger = 0;
 			}
+			RE::NiPoint3 dir = attacker->GetPosition() - target->GetPosition();
+			if (hitData.weapon && hitData.weapon->IsMelee())
+			{
+				hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
+			}
+
+			//hitData.reflectedDamage = 0.f; 
+			//dir -= target->GetPosition();
+
 			// do no health damage if hit was blocked
 			// for some reason this flag is the only flag that gets set
+			//hitData.stagger = 0;
 			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 			{
-				hitData.stagger = 0;
+				// manual pushback
+				
+				RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
+				typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
+				static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
+				foo(target->GetCharController(), t, .5f);
+
 				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 				// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 				// riposte instead of being gambled
@@ -149,6 +192,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
+			BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
 			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
@@ -164,6 +208,21 @@ namespace Hooks
 				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
 					return;
+				}
+			}
+			else
+			{
+				if (!target->IsPlayerRef())
+				{
+					// AI stuff here
+					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
+					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+					{
+						AIHandler::GetSingleton()->SignalBadThing(target, dir);
+						AIHandler::GetSingleton()->SwitchTarget(target, attacker);
+						AIHandler::GetSingleton()->TryBlock(target, attacker);
+					}
+
 				}
 			}
 		}
@@ -230,13 +289,46 @@ namespace Hooks
 					a_this->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * DifficultySettings::StaminaRegenMult);
 			}
 		}
-		
+		a_this->GetActorRuntimeData().currentProcess->currentPackage.data;
 		DirectionHandler::GetSingleton()->UpdateCharacter(a_this, a_delta);
+	}
+
+
+	void HookMouseMovement::SharedInputMNB(int x, int y)
+	{
+		if (InputSettings::InvertY)
+		{
+			y = -y;
+		}
+		auto Player = RE::PlayerCharacter::GetSingleton();
+		int32_t diff = InputSettings::MouseSens;
+	
+		if (x > diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+		}
+		else if (x < -diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
+		}
+		else if (y < -diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+		}
+		else if (y > diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+		}
 	}
 
 	void HookMouseMovement::SharedInput(int x, int y)
 	{
-		if (Settings::InvertY)
+		if (Settings::MNBMode)
+		{
+			SharedInputMNB(x, y);
+			return;
+		}
+		if (InputSettings::InvertY)
 		{
 			y = -y;
 		}
@@ -397,6 +489,13 @@ namespace Hooks
 			{
 				return false;
 			}
+			if (DifficultySettings::AttacksCostStamina)
+			{
+				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 5)
+				{
+					return false;
+				}
+			}
 			RE::Actor* target = actor->GetActorRuntimeData().currentCombatTarget.get().get();
 			if (target)
 			{
@@ -413,6 +512,7 @@ namespace Hooks
 					return false;
 				}
 			}
+
 
 		}
 
@@ -464,6 +564,14 @@ namespace Hooks
 			if (AttackHandler::GetSingleton()->IsPlayerLocked())
 			{
 				return false;
+			}
+
+			if (DifficultySettings::AttacksCostStamina)
+			{
+				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 5)
+				{
+					return false;
+				}
 			}
 			
 		}

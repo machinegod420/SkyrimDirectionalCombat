@@ -198,37 +198,67 @@ void UIMenu::DrawDirection(RE::NiPoint2 StartPos, float depth, Directions dir, b
 	float dist = UISettings::Length * scale;
 	float size = UISettings::Length * scale;
 	float thickness = UISettings::Thickness * scale;
-	switch (dir)
+	if (Settings::MNBMode)
 	{
-	case Directions::TR:
-		StartPos.x += dist;
-		StartPos.y -= dist;
-		EndPos = StartPos;
-		EndPos.x += size;
-		EndPos.y -= size;
-		break;
-	case Directions::TL:
-		StartPos.x -= dist;
-		StartPos.y -= dist;
-		EndPos = StartPos;
-		EndPos.x -= size;
-		EndPos.y -= size;
-		break;
-	case Directions::BL:
-		StartPos.x -= dist;
-		StartPos.y += dist;
-		EndPos = StartPos;
-		EndPos.x -= size;
-		EndPos.y += size;
-		break;
-	case Directions::BR:
-		StartPos.x += dist;
-		StartPos.y += dist;
-		EndPos = StartPos;
-		EndPos.x += size;
-		EndPos.y += size;
-		break;
+		switch (dir)
+		{
+		case Directions::TR:
+			StartPos.y -= dist;
+			EndPos = StartPos;
+			EndPos.y -= size;
+			break;
+		case Directions::TL:
+			StartPos.x -= dist;
+			EndPos = StartPos;
+			EndPos.x -= size;
+			break;
+		case Directions::BL:
+			StartPos.y += dist;
+			EndPos = StartPos;
+			EndPos.y += size;
+			break;
+		case Directions::BR:
+			StartPos.x += dist;
+			EndPos = StartPos;
+			EndPos.x += size;
+			break;
+		}
 	}
+	else
+	{
+		switch (dir)
+		{
+		case Directions::TR:
+			StartPos.x += dist;
+			StartPos.y -= dist;
+			EndPos = StartPos;
+			EndPos.x += size;
+			EndPos.y -= size;
+			break;
+		case Directions::TL:
+			StartPos.x -= dist;
+			StartPos.y -= dist;
+			EndPos = StartPos;
+			EndPos.x -= size;
+			EndPos.y -= size;
+			break;
+		case Directions::BL:
+			StartPos.x -= dist;
+			StartPos.y += dist;
+			EndPos = StartPos;
+			EndPos.x -= size;
+			EndPos.y += size;
+			break;
+		case Directions::BR:
+			StartPos.x += dist;
+			StartPos.y += dist;
+			EndPos = StartPos;
+			EndPos.x += size;
+			EndPos.y += size;
+			break;
+		}
+	}
+
 
 	RE::GFxValue argsFill[1]{ 0x00FF00 };
 	uiMovie->Invoke("beginFill", nullptr, argsFill, 1);
