@@ -13,6 +13,22 @@ bool AttackHandler::InChamberWindow(RE::Actor* actor)
 	return ret;
 }
 
+bool AttackHandler::InFeintWindow(RE::Actor* actor)
+{
+	bool ret = false;
+	FeintWindowMtx.lock_shared();
+	ret = FeintWindow.contains(actor->GetHandle());
+	FeintWindowMtx.unlock_shared();
+	return ret;
+}
+
+void AttackHandler::RemoveFeintWindow(RE::Actor* actor)
+{
+	FeintWindowMtx.lock_shared();
+	FeintWindow.erase(actor->GetHandle());
+	FeintWindowMtx.unlock_shared();
+}
+
 bool AttackHandler::CanAttack(RE::Actor* actor)
 {
 	bool ret = false;
@@ -33,11 +49,15 @@ bool AttackHandler::CanAttack(RE::Actor* actor)
 
 void AttackHandler::HandleFeint(RE::Actor* actor)
 {
-	ChamberWindowMtx.lock();
-	if (ChamberWindow.contains(actor->GetHandle()))
+	FeintWindowMtx.lock();
+	if (FeintWindow.contains(actor->GetHandle()))
 	{
 		actor->NotifyAnimationGraph("attackStop");
-		ChamberWindow.erase(actor->GetHandle());
+		FeintWindow.erase(actor->GetHandle());
+		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+		
+		/*
+		
 		Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
 		if (dir == Directions::TR || dir == Directions::BR)
 		{
@@ -47,9 +67,11 @@ void AttackHandler::HandleFeint(RE::Actor* actor)
 		{
 			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR, true);
 		}
+		*/
+
 		
 	}
-	ChamberWindowMtx.unlock();
+	FeintWindowMtx.unlock();
 }
 
 void AttackHandler::AddChamberWindow(RE::Actor* actor)
@@ -58,6 +80,13 @@ void AttackHandler::AddChamberWindow(RE::Actor* actor)
 	ChamberWindowMtx.lock();
 	ChamberWindow[actor->GetHandle()] = DifficultySettings::ChamberWindowTime;
 	ChamberWindowMtx.unlock();
+}
+
+void AttackHandler::AddFeintWindow(RE::Actor* actor)
+{
+	FeintWindowMtx.lock();
+	FeintWindow[actor->GetHandle()] = DifficultySettings::FeintWindowTime;
+	FeintWindowMtx.unlock();
 }
 
 void AttackHandler::AddNPCSmallLockout(RE::Actor* actor)
@@ -99,6 +128,9 @@ void AttackHandler::Cleanup()
 	AttackLockout.clear();
 	AttackLockoutMtx.unlock();
 
+	FeintWindowMtx.lock();
+	FeintWindow.clear();
+	FeintWindowMtx.unlock();
 }
 
 void AttackHandler::RemoveActor(RE::ActorHandle actor)
@@ -110,6 +142,9 @@ void AttackHandler::RemoveActor(RE::ActorHandle actor)
 	AttackLockoutMtx.lock();
 	AttackLockout.erase(actor);
 	AttackLockoutMtx.unlock();
+	FeintWindowMtx.lock();
+	FeintWindow.erase(actor);
+	FeintWindowMtx.unlock();
 }
 
 void AttackHandler::Update(float delta)
@@ -174,4 +209,29 @@ void AttackHandler::Update(float delta)
 		AttackIter++;
 	}
 	AttackLockoutMtx.unlock();
+
+	FeintWindowMtx.lock();
+	auto FeintIter = FeintWindow.begin();
+	while (FeintIter != FeintWindow.end())
+	{
+		if (!FeintIter->first)
+		{
+			FeintIter = FeintWindow.erase(FeintIter);
+			continue;
+		}
+		RE::Actor* actor = FeintIter->first.get().get();
+		if (!actor)
+		{
+			FeintIter = FeintWindow.erase(FeintIter);
+			continue;
+		}
+		FeintIter->second -= delta;
+		if (FeintIter->second <= 0)
+		{
+			FeintIter = FeintWindow.erase(FeintIter);
+			continue;
+		}
+		FeintIter++;
+	}
+	FeintWindowMtx.unlock();
 }

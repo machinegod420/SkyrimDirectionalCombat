@@ -31,6 +31,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 {
 	float Damage = hitData.totalDamage;
 	float ActorStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+	
 	float FinalDamage = 0.f;
 
 	// weapon stamina modifiers
@@ -49,7 +50,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	}
 	float a = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock);
 	a = std::min(a, 99.f);
-	float skillMod = 0.5f + (0.2f) * ((100.f - a) / 100.f);
+	float skillMod = 0.8f + (0.2f) * ((100.f - a) / 100.f);
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
 	
 	Damage *= skillMod;
@@ -60,10 +61,15 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	else
 	{
 		//take damage if it was imperfect as well as increased stamina damage
-		FinalDamage = Damage;
+		FinalDamage = hitData.totalDamage;
 		Damage += AdditionalStamDamage;
 		Damage *= 1.5f;
+
+		// Always do at least 15% of target stamina if they have imperfect block
+		float ActorMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+		Damage = std::max(Damage, ActorMaxStamina * .15f);
 	}
+
 
 	// breaks stamina
 	if (Damage > ActorStamina)
@@ -71,7 +77,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		FinalDamage = Damage - ActorStamina;
 		if (target->IsBlocking())
 		{
-			CauseStagger(target, hitData.aggressor.get().get(), 1.f);
+			CauseStagger(target, hitData.aggressor.get().get(), 1.f, true);
 		}
 		FinalDamage *= DifficultySettings::MeleeDamageMult;
 	}
@@ -105,7 +111,7 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		actor->SetGraphVariableFloat("staggerDirection", direction);
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
 		actor->NotifyAnimationGraph("staggerStart");
-		actor->NotifyAnimationGraph("attackStop");
+		//actor->NotifyAnimationGraph("attackStop");
 		if (actor->GetRace()->HasKeyword(NPCKeyword))
 		{
 			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
@@ -159,7 +165,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
-			AIHandler::GetSingleton()->TryRiposte(target);
+			AIHandler::GetSingleton()->TryRiposte(target, attacker);
 			AIHandler::GetSingleton()->SignalGoodThing(target, 
 				DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
 		}

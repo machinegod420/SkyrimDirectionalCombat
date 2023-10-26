@@ -8,6 +8,10 @@
 // lets be honest here, was this really necessary?
 static float StaminaPowerTable[4] = { 0.12f, 0.24f, 0.48f, 0.8f };
 
+static int BufferedInput[2] = {0, 0};
+static double InputTimer = 0.f;
+static bool BufferedHasInput = false;
+
 namespace Hooks
 {
 	PRECISION_API::PreHitCallbackReturn PrecisionCallback::PrecisionPrehit(const PRECISION_API::PrecisionHitData& a_precisionHitData)
@@ -59,7 +63,7 @@ namespace Hooks
 				}
 			}
 		}
-
+		
 		return ret; 
 	}
 
@@ -86,7 +90,7 @@ namespace Hooks
 				hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
 				// restore stamina as well
 				attacker->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina,
-					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.1f);
+					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.12f);
 
 			}
 			int numAttackersTarget = (BlockHandler::GetSingleton()->GetNumberAttackers(target));
@@ -105,63 +109,84 @@ namespace Hooks
 				hitData.totalDamage *= 0.3f;
 				hitData.stagger = 0;
 			}
-			RE::NiPoint3 dir = attacker->GetPosition() - target->GetPosition();
-			if (hitData.weapon && hitData.weapon->IsMelee())
+
+
+			// only do extra stuff if in melee with directional attacker
+			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 			{
-				hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
-			}
-
-			//hitData.reflectedDamage = 0.f; 
-			//dir -= target->GetPosition();
-
-			// do no health damage if hit was blocked
-			// for some reason this flag is the only flag that gets set
-			//hitData.stagger = 0;
-			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
-			{
-				// manual pushback
-				
-				RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
-				typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
-				static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
-				foo(target->GetCharController(), t, .5f);
-
-				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
-				// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
-				// riposte instead of being gambled
-
-				if (attacker->IsPlayerRef())
+				RE::NiPoint3 dir = attacker->GetPosition() - target->GetPosition();
+				if (hitData.weapon && hitData.weapon->IsMelee())
 				{
-					AttackHandler::GetSingleton()->LockoutPlayer();
+					hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
 				}
-				else 
+
+				//hitData.reflectedDamage = 0.f; 
+				//dir -= target->GetPosition();
+
+				// do no health damage if hit was blocked
+				// for some reason this flag is the only flag that gets set
+				//hitData.stagger = 0;
+				if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 				{
-					AttackHandler::GetSingleton()->AddLockout(attacker);
-				}
-			}
-			else
-			{ 
-				// prccess hit first in case there are bonuses for attacking staggered characters
-				// and we want to process the hit before we remove the unblockable bonuses
-				_OnMeleeHit(target, hitData);
-				if (!TargetUnblockable)
-				{
-					float magnitude = 0.f;
-					if (AttackerUnblockable)
+					// manual pushback
+
+					/*
+					
+					
+					*/
+					RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
+					typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
+					static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
+					foo(target->GetCharController(), t, .5f);
+
+					BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
+					// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
+					// riposte instead of being gambled
+
+					if (attacker->IsPlayerRef())
 					{
-						magnitude = 0.5f;
+						AttackHandler::GetSingleton()->LockoutPlayer();
 					}
-					BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
+					else
+					{
+						AttackHandler::GetSingleton()->AddLockout(attacker);
+					}
 				}
-				
-				// only for NPCs with directional attacks. do not need enemy to have directions
-				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
+				else
 				{
-					// attack successfully landed, so the attacker gets to add to their combo
-					DirectionHandler::GetSingleton()->AddCombo(attacker);
+
+					//apply lockout to the defender to prevent doubles
+					if (target->IsPlayerRef())
+					{
+						AttackHandler::GetSingleton()->LockoutPlayer();
+					}
+					else
+					{
+						AttackHandler::GetSingleton()->AddLockout(target);
+					}
+					// prccess hit first in case there are bonuses for attacking staggered characters
+					// and we want to process the hit before we remove the unblockable bonuses
+					_OnMeleeHit(target, hitData);
+					if (!TargetUnblockable)
+					{
+						float magnitude = 0.f;
+						if (AttackerUnblockable)
+						{
+							magnitude = 0.5f;
+						}
+						BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
+					}
+
+					// only for NPCs with directional attacks. do not need enemy to have directions
+					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
+					{
+						// attack successfully landed, so the attacker gets to add to their combo
+						DirectionHandler::GetSingleton()->AddCombo(attacker);
+					}
+					return;
 				}
-				return;
 			}
+
 		}
 		_OnMeleeHit(target, hitData);
 	}
@@ -262,8 +287,7 @@ namespace Hooks
 			}
 			else
 			{
-				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate,
-					a_this->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * DifficultySettings::StaminaRegenMult);
+				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, DifficultySettings::StaminaRegenMult);
 			}
 		}
 
@@ -285,12 +309,32 @@ namespace Hooks
 			}
 			else
 			{
-				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate,
-					a_this->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * DifficultySettings::StaminaRegenMult);
+				a_this->AsActorValueOwner()->SetActorValue(RE::ActorValue::kStaminaRate, DifficultySettings::StaminaRegenMult);
 			}
 		}
 		a_this->GetActorRuntimeData().currentProcess->currentPackage.data;
 		DirectionHandler::GetSingleton()->UpdateCharacter(a_this, a_delta);
+
+		/*
+			if (Settings::BufferInput)
+		{
+			if (InputTimer <= 0.f && BufferedHasInput)
+			{
+				HookMouseMovement::SharedInputMouse(BufferedInput[0], BufferedInput[1]);
+				logger::info(" sent {} and {}", BufferedInput[0], BufferedInput[1]);
+				BufferedInput[0] = 0;
+				BufferedInput[1] = 0;
+				BufferedHasInput = false;
+			}
+			if (InputTimer > 0.f && BufferedHasInput)
+			{
+				InputTimer -= a_delta;
+				//logger::info("test {}", a_delta);
+			}
+		}	
+		*/
+
+
 	}
 
 
@@ -321,98 +365,117 @@ namespace Hooks
 		}
 	}
 
+	void HookMouseMovement::SharedInputMouse(int x, int y)
+	{
+
+		auto Player = RE::PlayerCharacter::GetSingleton();
+		int32_t diff = 20;
+		int32_t diff2 = 50;
+		Directions CurrentDirection = DirectionHandler::GetSingleton()->GetCurrentDirection(Player);
+		Directions WantDirection;
+		bool contains = DirectionHandler::GetSingleton()->HasQueuedDirection(Player, WantDirection);
+		if (x > diff2 && y < -diff2)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+			return;
+		}
+		if (x > diff2 && y > diff2)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+			return;
+		}
+		if (x < -diff2 && y > diff2)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+			return;
+		}
+		if (x < -diff2 && y < -diff2)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
+			return;
+		}
+		if (x > diff)
+		{ 
+			if (contains && WantDirection == Directions::TL && CurrentDirection == Directions::BL)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR, true, false);
+			}
+			else if (contains && WantDirection == Directions::BL && CurrentDirection == Directions::TL)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR, true, false);
+			}
+			else
+			{
+				DirectionHandler::GetSingleton()->SwitchDirectionRight(Player);
+			}
+			
+		}
+		if (x < -diff)
+		{ 
+			if (contains && WantDirection == Directions::TR && CurrentDirection == Directions::BR)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL, true, false);
+			}
+			else if (contains && WantDirection == Directions::BR && CurrentDirection == Directions::TR)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL, true, false);
+			}
+			else
+			{
+				DirectionHandler::GetSingleton()->SwitchDirectionLeft(Player);
+			}
+			
+
+		}
+		if (y < -diff)
+		{
+			if (contains && WantDirection == Directions::BR && CurrentDirection == Directions::BL)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR, true, false);
+			}
+			else if (contains && WantDirection == Directions::BL && CurrentDirection == Directions::BR)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL, true, false);
+			}
+			else
+			{
+				DirectionHandler::GetSingleton()->SwitchDirectionUp(Player);
+			}
+			
+		}
+		if (y > diff)
+		{
+			if (contains && WantDirection == Directions::TR && CurrentDirection == Directions::TL)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR, true, false);
+			}
+			else if (contains && WantDirection == Directions::TL && CurrentDirection == Directions::TR)
+			{
+				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL, true, false);
+			}
+			else
+			{
+				DirectionHandler::GetSingleton()->SwitchDirectionDown(Player);
+			}
+		}
+	}
+
 	void HookMouseMovement::SharedInput(int x, int y)
 	{
+		if (InputSettings::InvertY)
+		{
+			y = -y;
+		}
 		if (Settings::MNBMode)
 		{
 			SharedInputMNB(x, y);
 			return;
 		}
-		if (InputSettings::InvertY)
-		{
-			y = -y;
-		}
-		auto Player = RE::PlayerCharacter::GetSingleton();
-		bool Mirrored = DirectionHandler::GetSingleton()->DetermineMirrored(Player);
-		int32_t diff = InputSettings::MouseSens;
-		int32_t diff2 = InputSettings::MouseSens;
-		if (x > diff2 && y < -diff2)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
-			}
 
-		}
-		else if (x > diff2 && y > diff2)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
-			}
-		}
-		else if (x < -diff2 && y > diff2)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
-			}
-		}
-		else if (x < -diff2 && y < -diff2)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
-			}
-		}
-		else if (x > diff)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionRight(Player);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionLeft(Player);
-			}
+		SharedInputMouse(x, y);
+		return;
 
-		}
-		else if (x < -diff)
-		{
-			if (!Mirrored)
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionLeft(Player);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionRight(Player);
-			}
 
-		}
-		else if (y < -diff)
-		{
-			DirectionHandler::GetSingleton()->SwitchDirectionUp(Player);
-		}
-		else if (y > diff)
-		{
-			DirectionHandler::GetSingleton()->SwitchDirectionDown(Player);
-		}
 	}
 
 	void HookMouseMovement::ProcessMouseMove(RE::LookHandler* a_this, RE::MouseMoveEvent* a_event, RE::PlayerControlsData* a_data)
@@ -456,6 +519,10 @@ namespace Hooks
 		{
 			return false;
 		}
+		if (!actor)
+		{
+			return _PerformAttackAction(a_actionData);
+		}
 
 		// try to prevent power attacks, however this is not guaranteed to be populated
 		if (actor->GetActorRuntimeData().currentProcess->high->attackData)
@@ -467,11 +534,15 @@ namespace Hooks
 			}
 		}
 
-		if (!actor)
-		{
-			return _PerformAttackAction(a_actionData);
-		}
 
+
+		if (DifficultySettings::AttacksCostStamina)
+		{
+			if (actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[0])
+			{
+				return false;
+			}
+		}
 
 		if (DirectionHandler::GetSingleton()->IsUnblockable(actor))
 		{
@@ -568,7 +639,8 @@ namespace Hooks
 
 			if (DifficultySettings::AttacksCostStamina)
 			{
-				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 5)
+				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 
+					RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[0])
 				{
 					return false;
 				}
@@ -603,6 +675,7 @@ namespace Hooks
 			{
 				unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
 				repeatCombos = std::min(3u, repeatCombos);
+
 				float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[repeatCombos];
 				auto Equipped = actor->GetEquippedObject(false);
 				if (Equipped)
@@ -619,6 +692,7 @@ namespace Hooks
 		else if (str == "TryChamberBegin"_h)
 		{
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
+			AttackHandler::GetSingleton()->AddFeintWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 
 			// use this to signal that an attack did happen with the AI
@@ -633,6 +707,9 @@ namespace Hooks
 			// this is the only place in the code that both adds and removes to this set
 			// so we need to make sure it doesn't leak (unlikely as there would be a cell transition between an attack, but definitely possible)
 			DirectionHandler::GetSingleton()->StartedAttackWindow(actor);
+			// prevent feints from happening past this window
+			AttackHandler::GetSingleton()->RemoveFeintWindow(actor);
+
 		}
 		else if (str == "MCO_WinClose"_h)
 		{

@@ -70,7 +70,7 @@ void AIHandler::InitializeValues()
 	}
 }
 
-void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
+void AIHandler::AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir, bool force)
 {
 	std::unique_lock lock(ActionQueueMtx);
 	auto Iter = ActionQueue.find(actor->GetHandle());
@@ -85,7 +85,7 @@ void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force)
 		Action action;
 		action.timeLeft = CalcActionTimer(actor);
 		action.toDo = toDo;
-
+		action.targetDir = attackedDir;
 		ActionQueue[actor->GetHandle()] = action;
 	}
 
@@ -216,6 +216,13 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							{
 								actor->NotifyAnimationGraph("blockStop");
 							}
+							else if (actor->IsBlocking())
+							{
+								if (Settings::SwitchingCostsStamina)
+								{
+									actor->NotifyAnimationGraph("blockStop");
+								}
+							}
 							// if they are blocking theyre probably not attacking
 							bool ShouldDirectionMatch = !target->IsBlocking();
 							// if the target takes too long in one guard, try switching
@@ -236,6 +243,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							if (!AttackHandler::GetSingleton()->CanAttack(actor))
 							{
 								ShouldDirectionMatch = true;
+								//TryBlock(actor, target);
 							}
 							if (!ShouldDirectionMatch)
 							{
@@ -311,7 +319,7 @@ bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 	// don't contribute if they have too many attackers
 	if (BlockHandler::GetSingleton()->GetNumberAttackers(target) > 1)
 	{
-		return false;
+		//return false;
 	}
 	CalcAndInsertDifficulty(actor);
 
@@ -350,21 +358,40 @@ bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 	return false;
 }
 
-void AIHandler::TryRiposte(RE::Actor* actor)
+void AIHandler::TryRiposte(RE::Actor* actor, RE::Actor* attacker)
 {
 	std::unique_lock lock(DifficultyMapMtx);
 	int mod = (int)CalcAndInsertDifficulty(actor);
-	// 12 - 27 range
-	// 6 - 13
-	// .83 - .97
-	mod += 3;
-	mod *= 3;
+	// 5 - 10 range
+	// 2 - 5
+	// .5 - .8
+	mod += 4;
 	mod = (int)(mod * 0.5);
 	int val = mt_rand() % mod;
+	SwitchToNextAttack(actor);
 	if (val > 0)
 	{
-		SwitchToNextAttack(actor);
-		AddAction(actor, AIHandler::Actions::Riposte, true);
+		
+		bool ShouldFeint = DirectionHandler::GetSingleton()->HasBlockAngle(actor, attacker);
+		float TotalStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+		if (CurrentStamina < TotalStamina * 0.5f)
+		{
+			ShouldFeint = false;
+		}
+		if (val < 2)
+		{
+			ShouldFeint = false;
+		}
+		if (ShouldFeint)
+		{
+			AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
+		}
+		else
+		{
+			AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+		}
+		
 	}
 }
 
@@ -379,7 +406,8 @@ void AIHandler::TryBlock(RE::Actor* actor, RE::Actor* attacker)
 	{
 		// try direction match
 		DirectionMatchTarget(actor, attacker, false);
-		AddAction(actor, AIHandler::Actions::Block, true);
+		Directions CurrentTargetDir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
+		AddAction(actor, AIHandler::Actions::Block, CurrentTargetDir, true);
 	}
 }
 
@@ -862,32 +890,51 @@ void AIHandler::Update(float delta)
 			if (ActionQueueIter->second.toDo == Actions::Riposte)
 			{ 
 				TryAttack(actor);
+				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Block)
 			{ 
 				actor->NotifyAnimationGraph("blockStart");
+				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::ProBlock)
 			{
 				actor->NotifyAnimationGraph("blockStart");
+				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Bash)
 			{
 				actor->NotifyAnimationGraph("bashStart");
+				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::StartFeint)
 			{
 				TryAttack(actor);
-				
+				// add action will freeze due to mutex lock
+				// hack fix later
+				ActionQueueIter->second.toDo = Actions::EndFeint;
+				ActionQueueIter->second.timeLeft = DifficultySettings::FeintWindowTime - (CalcActionTimer(actor) * .5f);
+
 			}
 			else if (ActionQueueIter->second.toDo == Actions::EndFeint)
 			{
 				AttackHandler::GetSingleton()->HandleFeint(actor);
+				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+				if (dir == Directions::TR || dir == Directions::BR)
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL, true);
+				}
+				else
+				{
+					DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR, true);
+				}
 				// queue another attack
+				ActionQueueIter->second.toDo = Actions::Riposte;
+				ActionQueueIter->second.timeLeft = 0.15f + (CalcActionTimer(actor) * .5f);
 			}
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor
-			ActionQueueIter->second.toDo = Actions::None;
+			
 			// do not erase every time for perf reasons
 			//ActionQueueIter = ActionQueue.erase(ActionQueueIter);
 			//continue;

@@ -86,7 +86,14 @@ void UIMenu::AdvanceMovie(float interval, std::uint32_t a_currentTime)
 	mtx.lock();
 	for (uint32_t i = 0; i < DrawCommands.size(); ++i)
 	{
-
+		// mirror effectively means not player
+		if (DrawCommands[i].mirror && UISettings::HarderUI)
+		{
+			if (DrawCommands[i].state != UIDirectionState::Attacking)
+			{
+				continue;
+			}
+		}
 		RE::NiPoint3 Position = DrawCommands[i].position;
 		Directions Dir = DrawCommands[i].dir;
 		uint32_t white = 0xB0B0B3;

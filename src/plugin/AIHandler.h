@@ -49,7 +49,7 @@ public:
 	void Update(float delta);
 	void RunActor(RE::Actor* actor, float delta);
 	// called from other thread
-	void TryRiposte(RE::Actor* actor);
+	void TryRiposte(RE::Actor* actor, RE::Actor* attacker);
 	void TryBlock(RE::Actor* actor, RE::Actor* attacker);
 	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
 	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
@@ -103,7 +103,7 @@ public:
 private:
 	RE::BGSKeyword* EnableRaceKeyword;
 
-	void AddAction(RE::Actor* actor, Actions toDo, bool force = false);
+	void AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir = Directions::TR, bool force = false);
 	float CalcUpdateTimer(RE::Actor* actor);
 	float CalcActionTimer(RE::Actor* actor);
 	void DidAct(RE::Actor* actor);
@@ -113,7 +113,7 @@ private:
 		Actions toDo;
 		float timeLeft;
 		// for pro block
-		Directions toMatch;
+		Directions targetDir;
 	};
 
 	struct AIDifficulty

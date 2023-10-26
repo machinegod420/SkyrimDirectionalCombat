@@ -6,8 +6,9 @@ float DifficultySettings::UnblockableDamageMult = 3.f;
 float DifficultySettings::ProjectileDamageMult = 0.25f;
 float DifficultySettings::StaggerResetTimer = 1.5f;
 float DifficultySettings::ChamberWindowTime = 0.2f;
+float DifficultySettings::FeintWindowTime = 0.4f;
 float DifficultySettings::HyperarmorTimer = 1.0f;
-float DifficultySettings::StaminaRegenMult = 0.2f;
+float DifficultySettings::StaminaRegenMult = 39.f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
@@ -19,6 +20,8 @@ float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
 bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
+bool Settings::BufferInput = true;
+bool Settings::SwitchingCostsStamina = true;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -68,6 +71,7 @@ float UISettings::Length = 13.f;
 float UISettings::Thickness = 7.f;
 float UISettings::DisplayDistance = 2000.0;
 bool UISettings::ShowUI = true;
+bool UISettings::HarderUI = true;
 bool UISettings::OnlyShowTargetted = true;
 
 void SettingsLoader::InitializeDefaultValues()
@@ -78,7 +82,8 @@ void SettingsLoader::InitializeDefaultValues()
 	DifficultySettings::ProjectileDamageMult = 0.25f;
 	DifficultySettings::StaggerResetTimer = 1.5f;
 	DifficultySettings::ChamberWindowTime = 0.2f;
-	DifficultySettings::StaminaRegenMult = 0.2f;
+	DifficultySettings::FeintWindowTime = 0.4f;
+	DifficultySettings::StaminaRegenMult = 39.f;
 	DifficultySettings::HyperarmorTimer = 1.0f;
 	DifficultySettings::AttackTimeoutTime = 1.0f;
 	DifficultySettings::AttacksCostStamina = true;
@@ -91,6 +96,7 @@ void SettingsLoader::InitializeDefaultValues()
 	Settings::HasPrecision = false;
 	Settings::EnableForH2H = true;
 	Settings::MNBMode = false;
+	Settings::SwitchingCostsStamina = true;
 
 	InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 	InputSettings::MouseSens = 5;
@@ -140,6 +146,7 @@ void SettingsLoader::InitializeDefaultValues()
 	UISettings::Thickness = 7.f;
 	UISettings::DisplayDistance = 2000.0;
 	UISettings::ShowUI = true;
+	UISettings::HarderUI = true;
 }
 
 void SettingsLoader::Load(const std::string& path)
@@ -264,6 +271,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::ChamberWindowTime = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::ChamberWindowTime);
+				}
+				else if (fieldName == "FeintWindowTime")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::FeintWindowTime = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::FeintWindowTime);
 				}
 
 				else if (fieldName == "AttacksCostStamina")
@@ -489,6 +503,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, UISettings::ShowUI);
 				}
+				else if (fieldName == "HarderUI")
+				{
+					bool newval = field.as<bool>();
+					UISettings::HarderUI = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, UISettings::HarderUI);
+				}
 				else if (fieldName == "OnlyShowTargettedEnemies")
 				{
 					bool newval = field.as<bool>();
@@ -512,6 +533,13 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::MNBMode = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::MNBMode);
+				}
+				else if (fieldName == "SwitchingCostsStamina")
+				{
+					bool newval = field.as<bool>();
+					Settings::SwitchingCostsStamina = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::SwitchingCostsStamina);
 				}
 			}
 			else if (sectionName == "Weapons")

@@ -39,7 +39,7 @@ public:
 	void SwitchDirectionUp(RE::Actor* actor);
 	void SwitchDirectionDown(RE::Actor* actor);
 	void SwitchDirectionRight(RE::Actor* actor);
-	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false);
+	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false, bool overwrite = true);
 	RE::SpellItem* DirectionToPerk(Directions dir) const;
 	RE::SpellItem* GetDirectionalPerk(RE::Actor* actor) const;
 	Directions PerkToDirection(RE::SpellItem* perk) const;
@@ -53,6 +53,18 @@ public:
 			ret = Iter->second;
 		}
 		ActiveDirectionsMtx.unlock_shared();
+		return ret;
+	}
+	inline bool HasQueuedDirection(RE::Actor* actor, Directions& OutDirection)
+	{
+		bool ret = false;
+		DirectionTimersMtx.lock_shared();
+		if (DirectionTimers.contains(actor->GetHandle()))
+		{
+			OutDirection = DirectionTimers.at(actor->GetHandle()).dir;
+			ret = true;
+		}
+		DirectionTimersMtx.unlock_shared();
 		return ret;
 	}
 	void RemoveDirectionalPerks(RE::ActorHandle handle);
@@ -134,9 +146,11 @@ private:
 	 
 
 	bool CanSwitch(RE::Actor* actor);
-	void SwitchDirectionSynchronous(RE::Actor* actor, Directions dir);
+	void SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking);
 	struct DirectionSwitch
 	{
+		// for buffering
+		bool wasBlocking = false;
 		Directions dir;
 		float timeLeft;
 	};

@@ -10,6 +10,7 @@ struct DifficultySettings
 	static float ProjectileDamageMult;
 	static float StaggerResetTimer;
 	static float ChamberWindowTime;
+	static float FeintWindowTime;
 	static float HyperarmorTimer;
 	static float StaminaRegenMult;
 	static float AttackTimeoutTime;
@@ -26,6 +27,8 @@ struct Settings
 	static bool HasPrecision;
 	static bool EnableForH2H;
 	static bool MNBMode;
+	static bool BufferInput;
+	static bool SwitchingCostsStamina;
 };
 
 struct InputSettings
@@ -99,7 +102,8 @@ struct UISettings
 	static float Thickness;
 	static float DisplayDistance;
 	static bool ShowUI;
-	static bool OnlyShowTargetted;
+	static bool HarderUI;
+	static bool OnlyShowTargetted; 
 };
 
 class SettingsLoader

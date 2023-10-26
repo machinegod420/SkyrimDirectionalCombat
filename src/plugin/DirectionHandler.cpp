@@ -6,7 +6,7 @@
 
 // in seconds
 // slow time should be a multiple as it affects animation events and we don't want to get stuck in the wrong idle
-constexpr float TimeBetweenChanges = 0.12f;
+constexpr float TimeBetweenChanges = 0.122f;
 constexpr float SlowTimeBetweenChanges = TimeBetweenChanges * 2.f;
 
 void DirectionHandler::Initialize()
@@ -162,6 +162,10 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 bool DirectionHandler::DetermineMirrored(RE::Actor* actor)
 {
 	// don't do anything funky in first person
+	if (actor->IsPlayerRef())
+	{
+		return false;
+	}
 	bool FirstPerson = (actor->IsPlayerRef() && RE::PlayerCamera::GetSingleton()->IsInFirstPerson());
 	if (!FirstPerson)
 	{
@@ -252,7 +256,7 @@ bool DirectionHandler::CanSwitch(RE::Actor* actor)
 	return !(actor->IsAttacking() && !InAttackWin.contains(actor->GetHandle()));
 }
 
-void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir)
+void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking)
 {
 	// ever since the perks were switched to spells, there has been some async problems where there can be a 
 	// race condition that when removing all spells, the character update gets called and adds new spells before
@@ -295,11 +299,22 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 	}
 
 	// if blocking they have an imperfect parry
-	if (actor->IsBlocking())
+	if (actor->IsBlocking() && wasBlocking)
 	{
-		ImperfectParryMtx.lock();
-		ImperfectParry.insert(actor->GetHandle());
-		ImperfectParryMtx.unlock();
+
+		// Use imperfect parry only if we dont want switching guards to cost stamina
+		if (Settings::SwitchingCostsStamina)
+		{
+			float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * 0.1f;
+			actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
+		}
+		else
+		{
+			ImperfectParryMtx.lock();
+			ImperfectParry.insert(actor->GetHandle());
+			ImperfectParryMtx.unlock();
+		}
+
 	}
 	
 
@@ -359,7 +374,7 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 }
 
 
-void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force)
+void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force, bool overwrite)
 {
 	// skip if we try to switch to the same dir
 	std::shared_lock lock(ActiveDirectionsMtx);
@@ -376,11 +391,18 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 		DirectionTimersMtx.unlock();
 		return;
 	}
+	float timeleft = TimeBetweenChanges;
+	if (force && !overwrite && Iter != DirectionTimers.end())
+	{
+		// oddly specific change
+		timeleft = Iter->second.timeLeft;
+	}
 	if (force || Iter == DirectionTimers.end())
 	{
 		DirectionSwitch ToDir;
 		ToDir.dir = dir;
-		ToDir.timeLeft = TimeBetweenChanges;
+		ToDir.timeLeft = timeleft;
+		ToDir.wasBlocking = actor->IsBlocking();
 		DirectionTimers[actor->GetHandle()] = ToDir;
 	}
 	DirectionTimersMtx.unlock();
@@ -691,7 +713,7 @@ void DirectionHandler::Update(float delta)
 			// this will sit in queue until this happens
 			if (CanSwitch(actor))
 			{
-				SwitchDirectionSynchronous(actor, Iter->second.dir);
+				SwitchDirectionSynchronous(actor, Iter->second.dir, Iter->second.wasBlocking);
 
 				// We use a timer instead of below code in order to slow down the animation transitions (purely visual)
 				// Since we want the animation time to be longer than the actual time to switch directions

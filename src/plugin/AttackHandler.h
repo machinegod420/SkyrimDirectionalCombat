@@ -20,8 +20,11 @@ public:
 
 	bool InChamberWindow(RE::Actor* actor);
 	bool CanAttack(RE::Actor* actor);
+	bool InFeintWindow(RE::Actor* actor);
 
 	void AddChamberWindow(RE::Actor* actor);
+	void AddFeintWindow(RE::Actor* actor);
+	void RemoveFeintWindow(RE::Actor* actor);
 
 	void AddLockout(RE::Actor* actor);
 	void HandleFeint(RE::Actor* actor);
@@ -48,6 +51,9 @@ public:
 private:
 	phmap::flat_hash_map<RE::ActorHandle, float> ChamberWindow;
 	mutable std::shared_mutex ChamberWindowMtx;
+
+	phmap::flat_hash_map<RE::ActorHandle, float> FeintWindow;
+	mutable std::shared_mutex FeintWindowMtx;
 
 	phmap::flat_hash_map<RE::ActorHandle, float> AttackLockout;
 	mutable std::shared_mutex AttackLockoutMtx;
