@@ -4,6 +4,7 @@
 #include "SettingsLoader.h"
 #include "InputHandler.h"
 #include "3rdparty/PrecisionAPI.h"
+#include "3rdparty/TrueDirectionalMovementAPI.h"
 
 void InitLogger()
 {
@@ -46,16 +47,27 @@ void OnDataLoad()
 		Settings::HasPrecision = false;
 	}
 
-
+	TDM_API::IVTDM2* tdm = reinterpret_cast<TDM_API::IVTDM2*>(TDM_API::RequestPluginAPI(TDM_API::InterfaceVersion::V2));
+	if (tdm)
+	{
+		logger::info("TDM dll found");
+		Settings::HasTDM = true;
+	}
+	else
+	{
+		logger::info("TDM dll not found");
+		Settings::HasTDM = false;
+	}
+	
 	Hooks::Hooks::Install();
-	DirectionHandler::GetSingleton()->Initialize();
+	DirectionHandler::GetSingleton()->Initialize(tdm);
 	FXHandler::GetSingleton()->Initialize();
 	BlockHandler::GetSingleton()->Initialize();
 	MenuOpenCloseEventHandler::Register();
 	InputEventHandler::Register();
 	UIMenu::RegisterMenu();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
-	SettingsLoader::GetSingleton()->RemovePowerAttacks();
+	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	AIHandler::GetSingleton()->InitializeValues();
 }
 

@@ -66,7 +66,12 @@ namespace Hooks
 		
 		return ret; 
 	}
-
+	inline bool playPairedIdle(RE::AIProcess* proc, RE::Actor* attacker, RE::DEFAULT_OBJECT smth, RE::TESIdleForm* idle, bool a5, bool a6, RE::TESObjectREFR* target)
+	{
+		using func_t = decltype(&playPairedIdle);
+		REL::Relocation<func_t> func{ RELOCATION_ID(38290, 39256) };
+		return func(proc, attacker, smth, idle, a5, a6, target);
+	}
 	void HookOnMeleeHit::OnMeleeHit(RE::Actor* target, RE::HitData& hitData)
 	{
 		
@@ -75,10 +80,22 @@ namespace Hooks
 		{
 			// ignore hit if was bash attack against attacking character
 			// bash can be used to open up enemies but will fail if you bash after an attack started
-			if (target->IsAttacking() && hitData.flags.any(RE::HitData::Flag::kBash))
+			if (hitData.flags.any(RE::HitData::Flag::kBash))
 			{
-				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
-				//return;
+				if (target->IsAttacking())
+				{
+					BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
+
+				}
+				else
+				{
+					//bash does stamina damage
+					float Damage = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+					Damage *= 0.2f;
+					target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
+				}
+				_OnMeleeHit(target, hitData);
+				return;
 			}
 			DirectionHandler::GetSingleton()->DebuffActor(attacker);
 			bool AttackerUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(attacker);
@@ -136,6 +153,7 @@ namespace Hooks
 					*/
 					RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
 					typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
+					
 					static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
 					foo(target->GetCharController(), t, .5f);
 
@@ -143,14 +161,18 @@ namespace Hooks
 					// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 					// riposte instead of being gambled
 
-					if (attacker->IsPlayerRef())
+					if (!hitData.flags.any(RE::HitData::Flag::kPowerAttack))
 					{
-						AttackHandler::GetSingleton()->LockoutPlayer();
+						if (attacker->IsPlayerRef())
+						{
+							AttackHandler::GetSingleton()->LockoutPlayer();
+						}
+						else
+						{
+							AttackHandler::GetSingleton()->AddLockout(attacker);
+						}
 					}
-					else
-					{
-						AttackHandler::GetSingleton()->AddLockout(attacker);
-					}
+
 				}
 				else
 				{
@@ -369,8 +391,8 @@ namespace Hooks
 	{
 
 		auto Player = RE::PlayerCharacter::GetSingleton();
-		int32_t diff = 20;
-		int32_t diff2 = 50;
+		int32_t diff = InputSettings::MouseSens;
+		int32_t diff2 = InputSettings::MouseSens * 2;
 		Directions CurrentDirection = DirectionHandler::GetSingleton()->GetCurrentDirection(Player);
 		Directions WantDirection;
 		bool contains = DirectionHandler::GetSingleton()->HasQueuedDirection(Player, WantDirection);
@@ -525,12 +547,12 @@ namespace Hooks
 		}
 
 		// try to prevent power attacks, however this is not guaranteed to be populated
-		if (actor->GetActorRuntimeData().currentProcess->high->attackData)
+		if (actor->GetActorRuntimeData().currentProcess->high->attackData && Settings::RemovePowerAttacks)
 		{
 			if (actor->GetActorRuntimeData().currentProcess->high->attackData.get()->data.flags.any(
 				RE::AttackData::AttackFlag::kPowerAttack))
 			{
-				return false;
+				// return false;
 			}
 		}
 
@@ -558,7 +580,7 @@ namespace Hooks
 			//one way to do this is to slowly build up a hashmap over the lifetime of the game of if this is a power attack
 			if (a_actionData->action->formEditorID.contains("Power"))
 			{
-				return false;
+				//return false;
 			}
 			if (DifficultySettings::AttacksCostStamina)
 			{
@@ -649,7 +671,21 @@ namespace Hooks
 		}
 		return _ProcessAttackHook(handler, a_event, a_data);
 	}
-
+	bool isPowerAttacking(RE::Actor* a_actor)
+	{
+		auto currentProcess = a_actor->GetActorRuntimeData().currentProcess;
+		if (currentProcess) {
+			auto highProcess = currentProcess->high;
+			if (highProcess) {
+				auto attackData = highProcess->attackData;
+				if (attackData) {
+					auto flags = attackData->data.flags;
+					return flags.any(RE::AttackData::AttackFlag::kPowerAttack) && !flags.any(RE::AttackData::AttackFlag::kBashAttack);
+				}
+			}
+		}
+		return false;
+	}
 	void HookAnimEvent::ProcessCharacterEvent(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
 	{
 		UNUSED(a_sink);
@@ -681,6 +717,10 @@ namespace Hooks
 				if (Equipped)
 				{
 					staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
+				}
+				if (isPowerAttacking(actor))
+				{
+					//staminaCost *= 2.0f;
 				}
 				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 
@@ -721,22 +761,22 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 		}
 
-		// feint annotations
+		// feint events
 		else if (str == "FeintToTR"_h)
 		{ 
-			//DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::TR);
+			DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::TR, false);
 		}
 		else if (str == "FeintToTL"_h)
 		{
-			//DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::TL);
+			DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::TL, false);
 		}
 		else if (str == "FeintToBL"_h)
 		{
-			//DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::BL);
+			DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::BL, false);
 		}
 		else if (str == "FeintToBR"_h)
 		{
-			//DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::BR);
+			DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::BR, false);
 		}
 	}
 	RE::BSEventNotifyControl HookAnimEvent::ProcessEvent_NPC(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
@@ -752,11 +792,13 @@ namespace Hooks
 
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
+
 		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
 	}
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
-		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
+
+		return _NotifyAnimationGraph_NPC(a_graphHolder, eventName);
 	}
 	void Hooks::Install()
 	{

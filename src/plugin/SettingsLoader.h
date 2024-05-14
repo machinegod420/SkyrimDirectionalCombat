@@ -1,6 +1,8 @@
 #pragma once
 
 #include "3rdparty/inicpp.h"
+#include "3rdparty/TrueDirectionalMovementAPI.h"
+#include "3rdparty/PrecisionAPI.h"
 
 struct DifficultySettings
 {
@@ -25,10 +27,12 @@ struct Settings
 {
 	static float ActiveDistance;
 	static bool HasPrecision;
+	static bool HasTDM;
 	static bool EnableForH2H;
 	static bool MNBMode;
 	static bool BufferInput;
 	static bool SwitchingCostsStamina;
+	static bool RemovePowerAttacks;
 };
 
 struct InputSettings

@@ -18,10 +18,12 @@ float DifficultySettings::KnockbackMult = 2.f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
+bool Settings::HasTDM = false;
 bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
+bool Settings::RemovePowerAttacks = true;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -541,6 +543,20 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::SwitchingCostsStamina);
 				}
+				else if (fieldName == "EnableForH2H")
+				{
+					bool newval = field.as<bool>();
+					Settings::EnableForH2H = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::EnableForH2H);
+				}
+				else if (fieldName == "RemovePowerAttacks")
+				{
+					bool newval = field.as<bool>();
+					Settings::RemovePowerAttacks = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::RemovePowerAttacks);
+				}
 			}
 			else if (sectionName == "Weapons")
 			{
@@ -659,15 +675,15 @@ void SettingsLoader::RebalanceWeapons()
 			actor->combatStyle->generalData.offensiveMult = offensiveMult;
 
 
-			actor->combatStyle->meleeData.powerAttackBlockingMult = 0.f;
-			actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.f;
-			actor->combatStyle->meleeData.specialAttackMult = 0.f;
+			actor->combatStyle->meleeData.powerAttackBlockingMult = 0.1f;
+			actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
+			actor->combatStyle->meleeData.specialAttackMult = 0.2f;
 
 			float circleMult = actor->combatStyle->closeRangeData.circleMult * 1.f;
 			circleMult = std::min(0.99f, circleMult);
 			actor->combatStyle->closeRangeData.circleMult = circleMult;
 
-			//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 4.f;
+			//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 1.5f;
 			//fallbackMult = std::min(0.99f, fallbackMult);
 			//actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
 		}
@@ -732,6 +748,10 @@ void SettingsLoader::RebalanceWeapons()
 
 void SettingsLoader::RemovePowerAttacks()
 {
+	if (!Settings::RemovePowerAttacks)
+	{
+		//return;
+	}
 	logger::info("erasing power attacks");
 
 	// double weirdness - if the AI is forced to do power attacks thru scripts or anything of the sort, it will cause weird animation freezes
@@ -745,6 +765,11 @@ void SettingsLoader::RemovePowerAttacks()
 			{
 				//logger::info("got {}", iter.first.c_str());
 				if (iter.first.contains("attack") && iter.first.contains("Power") && !iter.first.contains("InPlace"))
+				{
+					race->attackDataMap->attackDataMap.erase(iter.first);
+					//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+				}
+				if (iter.first.contains("attack") && iter.first.contains("Sprint"))
 				{
 					race->attackDataMap->attackDataMap.erase(iter.first);
 					//logger::info("erasing {} with result {}", iter.first.c_str(), result);
@@ -763,6 +788,11 @@ void SettingsLoader::RemovePowerAttacks()
 
 						//logger::info("{}", (*newevents)[j].eventName);
 						if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Power") && !(*newevents)[j].eventName.contains("InPlace"))
+						{
+							//newevents->erase(&(*newevents)[i]);
+							newevents->erase(newevents->begin() + j);
+						}
+						else if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Sprint"))
 						{
 							//newevents->erase(&(*newevents)[i]);
 							newevents->erase(newevents->begin() + j);

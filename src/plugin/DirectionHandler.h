@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include "parallel_hashmap/phmap.h"
 
+#include "3rdparty/TrueDirectionalMovementAPI.h"
 
 class DirectionHandler
 {
@@ -71,7 +72,7 @@ public:
 	void UIDrawAngles(RE::Actor* actor);
 	bool DetermineMirrored(RE::Actor* actor);
 
-	void Initialize();
+	void Initialize(TDM_API::IVTDM2 *tdm);
 	void UpdateCharacter(RE::Actor* actor, float delta);
 	void Update(float delta);
 	void SendAnimationEvent(RE::Actor* actor);
@@ -123,7 +124,11 @@ public:
 		InAttackWin.erase(actor->GetHandle());
 		InAttackWinMtx.unlock();
 	}
+
+	// DO NOT CALL THIS PUBLICALLY UNLESS IN VERY SPECIFIC SITUATIONS
+	void SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking);
 private:
+	TDM_API::IVTDM2 *TDM;
 	void CleanupActor(RE::ActorHandle actor);
 	RE::SpellItem* TR;
 	RE::SpellItem* TL;
@@ -146,7 +151,7 @@ private:
 	 
 
 	bool CanSwitch(RE::Actor* actor);
-	void SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking);
+	
 	struct DirectionSwitch
 	{
 		// for buffering

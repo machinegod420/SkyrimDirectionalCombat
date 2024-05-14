@@ -9,8 +9,9 @@
 constexpr float TimeBetweenChanges = 0.122f;
 constexpr float SlowTimeBetweenChanges = TimeBetweenChanges * 2.f;
 
-void DirectionHandler::Initialize()
+void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
+	TDM = tdm;
 	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 	TR = DataHandler->LookupForm<RE::SpellItem>(0x5370, PluginName);
 	TL = DataHandler->LookupForm<RE::SpellItem>(0x5371, PluginName);
@@ -83,7 +84,14 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 			return;
 		}
 
-		if (UISettings::OnlyShowTargetted)
+		if(Settings::HasTDM && TDM)
+		{
+			if (actor->GetHandle() != TDM->GetCurrentTarget())
+			{
+				return;
+			}
+		}
+		else if (UISettings::OnlyShowTargetted)
 		{
 			auto player = RE::PlayerCharacter::GetSingleton();
 			if (!actor->IsHostileToActor(player))
@@ -540,6 +548,11 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	// Only weapons (no H2H)
 	// however, if race can attack then we force it anyway
 	bool RaceCanFight = AIHandler::GetSingleton()->RaceForcedDirectionalCombat(actor);
+	// Is NPC so allow h2h if have setting
+	if (Settings::EnableForH2H && actor->GetRace()->HasKeyword(NPCKeyword))
+	{
+		RaceCanFight = true;
+	}
 	if (!RaceCanFight)
 	{
 		if (!Equipped || (Equipped && !Equipped->IsWeapon()))
@@ -578,6 +591,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			HasWeapon = true;
 		}
 	}
+
 	if (!HasWeapon)
 	{
 		if (HasDirectionalPerks(actor))
@@ -590,6 +604,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 
 		return;
 	}
+	
 	if (WeaponState == RE::WEAPON_STATE::kDrawn)
 	{
 		if (!HasDirectionalPerks(actor))

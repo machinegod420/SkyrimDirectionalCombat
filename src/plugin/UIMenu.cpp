@@ -100,7 +100,8 @@ void UIMenu::AdvanceMovie(float interval, std::uint32_t a_currentTime)
 		uint32_t active = 0xFFFF40;
 		uint32_t background = 0x000000;
 		// unorm color value
-		uint32_t transparency = 256u;
+		uint32_t transparency = 130u;
+		uint32_t transparency2 = 40u;
 
 		switch (DrawCommands[i].hostileState)
 		{
@@ -162,17 +163,17 @@ void UIMenu::AdvanceMovie(float interval, std::uint32_t a_currentTime)
 			// only flip horizontal axes
 			if (!DrawCommands[i].mirror)
 			{
-				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, transparency);
+				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
 			}
 			else
 			{
-				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, transparency);
-				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, transparency);
+				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
 			}
 		}
 
@@ -279,7 +280,7 @@ void UIMenu::DrawDirection(RE::NiPoint2 StartPos, float depth, Directions dir, b
 	RE::GFxValue argsEndPos2[2]{ EndPos.x, EndPos.y };
 	uiMovie->Invoke("lineTo", nullptr, argsEndPos2, 2);
 
-	RE::GFxValue argsLineStyle[3]{ thickness, color, 100.f };
+	RE::GFxValue argsLineStyle[3]{ thickness, color, transparency };
 	uiMovie->Invoke("lineStyle", nullptr, argsLineStyle, 3);
 
 	RE::GFxValue argsStartPos[2]{ StartPos.x, StartPos.y };

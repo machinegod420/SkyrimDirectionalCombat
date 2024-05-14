@@ -196,7 +196,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						// always attack if have perk
 						if (DirHandler->IsUnblockable(actor))
 						{
-							TryAttack(actor);
+							AddAction(actor, AIHandler::Actions::Riposte);
 						}
 
 						if (actor->IsAttacking())
@@ -210,18 +210,42 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							if (target->IsAttacking())
 							{
 								//logger::info("NPC in range");
-								AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::Block);
+								if (mt_rand() % 10 < 10 && DirHandler->HasBlockAngle(actor, target))
+								{
+									// masterstrike
+									AddAction(actor, AIHandler::Actions::Riposte);
+								}
+								else
+								{
+									AddAction(actor, AIHandler::Actions::Block);
+								}
+								
 							}
 							else if (actor->IsBlocking() && DirHandler->HasImperfectParry(actor))
 							{
 								actor->NotifyAnimationGraph("blockStop");
 							}
+							else if (actor->IsBlocking() && TargetDist < 10000 && !target->IsBlocking())
+							{
+								AddAction(actor, Actions::Bash);
+							}
 							else if (actor->IsBlocking())
+							{
+								actor->NotifyAnimationGraph("blockStop");
+								
+							}
+							if (actor-> IsBlocking() && 
+								actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.4f > actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina))
 							{
 								if (Settings::SwitchingCostsStamina)
 								{
 									actor->NotifyAnimationGraph("blockStop");
 								}
+								
+							}
+							if (!AttackHandler::GetSingleton()->CanAttack(target) && actor->IsBlocking())
+							{
+								actor->NotifyAnimationGraph("blockStop");
 							}
 							// if they are blocking theyre probably not attacking
 							bool ShouldDirectionMatch = !target->IsBlocking();
@@ -231,6 +255,10 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								ShouldDirectionMatch = false;
 								//logger::info("try to move to a new angle");
 								// unless they are attacking and havent moved
+								if (actor->IsBlocking())
+								{
+									actor->NotifyAnimationGraph("blockStop");
+								}
 
 							}
 							if (target->IsAttacking())
@@ -248,6 +276,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							if (!ShouldDirectionMatch)
 							{
 								SwitchToNewDirection(actor, target);
+
 							}
 							else
 							{
@@ -369,6 +398,7 @@ void AIHandler::TryRiposte(RE::Actor* actor, RE::Actor* attacker)
 	mod = (int)(mod * 0.5);
 	int val = mt_rand() % mod;
 	SwitchToNextAttack(actor);
+
 	if (val > 0)
 	{
 		
@@ -392,6 +422,10 @@ void AIHandler::TryRiposte(RE::Actor* actor, RE::Actor* attacker)
 			AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
 		}
 		
+	}
+	else
+	{
+		AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR, true);
 	}
 }
 
@@ -905,6 +939,11 @@ void AIHandler::Update(float delta)
 			else if (ActionQueueIter->second.toDo == Actions::Bash)
 			{
 				actor->NotifyAnimationGraph("bashStart");
+				ActionQueueIter->second.toDo = Actions::None;
+			}
+			else if (ActionQueueIter->second.toDo == Actions::EndBlock)
+			{
+				actor->NotifyAnimationGraph("blockStop");
 				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::StartFeint)

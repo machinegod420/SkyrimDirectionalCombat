@@ -33,7 +33,8 @@ public:
 		ProBlock,
 		StartFeint,
 		EndFeint,
-		Bash
+		Bash,
+		EndBlock
 	};
 
 	static AIHandler* GetSingleton()
