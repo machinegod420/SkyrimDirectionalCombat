@@ -486,9 +486,9 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 void DirectionHandler::AdjustActorScale(RE::Actor* actor)
 {
 	UNUSED(actor);
+	/*
 	
-	
-	RE::bhkCharacterController* controller;
+		RE::bhkCharacterController* controller;
 	auto cell = actor->GetParentCell();
 	if (!cell) {
 		return;
@@ -544,6 +544,10 @@ void DirectionHandler::AdjustActorScale(RE::Actor* actor)
 	bool* bumperEnabled = reinterpret_cast<bool*>(&controller->unk320);
 	*bumperEnabled = true;
 	Utils::ToggleCharacterBumper(actor.get(), false);
+	
+	*/
+	
+
 	
 
 }
