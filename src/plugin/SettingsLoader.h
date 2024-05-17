@@ -30,6 +30,8 @@ struct Settings
 	static bool HasTDM;
 	static bool EnableForH2H;
 	static bool MNBMode;
+	static bool ForHonorMode;
+	static bool ExperimentalMode;
 	static bool BufferInput;
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;

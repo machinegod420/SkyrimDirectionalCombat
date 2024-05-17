@@ -75,6 +75,7 @@ public:
 	void ReduceDifficulty(RE::Actor* actor);
 	void ResetDifficulty(RE::Actor* actor);
 	void SwitchToNextAttack(RE::Actor* actor);
+	Directions GetNextAttack(RE::Actor* actor);
 
 	// Load attackdata so our attackstart event is processed correctly as an attack
 	void LoadCachedAttack(RE::Actor* actor);
@@ -109,12 +110,20 @@ private:
 	float CalcActionTimer(RE::Actor* actor);
 	void DidAct(RE::Actor* actor);
 
+	Actions GetQueuedAction(RE::Actor* actor);
+
 	struct Action
 	{
 		Actions toDo;
 		float timeLeft;
 		// for pro block
 		Directions targetDir;
+	};
+
+	enum class AIState
+	{
+		Attacking,
+		Defending
 	};
 
 	struct AIDifficulty

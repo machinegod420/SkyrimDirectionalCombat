@@ -71,6 +71,7 @@ public:
 	void RemoveDirectionalPerks(RE::ActorHandle handle);
 	void UIDrawAngles(RE::Actor* actor);
 	bool DetermineMirrored(RE::Actor* actor);
+	void AdjustActorScale(RE::Actor* actor);
 
 	void Initialize(TDM_API::IVTDM2 *tdm);
 	void UpdateCharacter(RE::Actor* actor, float delta);

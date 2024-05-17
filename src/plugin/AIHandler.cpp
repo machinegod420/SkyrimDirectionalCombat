@@ -194,7 +194,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					if (TargetDist < 70000)
 					{
 						// always attack if have perk
-						if (DirHandler->IsUnblockable(actor))
+						if (DirHandler->IsUnblockable(actor) && actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) > 10)
 						{
 							AddAction(actor, AIHandler::Actions::Riposte);
 						}
@@ -206,82 +206,76 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						}
 						else
 						{
-
+							bool ShouldDirectionMatch = true;
+							bool DontChangeDirection = false;
 							if (target->IsAttacking())
 							{
-								//logger::info("NPC in range");
-								if (mt_rand() % 10 < 10 && DirHandler->HasBlockAngle(actor, target))
+								Actions action = GetQueuedAction(actor);
+								// try to block or masterstrike
+								if (action != Actions::Riposte && action != Actions::Block)
 								{
-									// masterstrike
-									AddAction(actor, AIHandler::Actions::Riposte);
+									if (mt_rand() % 10 < 1 && DirHandler->HasBlockAngle(actor, target))
+									{
+										// masterstrike
+										AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+									}
+									else
+									{
+										AddAction(actor, Actions::Block, Directions::TR, true);
+									}
 								}
-								else
+								if(DirHandler->HasBlockAngle(actor, target))
 								{
-									AddAction(actor, AIHandler::Actions::Block);
+									DontChangeDirection = true;
+								}
+
+								
+								if (DifficultyMap.contains(actor->GetHandle()))
+								{
+									DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
 								}
 								
-							}
-							else if (actor->IsBlocking() && DirHandler->HasImperfectParry(actor))
-							{
-								actor->NotifyAnimationGraph("blockStop");
+								
 							}
 							else if (actor->IsBlocking() && TargetDist < 10000 && !target->IsBlocking())
 							{
 								AddAction(actor, Actions::Bash);
 							}
-							else if (actor->IsBlocking())
+							else if(actor->IsBlocking())
 							{
-								actor->NotifyAnimationGraph("blockStop");
-								
+								AddAction(actor, Actions::EndBlock);
+								//SwitchToNextAttack(actor);
 							}
-							if (actor-> IsBlocking() && 
-								actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.4f > actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina))
+							else if(actor->IsAttacking())
 							{
-								if (Settings::SwitchingCostsStamina)
-								{
-									actor->NotifyAnimationGraph("blockStop");
-								}
-								
+								SwitchToNextAttack(actor);
 							}
-							if (!AttackHandler::GetSingleton()->CanAttack(target) && actor->IsBlocking())
-							{
-								actor->NotifyAnimationGraph("blockStop");
-							}
-							// if they are blocking theyre probably not attacking
-							bool ShouldDirectionMatch = !target->IsBlocking();
-							// if the target takes too long in one guard, try switching
 							if (DifficultyMap.contains(actor->GetHandle()) && DifficultyMap[actor->GetHandle()].targetSwitchTimer > AISettings::AIWaitTimer)
 							{
 								ShouldDirectionMatch = false;
-								//logger::info("try to move to a new angle");
-								// unless they are attacking and havent moved
-								if (actor->IsBlocking())
+								// Do some clever trickery to give the ai about 0.5x wait timer to change directions
+								if (DifficultyMap[actor->GetHandle()].targetSwitchTimer > AISettings::AIWaitTimer * 1.5f)
 								{
-									actor->NotifyAnimationGraph("blockStop");
+									DifficultyMap[actor->GetHandle()].targetSwitchTimer = 0.f;
 								}
+								
+							}
+							if (target->IsBlocking())
+							{
+								ShouldDirectionMatch = false;
+							}
 
-							}
-							if (target->IsAttacking())
+							if (!DontChangeDirection)
 							{
-								//definitely direction match
-								//AI shouldn't be too good at this though
-								ShouldDirectionMatch = true;
-							}
-							// hard defensive if cant attack
-							if (!AttackHandler::GetSingleton()->CanAttack(actor))
-							{
-								ShouldDirectionMatch = true;
-								//TryBlock(actor, target);
-							}
-							if (!ShouldDirectionMatch)
-							{
-								SwitchToNewDirection(actor, target);
-
-							}
-							else
-							{
-								// direction match
-								DirectionMatchTarget(actor, target, target->IsAttacking());
+								if (ShouldDirectionMatch)
+								{
+									DirectionMatchTarget(actor, target, target->IsAttacking());
+								}
+								else
+								{
+									//SwitchToNewDirection(actor, target);
+									SwitchToNextAttack(actor);
+								}
 							}
 
 						}
@@ -340,7 +334,7 @@ void AIHandler::SwitchTarget(RE::Actor *actor, RE::Actor *newTarget)
 	}
 }
 
-
+// TODO : always return false so we get total control of when the NPC attacks
 bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 {
 	std::unique_lock lock(DifficultyMapMtx);
@@ -382,7 +376,12 @@ bool AIHandler::ShouldAttack(RE::Actor* actor, RE::Actor* target)
 	{
 		return true;
 	}
-	SwitchToNextAttack(actor);
+	// dirty, dirty hacking to get the ai to act less dumb
+	if (!target->IsAttacking())
+	{
+		SwitchToNextAttack(actor);
+	}
+	
 
 	return false;
 }
@@ -405,27 +404,31 @@ void AIHandler::TryRiposte(RE::Actor* actor, RE::Actor* attacker)
 		bool ShouldFeint = DirectionHandler::GetSingleton()->HasBlockAngle(actor, attacker);
 		float TotalStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
-		if (CurrentStamina < TotalStamina * 0.5f)
+		if (CurrentStamina > TotalStamina * 0.1f)
 		{
-			ShouldFeint = false;
+			if (CurrentStamina < TotalStamina * 0.5f)
+			{
+				ShouldFeint = false;
+			}
+			if (val < 2)
+			{
+				ShouldFeint = false;
+			}
+			if (ShouldFeint)
+			{
+				AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
+			}
+			else
+			{
+				AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+			}
 		}
-		if (val < 2)
-		{
-			ShouldFeint = false;
-		}
-		if (ShouldFeint)
-		{
-			AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
-		}
-		else
-		{
-			AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
-		}
+
 		
 	}
 	else
 	{
-		AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR, true);
+		AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR);
 	}
 }
 
@@ -439,9 +442,9 @@ void AIHandler::TryBlock(RE::Actor* actor, RE::Actor* attacker)
 	if (val > 0)
 	{
 		// try direction match
-		DirectionMatchTarget(actor, attacker, false);
+		//DirectionMatchTarget(actor, attacker, false);
 		Directions CurrentTargetDir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
-		AddAction(actor, AIHandler::Actions::Block, CurrentTargetDir, true);
+		AddAction(actor, AIHandler::Actions::Block, CurrentTargetDir);
 	}
 }
 
@@ -450,82 +453,77 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 {
 	// direction match
 	// really follow the last direction tracked then update it
-	int mod = (int)CalcAndInsertDifficulty(actor);
+	CalcAndInsertDifficulty(actor);
 
 	// follow last tracked direction isntead of the targets current direction
 	// the AI is too easy to confuse with this though, since they can lag behind a bit
 	Directions ToCounter = DifficultyMap[actor->GetHandle()].lastDirectionTracked;
 	Directions CurrentTargetDir = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
-
+	//Directions CurrentDir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
 	// if we have to switch directions, then add a chance to make a mistkae
 	// simulates conditioning the AI to block in certain directions
+	int TR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR];
+	int TL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL];
+	int BL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL];
+	int BR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR];
+	if (Settings::ForHonorMode)
+	{
+		TL = 0;
+	}
 	if (ToCounter != CurrentTargetDir)
 	{
-		int random = mt_rand() % 10;
-		if (random > 0)
+		int random = mt_rand() % 100;
+		// add some RNG to mix it up
+		// have a chance to switch to a direction they anticipate instead
+		bool found = false;
+		random -= TR;
+		if (!found && random <= 0)
 		{
-			random = mt_rand() % 100;
-			// add some RNG to mix it up
-			// have a chance to switch to a direction they anticipate instead
-			
-			int TR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR];
-			int TL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL];
-			int BL = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL];
-			int BR = DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR];
-			bool found = false;
-			random -= TR;
-			if (!found && random <= 0)
-			{
-				ToCounter = Directions::TR;
-				found = true;
-			}
-			random -= TL;
-			if (!found && random <= 0)
-			{
-				ToCounter = Directions::TL;
-				found = true;
-			}
-			random -= BL;
-			if (!found && random <= 0)
-			{
-				ToCounter = Directions::BL;
-				found = true;
-			}
-			random -= BR;
-			if (!found && random <= 0)
-			{
-				ToCounter = Directions::BR;
-				found = true;
-			}
-
-			if (found)
-			{
-				CurrentTargetDir = ToCounter;
-				TR -= 5;
-				TR = std::max(0, TR);
-				TL -= 5;
-				TL = std::max(0, TL);
-				BL -= 5;
-				BL = std::max(0, BL);
-				BR -= 5;
-				BR = std::max(0, BR);
-				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = TR;
-				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = TL;
-				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = BL;
-				DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = BR;
-			}
-
+			ToCounter = Directions::TR;
+			found = true;
 		}
+		random -= TL;
+		if (!found && random <= 0)
+		{
+			ToCounter = Directions::TL;
+			found = true;
+		}
+		random -= BL;
+		if (!found && random <= 0)
+		{
+			ToCounter = Directions::BL;
+			found = true;
+		}
+		random -= BR;
+		if (!found && random <= 0)
+		{
+			ToCounter = Directions::BR;
+			found = true;
+		}
+
+		if (found)
+		{
+			TR -= 5;
+			TR = std::max(0, TR);
+			TL -= 5;
+			TL = std::max(0, TL);
+			BL -= 5;
+			BL = std::max(0, BL);
+			BR -= 5;
+			BR = std::max(0, BR);
+			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = TR;
+			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = TL;
+			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BL] = BL;
+			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::BR] = BR;
+		}
+		else
+		{
+			ToCounter = CurrentTargetDir;
+		}
+
 	}
 
-
-	// small chance to correctly choose as well
-	int random = mt_rand() % 100;
-	if (random < mod)
-	{
-		ToCounter = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
-	}
-
+	//ToCounter = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
 	Directions ToSwitch = Directions::TR;
 	switch (ToCounter)
 	{
@@ -542,8 +540,11 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		ToSwitch = Directions::BR;
 		break;
 	}
-	DifficultyMap[actor->GetHandle()].lastDirectionTracked = CurrentTargetDir;
+
 	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch, force);
+	
+	DifficultyMap[actor->GetHandle()].lastDirectionTracked = CurrentTargetDir;
+	
 }
 
 void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target)
@@ -552,7 +553,7 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target)
 
 	Directions ToAvoid = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
 	Directions ToSwitch = ToAvoid;
-	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch, true);
+	DirectionHandler::GetSingleton()->WantToSwitchTo(actor, ToSwitch);
 }
 
 void AIHandler::ReduceDifficulty(RE::Actor* actor)
@@ -606,7 +607,7 @@ void AIHandler::ResetDifficulty(RE::Actor* actor)
 void AIHandler::TryAttack(RE::Actor* actor)
 {
 	// since this is a forced attack, it happens outside of the normal AI attack loop so we need to add checks here as well
-	if (AttackHandler::GetSingleton()->CanAttack(actor))
+	if (AttackHandler::GetSingleton()->CanAttack(actor) && actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) > 0)
 	{
 		// load attack data into actor to ensure attacks register correctly
 		LoadCachedAttack(actor);
@@ -618,6 +619,10 @@ void AIHandler::TryAttack(RE::Actor* actor)
 
 void AIHandler::SwitchToNextAttack(RE::Actor* actor)
 {
+	if (actor->IsBlocking())
+	{
+		return;
+	}
 	if (!DifficultyMap.contains(actor->GetHandle()))
 	{
 		CalcAndInsertDifficulty(actor);
@@ -630,12 +635,40 @@ void AIHandler::SwitchToNextAttack(RE::Actor* actor)
 		{
 			logger::info("{} had error in attack pattern to {}", actor->GetName(), (int)dir);
 		}
-		DirectionHandler::GetSingleton()->WantToSwitchTo(actor, dir, true);
+		//DirectionHandler::GetSingleton()->WantToSwitchTo(actor, dir);
 	}
 	else
 	{
 		DifficultyMap[actor->GetHandle()].currentAttackIdx = 0;
 	}
+}
+
+Directions AIHandler::GetNextAttack(RE::Actor* actor)
+{
+	if (!DifficultyMap.contains(actor->GetHandle()))
+	{
+		CalcAndInsertDifficulty(actor);
+	}
+	int idx = DifficultyMap[actor->GetHandle()].currentAttackIdx;
+	if (idx > DifficultyMap[actor->GetHandle()].attackPattern.size())
+	{
+		DifficultyMap[actor->GetHandle()].currentAttackIdx = 0;
+		idx = 0;
+	}
+	Directions dir = DifficultyMap[actor->GetHandle()].attackPattern[idx];
+	return dir;
+}
+
+AIHandler::Actions AIHandler::GetQueuedAction(RE::Actor* actor)
+{
+	Actions ret = Actions::None;
+	ActionQueueMtx.lock();
+	if (ActionQueue.contains(actor->GetHandle()))
+	{
+		ret = ActionQueue.at(actor->GetHandle()).toDo;
+	}
+	ActionQueueMtx.unlock();
+	return ret;
 }
 
 
@@ -957,19 +990,37 @@ void AIHandler::Update(float delta)
 			}
 			else if (ActionQueueIter->second.toDo == Actions::EndFeint)
 			{
-				AttackHandler::GetSingleton()->HandleFeint(actor);
-				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
-				if (dir == Directions::TR || dir == Directions::BR)
+				if (!actor->IsBlocking())
 				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL, true);
+					AttackHandler::GetSingleton()->HandleFeint(actor);
+					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+					if (dir == Directions::TR || dir == Directions::BR)
+					{
+						if (Settings::ForHonorMode)
+						{
+							DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::BL);
+						}
+						else
+						{
+							DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL);
+
+						}
+						
+					}
+					else
+					{
+						DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR);
+					}
+					// queue another attack
+					ActionQueueIter->second.toDo = Actions::Riposte;
+					ActionQueueIter->second.timeLeft = 0.15f + (CalcActionTimer(actor) * .5f);
 				}
 				else
 				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR, true);
+					// we tried but they attacked anyway
+					ActionQueueIter->second.toDo = Actions::None;
 				}
-				// queue another attack
-				ActionQueueIter->second.toDo = Actions::Riposte;
-				ActionQueueIter->second.timeLeft = 0.15f + (CalcActionTimer(actor) * .5f);
+
 			}
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor

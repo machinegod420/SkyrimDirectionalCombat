@@ -132,6 +132,7 @@ namespace Hooks
 		}
 		// shared implementation
 		static void SharedInputMNB(int x, int y);
+		static void SharedInputForHonor(int x, int y);
 		static void SharedInputMouse(int x, int y);
 		static void SharedInput(int x, int y);
 		static void ProcessThumbstick(RE::LookHandler* a_this, RE::ThumbstickEvent* a_event, RE::PlayerControlsData* a_data);

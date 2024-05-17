@@ -49,6 +49,14 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 	}
 	// opposite side angle
 
+	if (Settings::ForHonorMode)
+	{
+		if (ActiveDirections.at(attacker->GetHandle()) == Directions::TR)
+		{
+			return ActiveDirections.at(target->GetHandle()) == Directions::TR;
+		}
+	}
+
 	if(ActiveDirections.at(attacker->GetHandle()) == Directions::TR)
 	{
 		return ActiveDirections.at(target->GetHandle()) == Directions::TL;
@@ -332,40 +340,63 @@ void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
 {
 	Directions dir = GetCurrentDirection(actor);
 
-	if (dir == Directions::TR)
-	{
-		WantToSwitchTo(actor, Directions::TL);
-	}
-	else if (dir == Directions::BR)
+	if (Settings::ForHonorMode)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
+	else
+	{
+		if (dir == Directions::TR)
+		{
+			WantToSwitchTo(actor, Directions::TL);
+		}
+		else if (dir == Directions::BR)
+		{
+			WantToSwitchTo(actor, Directions::BL);
+		}
+	}
+
 }
 void DirectionHandler::SwitchDirectionRight(RE::Actor* actor)
 {
 	Directions dir = GetCurrentDirection(actor);
 
-	if (dir == Directions::TL)
-	{
-		WantToSwitchTo(actor, Directions::TR);
-	}
-	else if (dir == Directions::BL)
+	if (Settings::ForHonorMode)
 	{
 		WantToSwitchTo(actor, Directions::BR);
+	}
+	else
+	{
+		if (dir == Directions::TL)
+		{
+			WantToSwitchTo(actor, Directions::TR);
+		}
+		else if (dir == Directions::BL)
+		{
+			WantToSwitchTo(actor, Directions::BR);
+		}
 	}
 }
 void DirectionHandler::SwitchDirectionUp(RE::Actor* actor)
 {
-	Directions dir = GetCurrentDirection(actor);
-
-	if (dir == Directions::BR)
+	if (Settings::ForHonorMode)
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
-	else if (dir == Directions::BL)
+	else
 	{
-		WantToSwitchTo(actor, Directions::TL);
+		Directions dir = GetCurrentDirection(actor);
+
+		if (dir == Directions::BR)
+		{
+			WantToSwitchTo(actor, Directions::TR);
+		}
+		else if (dir == Directions::BL)
+		{
+			WantToSwitchTo(actor, Directions::TL);
+		}
 	}
+
 }
 void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 {
@@ -384,6 +415,13 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force, bool overwrite)
 {
+	if (Settings::ForHonorMode)
+	{
+		if (dir == Directions::TL)
+		{
+			dir = Directions::TR;
+		}
+	}
 	// skip if we try to switch to the same dir
 	std::shared_lock lock(ActiveDirectionsMtx);
 	if (ActiveDirections.contains(actor->GetHandle()) && ActiveDirections.at(actor->GetHandle()) == dir)
@@ -442,6 +480,72 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 		actor->AddSpell(TR);
 	}
 	ActiveDirectionsMtx.unlock();
+
+}
+
+void DirectionHandler::AdjustActorScale(RE::Actor* actor)
+{
+	UNUSED(actor);
+	
+	
+	RE::bhkCharacterController* controller;
+	auto cell = actor->GetParentCell();
+	if (!cell) {
+		return;
+	}
+
+	auto world = RE::NiPointer<RE::bhkWorld>(cell->GetbhkWorld());
+	if (!world) {
+		return;
+	}
+
+	if (!controller) {
+		return;
+	}
+
+	RE::BSWriteLockGuard lock(world->worldLock);
+
+	int8_t shapeIdx = 1;
+	if (!controller->shapes[shapeIdx]) {
+		shapeIdx = 0;
+	}
+
+	if (!controller->shapes[shapeIdx]) {
+		return;
+	}
+
+	auto controllerPtr = RE::NiPointer<RE::bhkCharacterController>(controller);
+
+	if (auto proxyController = skyrim_cast<RE::bhkCharProxyController*>(controller)) {
+		RE::hkRefPtr<RE::hkpCharacterProxy> proxy(static_cast<RE::hkpCharacterProxy*>(proxyController->proxy.referencedObject.get()));
+		if (proxy) {
+			RE::NiPointer<RE::bhkShape> wrapper(proxy->shapePhantom->collidable.shape->userData);
+			if (wrapper) {
+				auto clone = RE::NiPointer<RE::bhkShape>(Utils::Clone<RE::bhkShape>(wrapper.get(), { actorScale, actorScale, actorScale }));
+				proxy->shapePhantom->SetShape(static_cast<RE::hkpShape*>(clone->referencedObject.get()));
+				controller->shapes[shapeIdx]->DecRefCount();
+				controller->shapes[shapeIdx] = clone;
+			}
+		}
+	}
+	else if (auto rigidBodyController = skyrim_cast<RE::bhkCharRigidBodyController*>(controller)) {
+		RE::hkRefPtr<RE::hkpCharacterRigidBody> rigidBody(static_cast<RE::hkpCharacterRigidBody*>(rigidBodyController->rigidBody.referencedObject.get()));
+		if (rigidBody) {
+			RE::NiPointer<RE::bhkShape> wrapper(rigidBody->character->collidable.shape->userData);
+			if (wrapper) {
+				auto clone = RE::NiPointer<RE::bhkShape>(Utils::Clone<RE::bhkShape>(wrapper.get(), { actorScale, actorScale, actorScale }));
+				rigidBody->character->SetShape(static_cast<RE::hkpShape*>(clone->referencedObject.get()));
+				controller->shapes[shapeIdx]->DecRefCount();
+				controller->shapes[shapeIdx] = clone;
+			}
+		}
+	}
+
+	bool* bumperEnabled = reinterpret_cast<bool*>(&controller->unk320);
+	*bumperEnabled = true;
+	Utils::ToggleCharacterBumper(actor.get(), false);
+	
+
 }
 
 void DirectionHandler::RemoveDirectionalPerks(RE::ActorHandle handle)
@@ -826,6 +930,7 @@ void DirectionHandler::Update(float delta)
 			if (UnblockableActors.contains(actor->GetHandle()))
 			{
 				UnblockableActors.erase(actor->GetHandle());
+				actor->RemoveSpell(Unblockable);
 			}
 			if (data.size == 0)
 			{
@@ -947,6 +1052,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 		if (data.size >= 2 && data.repeatCount == 0)
 		{
 			UnblockableActors.insert(actor->GetHandle());
+			actor->AddSpell(Unblockable);
 			actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(Unblockable, false, actor, 0.f, false, 0.f, nullptr);
 			data.currentIdx = 0;
 			data.size = 0;

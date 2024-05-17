@@ -54,11 +54,6 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
 	
 	Damage *= skillMod;
-	float ActorMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
-	if (hitData.stagger)
-	{
-		hitData.stagger = 0;
-	}
 	if (!Imperfect)
 	{
 		Damage += AdditionalStamDamage;
@@ -71,12 +66,10 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		Damage *= 1.5f;
 
 		// Always do at least 15% of target stamina if they have imperfect block
-		
+		float ActorMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 		Damage = std::max(Damage, ActorMaxStamina * .15f);
 	}
 
-	// limit the amount of max stamina damage one can take so people stop getting one shot
-	Damage = std::min(Damage, ActorMaxStamina * .5f);
 
 	// breaks stamina
 	if (Damage > ActorStamina)

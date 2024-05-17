@@ -101,7 +101,7 @@ void UIMenu::AdvanceMovie(float interval, std::uint32_t a_currentTime)
 		uint32_t background = 0x000000;
 		// unorm color value
 		uint32_t transparency = 130u;
-		uint32_t transparency2 = 40u;
+		uint32_t transparency2 = 10u;
 
 		switch (DrawCommands[i].hostileState)
 		{
@@ -228,6 +228,37 @@ void UIMenu::DrawDirection(RE::NiPoint2 StartPos, float depth, Directions dir, b
 		case Directions::BR:
 			StartPos.x += dist;
 			EndPos = StartPos;
+			EndPos.x += size;
+			break;
+		}
+	}
+	else if (Settings::ForHonorMode)
+	{
+		switch (dir)
+		{
+		case Directions::TR:
+		case Directions::TL:
+			StartPos.y -= dist;
+			StartPos.y -= size;
+			StartPos.x -= dist;
+			EndPos = StartPos;
+			EndPos.x += dist;
+			EndPos.x += dist;
+			break;
+		case Directions::BL:
+			EndPos = StartPos;
+			StartPos.x -= dist;
+			StartPos.x -= size;
+			StartPos.y -= dist;
+			EndPos.y += dist;
+			EndPos.x -= size;
+			break;
+		case Directions::BR:
+			EndPos = StartPos;
+			StartPos.x += dist;
+			StartPos.x += size;
+			StartPos.y -= dist;
+			EndPos.y += dist;
 			EndPos.x += size;
 			break;
 		}

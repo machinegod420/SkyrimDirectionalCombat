@@ -21,6 +21,8 @@ bool Settings::HasPrecision = false;
 bool Settings::HasTDM = false;
 bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
+bool Settings::ForHonorMode = false;
+bool Settings::ExperimentalMode = false;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
@@ -98,6 +100,8 @@ void SettingsLoader::InitializeDefaultValues()
 	Settings::HasPrecision = false;
 	Settings::EnableForH2H = true;
 	Settings::MNBMode = false;
+	Settings::ForHonorMode = false;
+	Settings::ExperimentalMode = false;
 	Settings::SwitchingCostsStamina = true;
 
 	InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
@@ -535,6 +539,20 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::MNBMode = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::MNBMode);
+				}
+				else if (fieldName == "ForHonorMode")
+				{
+					bool newval = field.as<bool>();
+					Settings::ForHonorMode = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::ForHonorMode);
+				}
+				else if (fieldName == "ExperimentalMode")
+				{
+					bool newval = field.as<bool>();
+					Settings::ExperimentalMode = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::ExperimentalMode);
 				}
 				else if (fieldName == "SwitchingCostsStamina")
 				{

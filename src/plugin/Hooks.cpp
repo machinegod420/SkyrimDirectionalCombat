@@ -66,12 +66,6 @@ namespace Hooks
 		
 		return ret; 
 	}
-	inline bool playPairedIdle(RE::AIProcess* proc, RE::Actor* attacker, RE::DEFAULT_OBJECT smth, RE::TESIdleForm* idle, bool a5, bool a6, RE::TESObjectREFR* target)
-	{
-		using func_t = decltype(&playPairedIdle);
-		REL::Relocation<func_t> func{ RELOCATION_ID(38290, 39256) };
-		return func(proc, attacker, smth, idle, a5, a6, target);
-	}
 	void HookOnMeleeHit::OnMeleeHit(RE::Actor* target, RE::HitData& hitData)
 	{
 		
@@ -91,8 +85,10 @@ namespace Hooks
 				{
 					//bash does stamina damage
 					float Damage = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
-					Damage *= 0.2f;
+					Damage *= 0.5f;
 					target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
+					// staggers as well
+					BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
 				}
 				_OnMeleeHit(target, hitData);
 				return;
@@ -149,13 +145,20 @@ namespace Hooks
 
 					/*
 					
-					
-					*/
-					RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
+							RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
 					typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
 					
 					static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
-					foo(target->GetCharController(), t, .5f);
+					foo(target->GetCharController(), t, .5f);			
+					*/
+					if (Settings::ExperimentalMode)
+					{
+						RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
+						typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
+
+						static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
+						foo(target->GetCharController(), t, .5f);
+					}
 
 					BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 					// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
@@ -362,10 +365,6 @@ namespace Hooks
 
 	void HookMouseMovement::SharedInputMNB(int x, int y)
 	{
-		if (InputSettings::InvertY)
-		{
-			y = -y;
-		}
 		auto Player = RE::PlayerCharacter::GetSingleton();
 		int32_t diff = InputSettings::MouseSens;
 	
@@ -385,6 +384,27 @@ namespace Hooks
 		{
 			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
 		}
+	}
+
+	void HookMouseMovement::SharedInputForHonor(int x, int y)
+	{
+		auto Player = RE::PlayerCharacter::GetSingleton();
+		int32_t diff = InputSettings::MouseSens;
+
+		if (y < -diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+		}
+		else if (x > diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+		}
+		else if (x < -diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+		}
+
+
 	}
 
 	void HookMouseMovement::SharedInputMouse(int x, int y)
@@ -488,6 +508,12 @@ namespace Hooks
 		{
 			y = -y;
 		}
+		if (Settings::ForHonorMode)
+		{
+			SharedInputForHonor(x, y);
+			return;
+		}
+
 		if (Settings::MNBMode)
 		{
 			SharedInputMNB(x, y);
@@ -632,7 +658,7 @@ namespace Hooks
 					int val = std::rand() % 3;
 					if (val == 0)
 					{
-						AIHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
+						//AIHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
 					}
 					
 				}
@@ -734,7 +760,7 @@ namespace Hooks
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
 			AttackHandler::GetSingleton()->AddFeintWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
-
+			//logger::info("trychamberbegin {}", actor->GetName());
 			// use this to signal that an attack did happen with the AI
 			if (!actor->IsPlayerRef())
 			{
