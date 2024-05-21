@@ -35,6 +35,7 @@ struct Settings
 	static bool BufferInput;
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;
+	static bool VerboseLogging;
 };
 
 struct InputSettings
@@ -108,6 +109,7 @@ struct UISettings
 	static float Thickness;
 	static float DisplayDistance;
 	static bool ShowUI;
+	static bool FlashUI;
 	static bool HarderUI;
 	static bool OnlyShowTargetted; 
 };

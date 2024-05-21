@@ -77,6 +77,7 @@ public:
 	void UpdateCharacter(RE::Actor* actor, float delta);
 	void Update(float delta);
 	void SendAnimationEvent(RE::Actor* actor);
+	void QueueAnimationEvent(RE::Actor* actor);
 	void DebuffActor(RE::Actor* actor);
 	void AddCombo(RE::Actor* actor);
 	inline unsigned GetRepeatCount(RE::Actor* actor) const

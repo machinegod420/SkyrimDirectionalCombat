@@ -26,6 +26,7 @@ bool Settings::ExperimentalMode = false;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
+bool Settings::VerboseLogging = false;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -46,7 +47,7 @@ float WeaponSettings::AxeSpeed = 0.8f;
 float WeaponSettings::WeaponSpeedMult = 0.9f;
 float WeaponSettings::BowSpeedMult = 0.6f;
 
-float AISettings::AIWaitTimer = 3.f;
+float AISettings::AIWaitTimer = 1.f;
 int AISettings::LegendaryLvl = 11;
 int AISettings::VeryHardLvl = 7;
 int AISettings::HardLvl = 5;
@@ -75,6 +76,7 @@ float UISettings::Length = 13.f;
 float UISettings::Thickness = 7.f;
 float UISettings::DisplayDistance = 2000.0;
 bool UISettings::ShowUI = true;
+bool UISettings::FlashUI = false;
 bool UISettings::HarderUI = true;
 bool UISettings::OnlyShowTargetted = true;
 
@@ -123,7 +125,7 @@ void SettingsLoader::InitializeDefaultValues()
 	WeaponSettings::WeaponSpeedMult = 0.9f;
 	WeaponSettings::BowSpeedMult = 0.6f;
 
-	AISettings::AIWaitTimer = 3.f;
+	AISettings::AIWaitTimer = 1.f;
 	AISettings::LegendaryLvl = 11;
 	AISettings::VeryHardLvl = 7;
 	AISettings::HardLvl = 5;
@@ -152,6 +154,7 @@ void SettingsLoader::InitializeDefaultValues()
 	UISettings::Thickness = 7.f;
 	UISettings::DisplayDistance = 2000.0;
 	UISettings::ShowUI = true;
+	UISettings::FlashUI = false;
 	UISettings::HarderUI = true;
 }
 
@@ -574,6 +577,13 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::RemovePowerAttacks = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::RemovePowerAttacks);
+				}
+				else if (fieldName == "VerboseLogging")
+				{
+					bool newval = field.as<bool>();
+					Settings::VerboseLogging = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::VerboseLogging);
 				}
 			}
 			else if (sectionName == "Weapons")

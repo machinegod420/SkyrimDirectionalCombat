@@ -160,7 +160,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		// wnot sure why we have to reimpelment recoil here
 		//attacker->NotifyAnimationGraph("recoilStart");
 		// succesffully blocked so give hyperarmor
-		GiveHyperarmor(target);
+		//GiveHyperarmor(target);
 
 		if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
@@ -187,14 +187,6 @@ void BlockHandler::AddNewAttacker(RE::Actor* actor, RE::Actor* attacker)
 
 	AttackersMap[actor->GetHandle()].attackers.insert(attacker->GetHandle());
 	AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
-
-
-	if (AttackersMap[actor->GetHandle()].attackers.size() > 2)
-	{
-		//logger::info("has multiple attackers");
-		CauseStagger(attacker, actor, 0.5f);
-		actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(MultiAttackerFX, false, actor, 0.f, false, 0.f, nullptr);
-	}
 }
 
 int BlockHandler::GetNumberAttackers(RE::Actor* actor) const
@@ -227,7 +219,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		if (!targetStaggering && !attackerStaggering)
 		{
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
-			CauseStagger(attacker, target, 0.5f);
+			CauseStagger(attacker, target, 0.25f);
 			// masterstriker gets invulnerability during MS
 			GiveHyperarmor(target);
 			return true;

@@ -65,7 +65,7 @@ void OnDataLoad()
 	BlockHandler::GetSingleton()->Initialize();
 	MenuOpenCloseEventHandler::Register();
 	InputEventHandler::Register();
-	UIMenu::RegisterMenu();
+	//UIMenu::RegisterMenu();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	AIHandler::GetSingleton()->InitializeValues();
@@ -77,8 +77,8 @@ void OnPostLoad()
 	DirectionHandler::GetSingleton()->Cleanup();
 	BlockHandler::GetSingleton()->Cleanup();
 	AttackHandler::GetSingleton()->Cleanup();
-	UIMenu::HideMenu();
-	UIMenu::ShowMenu();
+	//UIMenu::HideMenu();
+	//UIMenu::ShowMenu();
 }
 
 
@@ -112,6 +112,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	if (!messaging->RegisterListener("SKSE", MessageHandler)) {
 		return false;
 	}
+	// as early as possible
+	RenderManager::Install();
 	return true;
 }
 

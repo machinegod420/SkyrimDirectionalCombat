@@ -141,6 +141,11 @@ private:
 
 		// which direction we last saw, we try to match that
 		Directions lastDirectionTracked;
+		std::vector<Directions> lastDirectionsTracked;
+		// check to see how much times we had to try to match target direction
+		// as a confustion factor
+		int numTimesDirectionsSwitched = 0;
+		int numTimesDirectionSame = 0;
 		// cache the basic attack data for unblockable/riposte funcitionality
 		RE::NiPointer<RE::BGSAttackData> cachedBasicAttackData = nullptr;
 
@@ -158,6 +163,8 @@ private:
 		// the actual random generation for this would be difficult as you would want a spread of bits versus true random
 		std::vector<Directions> attackPattern;
 		unsigned currentAttackIdx = 0u;
+
+		float distanceDiff;
 	};
 
 	RE::NiPointer<RE::BGSAttackData> FindActorAttackData(RE::Actor* actor);

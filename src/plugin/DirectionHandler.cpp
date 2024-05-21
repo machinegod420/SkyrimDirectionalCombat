@@ -6,8 +6,8 @@
 
 // in seconds
 // slow time should be a multiple as it affects animation events and we don't want to get stuck in the wrong idle
-constexpr float TimeBetweenChanges = 0.122f;
-constexpr float SlowTimeBetweenChanges = TimeBetweenChanges * 2.f;
+constexpr float TimeBetweenChanges = 0.14f;
+constexpr float SlowTimeBetweenChanges = 0.24f;
 
 void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
@@ -167,10 +167,14 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		bool Lockout = !AttackHandler::GetSingleton()->CanAttack(actor);
 
 		// since this waits for a mutex we add a task graph command for it
-		SKSE::GetTaskInterface()->AddTask([=] {
+		/*
+		* //this was too slow for imgui swapchain
+			SKSE::GetTaskInterface()->AddTask([=] {
 			UIMenu::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout);
-		});
-		
+		});	
+		*/
+
+		UI::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout);
 	}
 	ActiveDirectionsMtx.unlock_shared();
 }
@@ -268,6 +272,11 @@ Directions DirectionHandler::PerkToDirection(RE::SpellItem* perk) const
 
 bool DirectionHandler::CanSwitch(RE::Actor* actor)
 {
+
+	if (actor->AsActorState()->IsSprinting())
+	{
+		return false;
+	}
 	std::shared_lock lock(InAttackWinMtx);
 	return !(actor->IsAttacking() && !InAttackWin.contains(actor->GetHandle()));
 }
@@ -486,65 +495,6 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 void DirectionHandler::AdjustActorScale(RE::Actor* actor)
 {
 	UNUSED(actor);
-	
-	
-	RE::bhkCharacterController* controller;
-	auto cell = actor->GetParentCell();
-	if (!cell) {
-		return;
-	}
-
-	auto world = RE::NiPointer<RE::bhkWorld>(cell->GetbhkWorld());
-	if (!world) {
-		return;
-	}
-
-	if (!controller) {
-		return;
-	}
-
-	RE::BSWriteLockGuard lock(world->worldLock);
-
-	int8_t shapeIdx = 1;
-	if (!controller->shapes[shapeIdx]) {
-		shapeIdx = 0;
-	}
-
-	if (!controller->shapes[shapeIdx]) {
-		return;
-	}
-
-	auto controllerPtr = RE::NiPointer<RE::bhkCharacterController>(controller);
-
-	if (auto proxyController = skyrim_cast<RE::bhkCharProxyController*>(controller)) {
-		RE::hkRefPtr<RE::hkpCharacterProxy> proxy(static_cast<RE::hkpCharacterProxy*>(proxyController->proxy.referencedObject.get()));
-		if (proxy) {
-			RE::NiPointer<RE::bhkShape> wrapper(proxy->shapePhantom->collidable.shape->userData);
-			if (wrapper) {
-				auto clone = RE::NiPointer<RE::bhkShape>(Utils::Clone<RE::bhkShape>(wrapper.get(), { actorScale, actorScale, actorScale }));
-				proxy->shapePhantom->SetShape(static_cast<RE::hkpShape*>(clone->referencedObject.get()));
-				controller->shapes[shapeIdx]->DecRefCount();
-				controller->shapes[shapeIdx] = clone;
-			}
-		}
-	}
-	else if (auto rigidBodyController = skyrim_cast<RE::bhkCharRigidBodyController*>(controller)) {
-		RE::hkRefPtr<RE::hkpCharacterRigidBody> rigidBody(static_cast<RE::hkpCharacterRigidBody*>(rigidBodyController->rigidBody.referencedObject.get()));
-		if (rigidBody) {
-			RE::NiPointer<RE::bhkShape> wrapper(rigidBody->character->collidable.shape->userData);
-			if (wrapper) {
-				auto clone = RE::NiPointer<RE::bhkShape>(Utils::Clone<RE::bhkShape>(wrapper.get(), { actorScale, actorScale, actorScale }));
-				rigidBody->character->SetShape(static_cast<RE::hkpShape*>(clone->referencedObject.get()));
-				controller->shapes[shapeIdx]->DecRefCount();
-				controller->shapes[shapeIdx] = clone;
-			}
-		}
-	}
-
-	bool* bumperEnabled = reinterpret_cast<bool*>(&controller->unk320);
-	*bumperEnabled = true;
-	Utils::ToggleCharacterBumper(actor.get(), false);
-	
 
 }
 
@@ -797,6 +747,23 @@ void DirectionHandler::Cleanup()
 	ImperfectParry.clear();
 }
 
+void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
+{
+	std::shared_lock lock(AnimationTimerMtx);
+	if (AnimationTimer.contains(actor->GetHandle()))
+	{
+		if (AnimationTimer[actor->GetHandle()].size() < 5)
+		{
+			AnimationTimer[actor->GetHandle()].push(SlowTimeBetweenChanges);
+		}
+	}
+	else
+	{
+		SendAnimationEvent(actor);
+		AnimationTimer[actor->GetHandle()].push(SlowTimeBetweenChanges);
+	}
+}
+
 void DirectionHandler::Update(float delta)
 {
 	// synchronously remove to avoid any possible race conditions
@@ -848,7 +815,7 @@ void DirectionHandler::Update(float delta)
 
 				if (AnimationTimer.contains(Iter->first))
 				{
-					if (AnimationTimer[Iter->first].size() < 3)
+					if (AnimationTimer[Iter->first].size() < 5)
 					{
 						AnimationTimer[Iter->first].push(SlowTimeBetweenChanges);
 					}
@@ -890,14 +857,11 @@ void DirectionHandler::Update(float delta)
 		if (AnimIter->second.front() <= 0)
 		{
 			AnimIter->second.pop();
+			SendAnimationEvent(actor);
 			if (AnimIter->second.empty())
 			{
 				AnimIter = AnimationTimer.erase(AnimIter);
 				continue;
-			}
-			else 
-			{
-				SendAnimationEvent(actor);
 			}
 		}
 		AnimIter++;

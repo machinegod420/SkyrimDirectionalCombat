@@ -89,8 +89,9 @@ namespace Hooks
 					target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
 					// staggers as well
 					BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
+					_OnMeleeHit(target, hitData);
 				}
-				_OnMeleeHit(target, hitData);
+				
 				return;
 			}
 			DirectionHandler::GetSingleton()->DebuffActor(attacker);
@@ -780,11 +781,13 @@ namespace Hooks
 		else if (str == "MCO_WinClose"_h)
 		{
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
+			DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
 		}
 		// backup to ensure that we exit the attack window
 		else if (str == "attackStop"_h)
 		{
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
+			DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
 		}
 
 		// feint events
