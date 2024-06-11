@@ -63,9 +63,8 @@ void OnDataLoad()
 	DirectionHandler::GetSingleton()->Initialize(tdm);
 	FXHandler::GetSingleton()->Initialize();
 	BlockHandler::GetSingleton()->Initialize();
-	MenuOpenCloseEventHandler::Register();
+	AttackHandler::GetSingleton()->Initialize();
 	InputEventHandler::Register();
-	//UIMenu::RegisterMenu();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	AIHandler::GetSingleton()->InitializeValues();
@@ -77,8 +76,6 @@ void OnPostLoad()
 	DirectionHandler::GetSingleton()->Cleanup();
 	BlockHandler::GetSingleton()->Cleanup();
 	AttackHandler::GetSingleton()->Cleanup();
-	//UIMenu::HideMenu();
-	//UIMenu::ShowMenu();
 }
 
 

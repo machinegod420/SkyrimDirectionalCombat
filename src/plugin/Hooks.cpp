@@ -42,10 +42,33 @@ namespace Hooks
 			// you are safe during attack windup
 			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
-				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+				if (AttackHandler::GetSingleton()->InChamberWindow(attacker))
 				{
-					ret.bIgnoreHit = true;
+					float TargetMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(target);
+					float AttackerMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(attacker);
+					if (TargetMasterstrikeTime > AttackerMasterstrikeTime)
+					{
+						if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+						{
+							ret.bIgnoreHit = true;
+						}
+					}
+					else
+					{
+						if (BlockHandler::GetSingleton()->HandleMasterstrike(target, attacker))
+						{
+							ret.bIgnoreHit = true;
+						}
+					}
 				}
+				else
+				{
+					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+					{
+						ret.bIgnoreHit = true;
+					}
+				}
+
 			}
 			else
 			{
@@ -55,9 +78,9 @@ namespace Hooks
 					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
 					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 					{
-						AIHandler::GetSingleton()->SignalBadThing(target, dir);
-						AIHandler::GetSingleton()->SwitchTarget(target, attacker);
-						AIHandler::GetSingleton()->TryBlock(target, attacker);
+						AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+						AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
+						AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 					}
 
 				}
@@ -68,9 +91,9 @@ namespace Hooks
 	}
 	void HookOnMeleeHit::OnMeleeHit(RE::Actor* target, RE::HitData& hitData)
 	{
-		
 		RE::Actor* attacker = hitData.aggressor.get().get();
-		if (attacker && target)
+		// make sure attacker actually has directions!
+		if (attacker && target && DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 		{
 			// ignore hit if was bash attack against attacking character
 			// bash can be used to open up enemies but will fail if you bash after an attack started
@@ -131,27 +154,24 @@ namespace Hooks
 				RE::NiPoint3 dir = attacker->GetPosition() - target->GetPosition();
 				if (hitData.weapon && hitData.weapon->IsMelee())
 				{
-					hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
+					//hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
 				}
 
 				//hitData.reflectedDamage = 0.f; 
 				//dir -= target->GetPosition();
 
+				if (hitData.stagger)
+				{
+					hitData.stagger = 2;
+				}
+				
+
 				// do no health damage if hit was blocked
 				// for some reason this flag is the only flag that gets set
-				//hitData.stagger = 0;
 				if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 				{
 					// manual pushback
 
-					/*
-					
-							RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
-					typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
-					
-					static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
-					foo(target->GetCharController(), t, .5f);			
-					*/
 					if (Settings::ExperimentalMode)
 					{
 						RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
@@ -164,12 +184,12 @@ namespace Hooks
 					BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 					// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 					// riposte instead of being gambled
-
-					if (!hitData.flags.any(RE::HitData::Flag::kPowerAttack))
+					
+					if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
 					{
 						if (attacker->IsPlayerRef())
 						{
-							AttackHandler::GetSingleton()->LockoutPlayer();
+							AttackHandler::GetSingleton()->LockoutPlayer(attacker);
 						}
 						else
 						{
@@ -184,7 +204,7 @@ namespace Hooks
 					//apply lockout to the defender to prevent doubles
 					if (target->IsPlayerRef())
 					{
-						AttackHandler::GetSingleton()->LockoutPlayer();
+						AttackHandler::GetSingleton()->LockoutPlayer(target);
 					}
 					else
 					{
@@ -269,9 +289,9 @@ namespace Hooks
 					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
 					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 					{
-						AIHandler::GetSingleton()->SignalBadThing(target, dir);
-						AIHandler::GetSingleton()->SwitchTarget(target, attacker);
-						AIHandler::GetSingleton()->TryBlock(target, attacker);
+						AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+						AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
+						AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 					}
 
 				}
@@ -289,6 +309,7 @@ namespace Hooks
 		AIHandler::GetSingleton()->Update(*g_DeltaTime);
 		BlockHandler::GetSingleton()->Update(*g_DeltaTime);
 		AttackHandler::GetSingleton()->Update(*g_DeltaTime);
+		//TextAlertHandler::GetSingleton()->Update(*g_DeltaTime);
 		_Update();
 	}
 
@@ -412,8 +433,8 @@ namespace Hooks
 	{
 
 		auto Player = RE::PlayerCharacter::GetSingleton();
-		int32_t diff = InputSettings::MouseSens;
-		int32_t diff2 = InputSettings::MouseSens * 2;
+		int32_t diff = InputSettings::MouseSens * 2;
+		int32_t diff2 = InputSettings::MouseSens;
 		Directions CurrentDirection = DirectionHandler::GetSingleton()->GetCurrentDirection(Player);
 		Directions WantDirection;
 		bool contains = DirectionHandler::GetSingleton()->HasQueuedDirection(Player, WantDirection);
@@ -439,67 +460,28 @@ namespace Hooks
 		}
 		if (x > diff)
 		{ 
-			if (contains && WantDirection == Directions::TL && CurrentDirection == Directions::BL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR, true, false);
-			}
-			else if (contains && WantDirection == Directions::BL && CurrentDirection == Directions::TL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR, true, false);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionRight(Player);
-			}
-			
+			DirectionHandler::GetSingleton()->SwitchDirectionRight(Player, true);
+			return;
 		}
 		if (x < -diff)
 		{ 
-			if (contains && WantDirection == Directions::TR && CurrentDirection == Directions::BR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL, true, false);
-			}
-			else if (contains && WantDirection == Directions::BR && CurrentDirection == Directions::TR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL, true, false);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionLeft(Player);
-			}
-			
+			DirectionHandler::GetSingleton()->SwitchDirectionLeft(Player, true);
+
+			return;
 
 		}
 		if (y < -diff)
 		{
-			if (contains && WantDirection == Directions::BR && CurrentDirection == Directions::BL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR, true, false);
-			}
-			else if (contains && WantDirection == Directions::BL && CurrentDirection == Directions::BR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL, true, false);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionUp(Player);
-			}
-			
+			DirectionHandler::GetSingleton()->SwitchDirectionUp(Player, true);
+
+			return;
 		}
 		if (y > diff)
 		{
-			if (contains && WantDirection == Directions::TR && CurrentDirection == Directions::TL)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR, true, false);
-			}
-			else if (contains && WantDirection == Directions::TL && CurrentDirection == Directions::TR)
-			{
-				DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL, true, false);
-			}
-			else
-			{
-				DirectionHandler::GetSingleton()->SwitchDirectionDown(Player);
-			}
+
+			DirectionHandler::GetSingleton()->SwitchDirectionDown(Player, true);
+			//AttackHandler::GetSingleton()->LockoutPlayer(Player);
+			return;
 		}
 	}
 
@@ -574,14 +556,17 @@ namespace Hooks
 		}
 
 		// try to prevent power attacks, however this is not guaranteed to be populated
-		if (actor->GetActorRuntimeData().currentProcess->high->attackData && Settings::RemovePowerAttacks)
+		/*
+			if (actor->GetActorRuntimeData().currentProcess->high->attackData && Settings::RemovePowerAttacks)
 		{
 			if (actor->GetActorRuntimeData().currentProcess->high->attackData.get()->data.flags.any(
 				RE::AttackData::AttackFlag::kPowerAttack))
 			{
 				// return false;
 			}
-		}
+		}	
+		*/
+
 
 
 
@@ -605,10 +590,6 @@ namespace Hooks
 		{
 			//seems slow but also seems to work
 			//one way to do this is to slowly build up a hashmap over the lifetime of the game of if this is a power attack
-			if (a_actionData->action->formEditorID.contains("Power"))
-			{
-				//return false;
-			}
 			if (DifficultySettings::AttacksCostStamina)
 			{
 				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 5)
@@ -619,24 +600,19 @@ namespace Hooks
 			RE::Actor* target = actor->GetActorRuntimeData().currentCombatTarget.get().get();
 			if (target)
 			{
-				if (AIHandler::GetSingleton()->ShouldAttack(actor, target))
+				if (AIHandler::GetSingleton()->ShouldAttackExternalCalled(actor, target))
 				{
 					//logger::info("do attack");
-
-					bool ret = _PerformAttackAction(a_actionData);
-					return ret;
+					return _PerformAttackAction(a_actionData);
 				}
 				else
 				{
-					//logger::info("do not attack");
 					return false;
 				}
 			}
 
 
 		}
-
-
 		bool ret = _PerformAttackAction(a_actionData);
 		return ret;
 	}
@@ -646,24 +622,10 @@ namespace Hooks
 	{
 		bool ret = _GetAttackAngle(a_attacker, a_target, a3, a4, a_attackData, a6, a7, a8);
 
-		// This does not guarantee that the attack actually happens.
-		// So it's possible that the AI switches directions and just switches back.
+		// parse in range events here
 		if (ret && a_attacker && a_target)
 		{
-			// ai tends to not attack if its blocking
-			if (!a_attacker->IsBlocking() && DirectionHandler::GetSingleton()->HasDirectionalPerks(a_attacker))
-			{
-				if (DirectionHandler::GetSingleton()->HasBlockAngle(a_attacker, a_target))
-				{
-					// Because of the above issue, we're going to RNG this for now
-					int val = std::rand() % 3;
-					if (val == 0)
-					{
-						//AIHandler::GetSingleton()->SwitchToNewDirection(a_attacker, a_target);
-					}
-					
-				}
-			}
+
 
 		}
 
@@ -765,7 +727,7 @@ namespace Hooks
 			// use this to signal that an attack did happen with the AI
 			if (!actor->IsPlayerRef())
 			{
-				AIHandler::GetSingleton()->DidAttack(actor);
+				AIHandler::GetSingleton()->DidAttackExternalCalled(actor);
 			}
 		}
 		else if (str == "MCO_WinOpen"_h)

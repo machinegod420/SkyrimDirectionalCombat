@@ -147,9 +147,9 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
 				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 				{
-					AIHandler::GetSingleton()->SignalBadThing(target, dir);
-					AIHandler::GetSingleton()->SwitchTarget(target, attacker);
-					AIHandler::GetSingleton()->TryBlock(target, attacker);
+					AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+					AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
+					AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 				}
 				
 			}
@@ -165,9 +165,8 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
-			AIHandler::GetSingleton()->TryRiposte(target, attacker);
-			AIHandler::GetSingleton()->SignalGoodThing(target, 
-				DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
+			AIHandler::GetSingleton()->TryRiposteExternalCalled(target, attacker);
+			AIHandler::GetSingleton()->SignalGoodThingExternalCalled(target, DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
 		}
 	}
 }
@@ -216,6 +215,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		bool attackerStaggering = false;
 		target->GetGraphVariableBool("IsStaggering", targetStaggering);
 		attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
+		// we use staggering as a flag that someone has already been in a masterstrike event
 		if (!targetStaggering && !attackerStaggering)
 		{
 			FXHandler::GetSingleton()->PlayMasterstrike(target);

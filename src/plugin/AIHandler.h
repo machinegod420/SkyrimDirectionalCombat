@@ -34,7 +34,8 @@ public:
 		StartFeint,
 		EndFeint,
 		Bash,
-		EndBlock
+		EndBlock,
+		PowerAttack
 	};
 
 	static AIHandler* GetSingleton()
@@ -49,20 +50,21 @@ public:
 	}
 	void Update(float delta);
 	void RunActor(RE::Actor* actor, float delta);
-	// called from other thread
-	void TryRiposte(RE::Actor* actor, RE::Actor* attacker);
-	void TryBlock(RE::Actor* actor, RE::Actor* attacker);
-	bool ShouldAttack(RE::Actor* actor, RE::Actor* target);
-	void SignalGoodThing(RE::Actor* actor, Directions attackedDir);
-	void SignalBadThing(RE::Actor* actor, Directions attackedDir);
-	void SwitchTarget(RE::Actor* actor, RE::Actor* newTarget);
+	// This block is called from other thread
+	// this means that they should lock!
+	void TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker);
+	void TryBlockExternalCalled(RE::Actor* actor, RE::Actor* attacker);
+	bool ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target);
+	void SignalGoodThingExternalCalled(RE::Actor* actor, Directions attackedDir);
+	void SignalBadThingExternalCalled(RE::Actor* actor, Directions attackedDir);
+	void SwitchTargetExternalCalled(RE::Actor* actor, RE::Actor* newTarget);
 
-	void DidAttack(RE::Actor* actor);
+	void DidAttackExternalCalled(RE::Actor* actor);
 	//
 
 	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target);
-	void TryAttack(RE::Actor* actor);
-	
+	bool TryAttack(RE::Actor* actor);
+	bool TryPowerAttack(RE::Actor* actor);
 
 	
 	bool CanAct(RE::Actor* actor) const;
@@ -74,11 +76,12 @@ public:
 	inline void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
 	void ReduceDifficulty(RE::Actor* actor);
 	void ResetDifficulty(RE::Actor* actor);
-	void SwitchToNextAttack(RE::Actor* actor);
+	void SwitchToNextAttack(RE::Actor* actor, bool force);
 	Directions GetNextAttack(RE::Actor* actor);
 
 	// Load attackdata so our attackstart event is processed correctly as an attack
-	void LoadCachedAttack(RE::Actor* actor);
+	bool LoadCachedAttack(RE::Actor* actor);
+	bool LoadCachedPowerAttack(RE::Actor* actor);
 	//
 
 
@@ -103,8 +106,8 @@ public:
 
 	void Cleanup();
 private:
-	RE::BGSKeyword* EnableRaceKeyword;
-
+	RE::BGSKeyword* EnableRaceKeyword = nullptr;
+	RE::BGSAction* RightPowerAttackAction = nullptr;
 	void AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir = Directions::TR, bool force = false);
 	float CalcUpdateTimer(RE::Actor* actor);
 	float CalcActionTimer(RE::Actor* actor);
@@ -148,12 +151,13 @@ private:
 		int numTimesDirectionSame = 0;
 		// cache the basic attack data for unblockable/riposte funcitionality
 		RE::NiPointer<RE::BGSAttackData> cachedBasicAttackData = nullptr;
+		RE::NiPointer<RE::BGSAttackData> cachedPowerAttackData = nullptr;
 
 		// this stores the amount of time since the target last switched guards
 		// if the target does not switch enough, then we can change guards to try to snipe
-		float targetSwitchTimer = 0.f;
+		//float targetSwitchTimer = 0.f;
 		Directions targetLastDir;
-		RE::ActorHandle currentTarget;
+		bool defending = false;
 
 		// percent chance it may switch to a specific direction to emulate anticipation of attacks
 		phmap::flat_hash_map<Directions, int> directionChangeChance;
@@ -164,10 +168,12 @@ private:
 		std::vector<Directions> attackPattern;
 		unsigned currentAttackIdx = 0u;
 
-		float distanceDiff;
 	};
+	phmap::flat_hash_map<RE::TESRace*, RE::NiPointer<RE::BGSAttackData>> RaceToNormalAttack;
+	phmap::flat_hash_map<RE::TESRace*, RE::NiPointer<RE::BGSAttackData>> RaceToPowerAttack;
 
 	RE::NiPointer<RE::BGSAttackData> FindActorAttackData(RE::Actor* actor);
+	RE::NiPointer<RE::BGSAttackData> FindActorPowerAttackData(RE::Actor* actor);
 
 	phmap::flat_hash_map<RE::ActorHandle,Action> ActionQueue;
 	mutable std::shared_mutex ActionQueueMtx;

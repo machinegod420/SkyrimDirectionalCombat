@@ -36,10 +36,10 @@ public:
 	bool HasDirectionalPerks(RE::Actor* actor) const;
 	bool HasBlockAngle(RE::Actor* attacker, RE::Actor* target) const;
 	void AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon);
-	void SwitchDirectionLeft(RE::Actor* actor);
-	void SwitchDirectionUp(RE::Actor* actor);
-	void SwitchDirectionDown(RE::Actor* actor);
-	void SwitchDirectionRight(RE::Actor* actor);
+	void SwitchDirectionLeft(RE::Actor* actor, bool ChangeQueued);
+	void SwitchDirectionUp(RE::Actor* actor, bool ChangeQueued);
+	void SwitchDirectionDown(RE::Actor* actor, bool ChangeQueued);
+	void SwitchDirectionRight(RE::Actor* actor, bool ChangeQueued);
 	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false, bool overwrite = true);
 	RE::SpellItem* DirectionToPerk(Directions dir) const;
 	RE::SpellItem* GetDirectionalPerk(RE::Actor* actor) const;
@@ -109,11 +109,30 @@ public:
 		return ret;
 	}
 
+	static Directions GetCounterDirection(Directions Direction)
+	{
+		switch (Direction)
+		{
+		case Directions::TR:
+			return Directions::TL;
+			break;
+		case Directions::TL:
+			return Directions::TR;
+			break;
+		case Directions::BR:
+			return Directions::BL;
+			break;
+		default:
+			return Directions::BR;
+			break;
+		}
+	}
+
 	void Cleanup();
 
 	inline void StartedAttackWindow(RE::Actor* actor)
 	{
-		SendAnimationEvent(actor);
+		//SendAnimationEvent(actor);
 		InAttackWinMtx.lock();
 		InAttackWin.insert(actor->GetHandle());
 		InAttackWinMtx.unlock();
@@ -121,7 +140,7 @@ public:
 
 	inline void EndedAttackWindow(RE::Actor* actor)
 	{
-		SendAnimationEvent(actor);
+		//SendAnimationEvent(actor);
 		InAttackWinMtx.lock();
 		InAttackWin.erase(actor->GetHandle());
 		InAttackWinMtx.unlock();
@@ -168,7 +187,7 @@ private:
 	// The transition is slower than the actual guard break time since it looks better,
 	// so we need to queue the forceidle events as skyrim does not allow blending multiple animations
 	// during blending another animation transition
-	phmap::flat_hash_map<RE::ActorHandle, std::queue<float>> AnimationTimer;
+	phmap::flat_hash_map<RE::ActorHandle, std::vector<float>> AnimationTimer;
 	mutable std::shared_mutex AnimationTimerMtx;
 
 	struct ComboData

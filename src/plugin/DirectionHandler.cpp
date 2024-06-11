@@ -6,8 +6,13 @@
 
 // in seconds
 // slow time should be a multiple as it affects animation events and we don't want to get stuck in the wrong idle
-constexpr float TimeBetweenChanges = 0.14f;
-constexpr float SlowTimeBetweenChanges = 0.24f;
+// behavior hardcodes transition time as .22 so has to be later than that
+constexpr float TimeBetweenChanges = 0.133f;
+constexpr float BehaviorDefinedTime = 0.22f;
+constexpr float BufferTime = 0.02f;
+// We need to be careful about sending this event at the exact same time a transition has finished.
+// This will cause flickering in the animation
+constexpr float SlowTimeBetweenChanges = BehaviorDefinedTime + BufferTime;
 
 void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
@@ -345,30 +350,49 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 
 }
 
-void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor)
+void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor, bool ChangeQueued)
 {
-	Directions dir = GetCurrentDirection(actor);
+	
 
 	if (Settings::ForHonorMode)
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
 	else
-	{
-		if (dir == Directions::TR)
+	{ 
+		Directions WantDirection;
+		bool IsQueued = HasQueuedDirection(actor, WantDirection);
+		if (ChangeQueued && IsQueued)
 		{
-			WantToSwitchTo(actor, Directions::TL);
+			if (WantDirection == Directions::TR)
+			{
+				WantToSwitchTo(actor, Directions::TL, true, false);
+			}
+			else if (WantDirection == Directions::BR)
+			{
+				WantToSwitchTo(actor, Directions::BL, true, false);
+			}
 		}
-		else if (dir == Directions::BR)
+		else
 		{
-			WantToSwitchTo(actor, Directions::BL);
+			Directions dir = GetCurrentDirection(actor);
+			if (dir == Directions::TR)
+			{
+				WantToSwitchTo(actor, Directions::TL);
+			}
+			else if (dir == Directions::BR)
+			{
+				WantToSwitchTo(actor, Directions::BL);
+			}
 		}
+
+		
 	}
 
 }
-void DirectionHandler::SwitchDirectionRight(RE::Actor* actor)
+void DirectionHandler::SwitchDirectionRight(RE::Actor* actor, bool ChangeQueued)
 {
-	Directions dir = GetCurrentDirection(actor);
+	
 
 	if (Settings::ForHonorMode)
 	{
@@ -376,17 +400,38 @@ void DirectionHandler::SwitchDirectionRight(RE::Actor* actor)
 	}
 	else
 	{
-		if (dir == Directions::TL)
+		Directions WantDirection;
+		bool IsQueued = HasQueuedDirection(actor, WantDirection);
+		if (ChangeQueued && IsQueued)
 		{
-			WantToSwitchTo(actor, Directions::TR);
+
+			if (WantDirection == Directions::TL)
+			{
+				WantToSwitchTo(actor, Directions::TR, true, false);
+			}
+			else if (WantDirection == Directions::BL)
+			{
+				WantToSwitchTo(actor, Directions::BR, true, false);
+			}
+
+
 		}
-		else if (dir == Directions::BL)
+		else
 		{
-			WantToSwitchTo(actor, Directions::BR);
+			Directions dir = GetCurrentDirection(actor);
+			if (dir == Directions::TL)
+			{
+				WantToSwitchTo(actor, Directions::TR);
+			}
+			else if (dir == Directions::BL)
+			{
+				WantToSwitchTo(actor, Directions::BR);
+			}
 		}
+
 	}
 }
-void DirectionHandler::SwitchDirectionUp(RE::Actor* actor)
+void DirectionHandler::SwitchDirectionUp(RE::Actor* actor, bool ChangeQueued)
 {
 	if (Settings::ForHonorMode)
 	{
@@ -394,31 +439,65 @@ void DirectionHandler::SwitchDirectionUp(RE::Actor* actor)
 	}
 	else
 	{
-		Directions dir = GetCurrentDirection(actor);
+		Directions WantDirection;
+		bool IsQueued = HasQueuedDirection(actor, WantDirection);
+		if (ChangeQueued && IsQueued)
+		{
+			if (WantDirection == Directions::BR)
+			{
+				WantToSwitchTo(actor, Directions::TR, true, false);
+			}
+			else if (WantDirection == Directions::BL)
+			{
+				WantToSwitchTo(actor, Directions::TL, true, false);
+			}
+		}
+		else
+		{
+			Directions dir = GetCurrentDirection(actor);
 
-		if (dir == Directions::BR)
-		{
-			WantToSwitchTo(actor, Directions::TR);
+			if (dir == Directions::BR)
+			{
+				WantToSwitchTo(actor, Directions::TR);
+			}
+			else if (dir == Directions::BL)
+			{
+				WantToSwitchTo(actor, Directions::TL);
+			}
 		}
-		else if (dir == Directions::BL)
-		{
-			WantToSwitchTo(actor, Directions::TL);
-		}
+
 	}
 
 }
-void DirectionHandler::SwitchDirectionDown(RE::Actor* actor)
+void DirectionHandler::SwitchDirectionDown(RE::Actor* actor, bool ChangeQueued)
 {
-	Directions dir = GetCurrentDirection(actor);
+	Directions WantDirection;
+	bool IsQueued = HasQueuedDirection(actor, WantDirection);
+	if (ChangeQueued && IsQueued)
+	{
+		if (WantDirection == Directions::TR)
+		{
+			WantToSwitchTo(actor, Directions::BR, true, false);
+		}
+		else if (WantDirection == Directions::TL)
+		{
+			WantToSwitchTo(actor, Directions::BL, true, false);
+		}
+		
+	}
+	else
+	{
+		Directions dir = GetCurrentDirection(actor);
+		if (dir == Directions::TR)
+		{
+			WantToSwitchTo(actor, Directions::BR);
+		}
+		else if (dir == Directions::TL)
+		{
+			WantToSwitchTo(actor, Directions::BL);
+		}
+	}
 
-	if (dir == Directions::TR)
-	{
-		WantToSwitchTo(actor, Directions::BR);
-	}
-	else if (dir == Directions::TL)
-	{
-		WantToSwitchTo(actor, Directions::BL);
-	}
 }
 
 
@@ -683,7 +762,31 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 				}
 				ImperfectParryMtx.unlock();
 			}
+			//lock direction if sprinting
+			// This should be the only time we use synchronous directoin change function
+			// since during sprint cannot change directions
+			if (actor->AsActorState()->IsSprinting())
+			{
+				if (PikeKeyword && Weapon->HasKeyword(PikeKeyword))
+				{
+					if (GetCurrentDirection(actor) != Directions::BR)
+					{
+						SwitchDirectionSynchronous(actor, Directions::BR, false);
+					}
+				}
+				else
+				{
+					if (GetCurrentDirection(actor) != Directions::TR)
+					{
+						SwitchDirectionSynchronous(actor, Directions::TR, false);
+					}
+				}
+
+
+			}
 		}
+		
+
 
 	}
 
@@ -738,30 +841,59 @@ void DirectionHandler::CleanupActor(RE::ActorHandle actor)
 
 void DirectionHandler::Cleanup()
 {
+	DirectionTimersMtx.lock();
 	DirectionTimers.clear();
+	DirectionTimersMtx.unlock();
+
+	AnimationTimerMtx.lock();
 	AnimationTimer.clear();
+	AnimationTimerMtx.unlock();
+
+	ComboDatasMtx.lock();
 	ComboDatas.clear();
+	ComboDatasMtx.unlock();
+
+	InAttackWinMtx.lock();
 	InAttackWin.clear();
+	InAttackWinMtx.unlock();
+
+	ActiveDirectionsMtx.lock();
 	ActiveDirections.clear();
+	ActiveDirectionsMtx.unlock();
+
+	UnblockableActorsMtx.lock();
 	UnblockableActors.clear();
+	UnblockableActorsMtx.unlock();
+
+	ImperfectParryMtx.lock();
 	ImperfectParry.clear();
+	ImperfectParryMtx.unlock();
 }
 
 void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 {
-	std::shared_lock lock(AnimationTimerMtx);
+	AnimationTimerMtx.lock();
+	constexpr int MaxSize = 4;
 	if (AnimationTimer.contains(actor->GetHandle()))
 	{
-		if (AnimationTimer[actor->GetHandle()].size() < 5)
+		int size = AnimationTimer[actor->GetHandle()].size();
+		
+		if (size < MaxSize)
 		{
-			AnimationTimer[actor->GetHandle()].push(SlowTimeBetweenChanges);
+			// Since the time between changes is greater than the transition time in the behavior, consecutive
+			// adds to the queue will cause the delay between the sent event and the transition time to be
+			// greater. For example, if there is 3 items in the queue, the second item will be sent at 0.72, while
+			// the behavior transition will occur at 0.66, which is a 66ms delay. 
+			AnimationTimer[actor->GetHandle()].push_back(SlowTimeBetweenChanges);
 		}
 	}
 	else
 	{
 		SendAnimationEvent(actor);
-		AnimationTimer[actor->GetHandle()].push(SlowTimeBetweenChanges);
+		AnimationTimer[actor->GetHandle()].resize(MaxSize);
+		AnimationTimer[actor->GetHandle()].push_back(SlowTimeBetweenChanges);
 	}
+	AnimationTimerMtx.unlock();
 }
 
 void DirectionHandler::Update(float delta)
@@ -813,18 +945,7 @@ void DirectionHandler::Update(float delta)
 				}
 				*/
 
-				if (AnimationTimer.contains(Iter->first))
-				{
-					if (AnimationTimer[Iter->first].size() < 5)
-					{
-						AnimationTimer[Iter->first].push(SlowTimeBetweenChanges);
-					}
-				}
-				else 
-				{
-					SendAnimationEvent(actor);
-					AnimationTimer[Iter->first].push(SlowTimeBetweenChanges);
-				}
+				QueueAnimationEvent(actor);
 				
 				Iter = DirectionTimers.erase(Iter);
 				continue;
@@ -856,13 +977,22 @@ void DirectionHandler::Update(float delta)
 		AnimIter->second.front() -= delta;
 		if (AnimIter->second.front() <= 0)
 		{
-			AnimIter->second.pop();
-			SendAnimationEvent(actor);
-			if (AnimIter->second.empty())
+			// if the actor is in a state that prevents it from registering this animation event, queue up the event instead
+			// this means no attacking and no sprinting
+			if (!actor->IsAttacking() && !actor->AsActorState()->IsSprinting())
 			{
-				AnimIter = AnimationTimer.erase(AnimIter);
-				continue;
+				AnimIter->second.erase(AnimIter->second.begin());
+				if (AnimIter->second.empty())
+				{
+					AnimIter = AnimationTimer.erase(AnimIter);
+					continue;
+				}
+				else
+				{
+					SendAnimationEvent(actor);
+				}
 			}
+
 		}
 		AnimIter++;
 	}

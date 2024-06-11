@@ -698,14 +698,17 @@ void SettingsLoader::RebalanceWeapons()
 			actor->combatStyle->generalData.defensiveMult = defensiveMult;
 
 
-			float offensiveMult = actor->combatStyle->generalData.offensiveMult * 1.5f;
+			float offensiveMult = actor->combatStyle->generalData.offensiveMult * 1.25f;
 			offensiveMult = std::min(0.99f, offensiveMult);
 			actor->combatStyle->generalData.offensiveMult = offensiveMult;
 
 
-			actor->combatStyle->meleeData.powerAttackBlockingMult = 0.1f;
-			actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
+			//actor->combatStyle->meleeData.powerAttackBlockingMult = 0.33f;
+			//actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
 			actor->combatStyle->meleeData.specialAttackMult = 0.2f;
+			actor->combatStyle->meleeData.bashPowerAttackMult = 0.f;
+			actor->combatStyle->meleeData.bashAttackMult = 0.f;
+			actor->combatStyle->meleeData.bashRecoilMult = 0.f;
 
 			float circleMult = actor->combatStyle->closeRangeData.circleMult * 1.f;
 			circleMult = std::min(0.99f, circleMult);
