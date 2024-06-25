@@ -35,6 +35,22 @@ namespace std
 	};
 }
 
+inline bool isPowerAttacking(RE::Actor* a_actor)
+{
+	auto currentProcess = a_actor->GetActorRuntimeData().currentProcess;
+	if (currentProcess) {
+		auto highProcess = currentProcess->high;
+		if (highProcess) {
+			auto attackData = highProcess->attackData;
+			if (attackData) {
+				auto flags = attackData->data.flags;
+				return flags.any(RE::AttackData::AttackFlag::kPowerAttack) && !flags.any(RE::AttackData::AttackFlag::kBashAttack);
+			}
+		}
+	}
+	return false;
+}
+
 class CircularArray
 {
 public:

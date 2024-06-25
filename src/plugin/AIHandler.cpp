@@ -18,14 +18,17 @@ int GetRand()
 constexpr int MaxDirs = 5;
 
 // MUST be higher than the direction switch time otherwise it will try to switch directions too quickly and freeze
-constexpr float LowestTime = 0.15f;
+constexpr float LowestTime = 0.143f;
 // have to be very careful with this number
 constexpr float AIJitterRange = 0.04f;
 
 constexpr float MaxMistakeRange = 0.1f;
 
-void AIHandler::InitializeValues()
+
+
+void AIHandler::InitializeValues(PRECISION_API::IVPrecision3* precision)
 {
+	Precision = precision;
 	// time in seconds between each update
 	//DifficultyUpdateTimer[Difficulty::Uninitialized] = 0;
 	DifficultyUpdateTimer[Difficulty::VeryEasy] = AISettings::VeryEasyUpdateTimer;
@@ -58,7 +61,8 @@ void AIHandler::InitializeValues()
 	{
 		iter.second *= AISettings::AIDifficultyMult;
 		// actions can be below the lowest time cause it doesnt cause weird direction change issues
-		iter.second = std::max(iter.second, LowestTime * 0.5f);
+		// 70ms should be the absolute limit of a persons physical reaction time
+		iter.second = std::max(iter.second, 0.07f);
 	}
 	logger::info("Finished reinitializing difficulty");
 
@@ -172,14 +176,13 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				if (CanAct(actor))
 				{
 					int JudgeDistance = 69000;
-
 					if (TargetDist < JudgeDistance)
 					{
 						float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 						float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 						float CurrentStaminaRatio = CurrentStamina / MaxStamina;
 						// always attack if have perk
-						if (DirHandler->IsUnblockable(actor) && CurrentStamina > 10)
+						if (DirHandler->IsUnblockable(actor) && TargetDist < DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ)
 						{
 							AddAction(actor, AIHandler::Actions::Riposte);
 						}
@@ -188,6 +191,10 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						{
 							//SwitchToNewDirection(actor, actor);
 							SwitchToNextAttack(actor, true);
+							if (isPowerAttacking(actor))
+							{
+								AddAction(actor, AIHandler::Actions::Followup, Directions::TR, true);
+							}
 						}
 						else
 						{
@@ -220,6 +227,16 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
 								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 							}
+							else if (!AttackHandler::GetSingleton()->CanAttack(target))
+							{
+								// target get attack so start attacking
+								DifficultyMap[actor->GetHandle()].defending = false;
+								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 5;
+								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+
+								ShouldDirectionMatch = false;
+								DontChangeDirection = false;
+							}
 							// If they are too close, try bashing
 							else if (actor->IsBlocking() && TargetDist < 10000 && !target->IsBlocking() && mt_rand() % 5 < 2
 								&& AttackHandler::GetSingleton()->CanAttack(actor) && CurrentStaminaRatio > 0.5)
@@ -232,8 +249,19 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							else if (!actor->IsBlocking() && TargetDist < 10000 && target->IsBlocking() && mt_rand() % 5 < 2 
 								&& AttackHandler::GetSingleton()->CanAttack(actor) && CurrentStaminaRatio > 0.5)
 							{
-								AddAction(actor, Actions::Riposte);
-								DifficultyMap[actor->GetHandle()].defending = false;
+								if (Settings::DMCOSupport)
+								{
+									AddAction(actor, Actions::Dodge);
+								}
+								else
+								{
+									AddAction(actor, Actions::Riposte);
+									DifficultyMap[actor->GetHandle()].defending = false;
+								}
+							}
+							else if (Settings::DMCOSupport && TargetDist < 14000 && CurrentStaminaRatio < 0.4 && DifficultyMap[actor->GetHandle()].defending)
+							{
+								AddAction(actor, Actions::Dodge);
 							}
 							// They guarding the same position a lot, maybe they are attacking?
 							else if (!actor->IsBlocking() && DifficultyMap[actor->GetHandle()].defending 
@@ -293,7 +321,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								}
 								else
 								{
-									SwitchToNewDirection(actor, target);
+									SwitchToNewDirection(actor, target, TargetDist);
 									//SwitchToNextAttack(actor);
 								}
 							}
@@ -358,10 +386,6 @@ void AIHandler::SwitchTargetExternalCalled(RE::Actor* actor, RE::Actor* newTarge
 		{
 			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
 		}
-		else if (BlockHandler::GetSingleton()->GetNumberAttackers(newTarget) < BlockHandler::GetSingleton()->GetNumberAttackers(newTarget))
-		{
-			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
-		}
 	}
 }
 
@@ -370,11 +394,6 @@ bool AIHandler::ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target)
 {
 	std::unique_lock lock(DifficultyMapMtx);
 
-	// don't contribute if they have too many attackers
-	if (BlockHandler::GetSingleton()->GetNumberAttackers(target) > 1)
-	{
-		//return false;
-	}
 	if (!DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 	{
 		return true;
@@ -442,7 +461,7 @@ bool AIHandler::ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target)
 	else
 	{
 		// some RNG to attack anyways
-		if (mt_rand() % mod < 1 && !HasBlockAngle)
+		if (mt_rand() % 10 < 1 && !HasBlockAngle)
 		{
 			return true;
 		}
@@ -458,10 +477,10 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 	}
 	std::unique_lock lock(DifficultyMapMtx);
 	int mod = (int)CalcAndInsertDifficulty(actor);
-	// 5 - 10 range
-	// 2 - 5
-	// .5 - .8
-	mod += 4;
+	// 8 - 13 range
+	// 4 - 7
+	// .75 - .86
+	mod += 7;
 	mod = (int)(mod * 0.5);
 	int val = mt_rand() % mod;
 	// force block stop to avoid weird stamina issues
@@ -474,7 +493,7 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 		bool ShouldFeint = DirectionHandler::GetSingleton()->HasBlockAngle(actor, attacker);
 		float TotalStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
-		if (CurrentStamina > TotalStamina * 0.1f)
+		if (CurrentStamina > TotalStamina * 0.15f)
 		{
 			DifficultyMap[actor->GetHandle()].defending = false;
 			if (CurrentStamina < TotalStamina * 0.5f)
@@ -502,7 +521,10 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 				AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
 			}
 		}
-
+		else
+		{
+			AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR);
+		}
 
 	}
 	else
@@ -595,7 +617,7 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 
 		if (found)
 		{
-			logger::info("{} failed direction {} {} {} {}", actor->GetName(), TR, TL, BL, BR);
+			//logger::info("{} failed direction {} {} {} {}", actor->GetName(), TR, TL, BL, BR);
 			TR -= 6;
 			TR = std::max(0, TR);
 			TL -= 6;
@@ -673,7 +695,7 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 
 }
 
-void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target)
+void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float TargetDist)
 {
 	// This will queue up this event if you cant switch instead
 	RE::ActorHandle ActorHandle = actor->GetHandle();
@@ -692,22 +714,36 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target)
 	{
 		// if the attack direction is where my enemy is blocking, try feinting
 		bool ShouldFeint = mt_rand() % 3 < 1;
-		float TotalStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+		float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+		float CurrentStaminaRatio = CurrentStamina / MaxStamina;
 		Actions action = GetQueuedAction(actor);
 		if (action != Actions::StartFeint && action != Actions::EndFeint && action != Actions::Riposte)
 		{
-			if (CurrentStamina > TotalStamina * 0.1f)
+
+			if (CurrentStaminaRatio > 0.1)
 			{
-				if (CurrentStamina < TotalStamina * 0.5f)
+
+				if (CurrentStaminaRatio < 0.5)
 				{
 					ShouldFeint = false;
 				}
-				if (ShouldFeint)
+				if (DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDist)
 				{
-					SwitchToNextAttack(actor, false);
-					AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
+					if (ShouldFeint)
+					{
+						SwitchToNextAttack(actor, false);
+						if (mt_rand() % 2 < 1)
+						{
+							AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
+						}
+						else
+						{
+							AddAction(actor, AIHandler::Actions::PowerAttack, Directions::TR, true);
+						}
+					}
 				}
+
 			}
 			if (!ShouldFeint)
 			{
@@ -800,13 +836,13 @@ void AIHandler::ResetDifficulty(RE::Actor* actor)
 	}
 }
 
-bool AIHandler::TryAttack(RE::Actor* actor)
+bool AIHandler::TryAttack(RE::Actor* actor, bool force)
 {
 	// since this is a forced attack, it happens outside of the normal AI attack loop so we need to add checks here as well
 	if (AttackHandler::GetSingleton()->CanAttack(actor) && actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) > 10)
 	{
 		// load attack data into actor to ensure attacks register correctly
-		if (LoadCachedAttack(actor))
+		if (LoadCachedAttack(actor, force))
 		{
 			// set actor state to show that actor is now attacking
 			actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kSwing;
@@ -897,16 +933,25 @@ AIHandler::Actions AIHandler::GetQueuedAction(RE::Actor* actor)
 }
 
 
-bool AIHandler::LoadCachedAttack(RE::Actor* actor)
+bool AIHandler::LoadCachedAttack(RE::Actor* actor, bool force)
 {
-	if (!actor->GetActorRuntimeData().currentProcess->high->attackData)
+	// seems strange at this point that difficulty is not already created
+	CalcAndInsertDifficulty(actor);
+	if (!DifficultyMap[actor->GetHandle()].cachedBasicAttackData)
 	{
-		// seems strange at this point that difficulty is not already created
-		CalcAndInsertDifficulty(actor);
-		if (!DifficultyMap[actor->GetHandle()].cachedBasicAttackData)
+		return false;
+	}
+	if (!force)
+	{
+		if (!actor->GetActorRuntimeData().currentProcess->high->attackData)
 		{
-			return false;
+			actor->GetActorRuntimeData().currentProcess->high->attackData =
+				DifficultyMap[actor->GetHandle()].cachedBasicAttackData;
+			return true;
 		}
+	}
+	else
+	{
 		actor->GetActorRuntimeData().currentProcess->high->attackData =
 			DifficultyMap[actor->GetHandle()].cachedBasicAttackData;
 		return true;
@@ -996,7 +1041,7 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 			DifficultyMap[actor->GetHandle()].cachedBasicAttackData = AttackData;
 		}
 
-		auto PowerAttackData = FindActorAttackData(actor);
+		auto PowerAttackData = FindActorPowerAttackData(actor);
 		if (PowerAttackData)
 		{
 			logger::info("{} has power attack data", actor->GetName());
@@ -1028,6 +1073,28 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 		DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
 		DifficultyMap[actor->GetHandle()].currentAttackIdx = 0;
 		DifficultyMap[actor->GetHandle()].defending = false;
+
+		// seed with deterministic input
+		DifficultyMap[actor->GetHandle()].npcRand.seed(handle);
+
+		if (Settings::HasPrecision && Precision)
+		{
+			float CurrentWeaponLength = Precision->GetAttackCollisionCapsuleLength(actor->GetHandle());
+			DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ = (CurrentWeaponLength * CurrentWeaponLength);
+		}
+		else
+		{
+			auto Equipped = actor->GetEquippedObject(false);
+			if (Equipped)
+			{
+				auto Weapon = Equipped->As<RE::TESObjectWEAP>();
+				if (Weapon && Weapon->IsMelee())
+				{
+					float CurrentWeaponLength = Weapon->GetReach();
+					DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ = (CurrentWeaponLength * CurrentWeaponLength);
+				}
+			}
+		}
 	}
 
 	return ret;
@@ -1239,11 +1306,24 @@ void AIHandler::Update(float delta)
 			if (ActionQueueIter->second.toDo == Actions::Riposte)
 			{
 				// sit in queue until we can attack again
-				if (TryAttack(actor))
+				if (TryAttack(actor, false))
 				{
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 				
+			}
+			else if (ActionQueueIter->second.toDo == Actions::Followup)
+			{
+				// this is a special case as it can force an attack to go thru as another attack is in progress
+				if (DirectionHandler::GetSingleton()->CanSwitch(actor))
+				{
+					if (TryAttack(actor, true))
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
+				}
+				
+
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Block)
 			{
@@ -1272,7 +1352,7 @@ void AIHandler::Update(float delta)
 				{
 					actor->NotifyAnimationGraph("blockStop");
 				}
-				if (TryAttack(actor))
+				if (TryAttack(actor, false))
 				{
 					// add action will freeze due to mutex lock
 					// hack fix later
@@ -1307,6 +1387,13 @@ void AIHandler::Update(float delta)
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 
+			}
+			else if (ActionQueueIter->second.toDo == Actions::Dodge)
+			{
+				actor->SetGraphVariableInt("Dodge_Direction", 5);
+				actor->NotifyAnimationGraph("Dodge_B");
+				actor->NotifyAnimationGraph("Dodge");
+				ActionQueueIter->second.toDo = Actions::None;
 			}
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor

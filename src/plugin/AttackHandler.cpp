@@ -52,18 +52,11 @@ void AttackHandler::RemoveFeintWindow(RE::Actor* actor)
 bool AttackHandler::CanAttack(RE::Actor* actor)
 {
 	bool ret = false;
-	if (actor->IsPlayerRef())
-	{
-		PlayerMtx.lock_shared();
-		ret = !PlayerLockout;
-		PlayerMtx.unlock_shared();
-	}
-	else
-	{
-		AttackLockoutMtx.lock_shared();
-		ret = !AttackLockout.contains(actor->GetHandle());
-		AttackLockoutMtx.unlock_shared();
-	}
+
+	AttackLockoutMtx.lock_shared();
+	ret = !AttackLockout.contains(actor->GetHandle());
+	AttackLockoutMtx.unlock_shared();
+
 	return ret;
 }
 
@@ -123,32 +116,20 @@ void AttackHandler::AddFeintWindow(RE::Actor* actor)
 	FeintWindowMtx.unlock();
 }
 
-void AttackHandler::AddNPCSmallLockout(RE::Actor* actor)
+void AttackHandler::RemoveLockout(RE::Actor* actor)
 {
+
 	AttackLockoutMtx.lock();
 	if (AttackLockout.contains(actor->GetHandle()))
 	{
-		AttackLockout[actor->GetHandle()] = NPCLockoutTime;
+		AttackLockout.erase(actor->GetHandle());
 	}
 	AttackLockoutMtx.unlock();
+
 }
 
 void AttackHandler::AddLockout(RE::Actor* actor)
 {
-	AttackLockoutMtx.lock();
-	AttackLockout[actor->GetHandle()] = DifficultySettings::AttackTimeoutTime;
-	if (actor->IsAttacking())
-	{
-		actor->NotifyAnimationGraph("attackStop");
-	}
-	AttackLockoutMtx.unlock();
-}
-
-void AttackHandler::LockoutPlayer(RE::Actor* actor)
-{
-	PlayerMtx.lock();
-	PlayerLockout = true;
-	PlayerLockoutTimer = DifficultySettings::AttackTimeoutTime;
 	// this hack is necessary because of the way MCO works. it will queue an attack on the animation graph once the player clicks after the
 	// nextattack window is passed. during this time, the player can still get hit and commit a lockout. but, the queued animation will still play
 	// because it is already being parsed by the animation graph, and the plugin cannot intercept it. so we have to force all attacks to end. 
@@ -156,14 +137,18 @@ void AttackHandler::LockoutPlayer(RE::Actor* actor)
 	{
 		actor->NotifyAnimationGraph("attackStop");
 	}
-	PlayerMtx.unlock();
+
+	{
+		AttackLockoutMtx.lock();
+		AttackLockout[actor->GetHandle()] = DifficultySettings::AttackTimeoutTime;
+		AttackLockoutMtx.unlock();
+	}
+
 }
+
 
 void AttackHandler::Cleanup()
 {
-	PlayerMtx.lock();
-	PlayerLockout = false;
-	PlayerMtx.unlock();
 
 	ChamberWindowMtx.lock();
 	ChamberWindow.clear();
@@ -233,17 +218,6 @@ void AttackHandler::RemoveActor(RE::ActorHandle actor)
 
 void AttackHandler::Update(float delta)
 {
-	PlayerMtx.lock();
-	if (PlayerLockout)
-	{
-		PlayerLockoutTimer -= delta;
-		if (PlayerLockoutTimer < 0.f)
-		{
-			PlayerLockout = false;
-		}
-	}
-	PlayerMtx.unlock();
-
 	{
 		ChamberWindowMtx.lock();
 		auto ChamberIter = ChamberWindow.begin();

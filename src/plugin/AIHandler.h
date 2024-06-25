@@ -4,6 +4,7 @@
 #include <vector>
 #include <shared_mutex>
 #include "Direction.h"
+#include "3rdparty/PrecisionAPI.h"
 #include "Utils.h"
 #include "parallel_hashmap/phmap.h"
 
@@ -20,7 +21,7 @@ public:
 		VeryHard,
 		Legendary
 	};
-	void InitializeValues();
+	void InitializeValues(PRECISION_API::IVPrecision3* precision);
 	AIHandler()
 	{
 		EnableRaceKeyword = nullptr;
@@ -35,7 +36,9 @@ public:
 		EndFeint,
 		Bash,
 		EndBlock,
-		PowerAttack
+		PowerAttack,
+		Dodge,
+		Followup
 	};
 
 	static AIHandler* GetSingleton()
@@ -62,8 +65,8 @@ public:
 	void DidAttackExternalCalled(RE::Actor* actor);
 	//
 
-	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target);
-	bool TryAttack(RE::Actor* actor);
+	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float TargetDist);
+	bool TryAttack(RE::Actor* actor, bool force);
 	bool TryPowerAttack(RE::Actor* actor);
 
 	
@@ -80,7 +83,7 @@ public:
 	Directions GetNextAttack(RE::Actor* actor);
 
 	// Load attackdata so our attackstart event is processed correctly as an attack
-	bool LoadCachedAttack(RE::Actor* actor);
+	bool LoadCachedAttack(RE::Actor* actor, bool force);
 	bool LoadCachedPowerAttack(RE::Actor* actor);
 	//
 
@@ -168,6 +171,11 @@ private:
 		std::vector<Directions> attackPattern;
 		unsigned currentAttackIdx = 0u;
 
+		// Each NPC has its own rand implementation to ensure that each NPC acts deterministically
+		std::mt19937 npcRand;
+
+		float CurrentWeaponLengthSQ = 0.f;
+
 	};
 	phmap::flat_hash_map<RE::TESRace*, RE::NiPointer<RE::BGSAttackData>> RaceToNormalAttack;
 	phmap::flat_hash_map<RE::TESRace*, RE::NiPointer<RE::BGSAttackData>> RaceToPowerAttack;
@@ -190,4 +198,5 @@ private:
 	phmap::flat_hash_map<Difficulty, float> DifficultyActionTimer; 
 	mutable std::shared_mutex DifficultyActionTimerMtx;
 
+	PRECISION_API::IVPrecision3* Precision = nullptr;
 };

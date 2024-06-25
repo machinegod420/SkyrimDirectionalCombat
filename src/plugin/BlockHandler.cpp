@@ -2,6 +2,7 @@
 #include "DirectionHandler.h"
 #include "AIHandler.h"
 #include "SettingsLoader.h"
+#include "AttackHandler.h"
 #include "FXHandler.h"
 
 constexpr float MultiattackTimer = 2.5f;
@@ -45,24 +46,21 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	float AdditionalStamDamage = 0;
 	if (!hasShield && AttackerWeaponWeight > DefenderWeaponWeight)
 	{
-		AdditionalStamDamage = 0.75f * (AttackerWeaponWeight - DefenderWeaponWeight);
-		AdditionalStamDamage = std::min(AdditionalStamDamage, 10.f);
+		AdditionalStamDamage = 0.5f * (AttackerWeaponWeight - DefenderWeaponWeight);
 	}
 	float a = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock);
 	a = std::min(a, 99.f);
 	float skillMod = 0.8f + (0.2f) * ((100.f - a) / 100.f);
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
-	
 	Damage *= skillMod;
-	if (!Imperfect)
-	{
-		Damage += AdditionalStamDamage;
-	}
-	else
+	// base stamina damage should never exceed 33% of their stamina to prevent instant losses
+	Damage = std::min(Damage, ActorStamina * 0.33f);
+	Damage += AdditionalStamDamage;
+
+	if(Imperfect)
 	{
 		//take damage if it was imperfect as well as increased stamina damage
 		FinalDamage = hitData.totalDamage;
-		Damage += AdditionalStamDamage;
 		Damage *= 1.5f;
 
 		// Always do at least 15% of target stamina if they have imperfect block
@@ -79,7 +77,6 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		{
 			CauseStagger(target, hitData.aggressor.get().get(), 1.f, true);
 		}
-		FinalDamage *= DifficultySettings::MeleeDamageMult;
 	}
 	
 	target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
@@ -138,36 +135,12 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		target->SetGraphVariableBool("IsBlocking", false);
 		target->NotifyAnimationGraph("blockStop");
 		//logger::info("had wrong block angle");
-
-		if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
-		{
-			if (!target->IsPlayerRef())
-			{
-				// AI stuff here
-				Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
-				if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
-				{
-					AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
-					AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
-					AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
-				}
-				
-			}
-		}
 	}
 	else
 	{
-		// wnot sure why we have to reimpelment recoil here
-		//attacker->NotifyAnimationGraph("recoilStart");
-		// succesffully blocked so give hyperarmor
-		//GiveHyperarmor(target);
+		// succesffully blocked so remove any lockout if they cannot attack
+		AttackHandler::GetSingleton()->RemoveLockout(target);
 
-		if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
-		{
-			//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
-			AIHandler::GetSingleton()->TryRiposteExternalCalled(target, attacker);
-			AIHandler::GetSingleton()->SignalGoodThingExternalCalled(target, DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
-		}
 	}
 }
 
@@ -221,17 +194,18 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
 			CauseStagger(attacker, target, 0.25f);
 			// masterstriker gets invulnerability during MS
-			GiveHyperarmor(target);
+			GiveHyperarmor(target, target);
 			return true;
 		}
 	}
 	return false;
 }
 
-void BlockHandler::GiveHyperarmor(RE::Actor* actor)
+void BlockHandler::GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker)
 {
 	HyperArmorTimerMtx.lock();
-	HyperArmorTimer[actor->GetHandle()] = DifficultySettings::HyperarmorTimer;
+	HyperArmorTimer[actor->GetHandle()].Target = attacker->GetHandle();
+	HyperArmorTimer[actor->GetHandle()].TimeLeft = DifficultySettings::HyperarmorTimer;
 	HyperArmorTimerMtx.unlock();
 }
 
@@ -249,106 +223,119 @@ void BlockHandler::RemoveActor(RE::ActorHandle actor)
 
 void BlockHandler::Update(float delta)
 {
-	StaggerTimerMtx.lock();
-	auto Iter = StaggerTimer.begin();
-	while (Iter != StaggerTimer.end())
 	{
-		if (!Iter->first)
+		StaggerTimerMtx.lock();
+		auto Iter = StaggerTimer.begin();
+		while (Iter != StaggerTimer.end())
 		{
-			Iter = StaggerTimer.erase(Iter);
-			continue;
-		}
-		RE::Actor* actor = Iter->first.get().get();
-		if (!actor)
-		{
-			Iter = StaggerTimer.erase(Iter);
-			continue;
-		}
-		Iter->second -= delta;
-		if (Iter->second <= 0)
-		{
-			Iter = StaggerTimer.erase(Iter);
-			continue;
-
-		}
-		Iter++;
-	}
-	StaggerTimerMtx.unlock();
-
-	HyperArmorTimerMtx.lock();
-	auto HAIter = HyperArmorTimer.begin();
-	while (HAIter != HyperArmorTimer.end())
-	{
-		if (!HAIter->first)
-		{
-			HAIter = HyperArmorTimer.erase(HAIter);
-			continue;
-		}
-		RE::Actor* actor = HAIter->first.get().get();
-		if (!actor)
-		{
-			HAIter = HyperArmorTimer.erase(HAIter);
-			continue;
-		}
-		HAIter->second -= delta;
-		if (HAIter->second <= 0)
-		{
-			HAIter = HyperArmorTimer.erase(HAIter);
-			continue;
-
-		}
-		HAIter++;
-	}
-	HyperArmorTimerMtx.unlock();
-
-	AttackersMapMtx.lock();
-	auto AttackersIter = AttackersMap.begin();
-	while (AttackersIter != AttackersMap.end())
-	{
-		if (!AttackersIter->first)
-		{
-			AttackersIter = AttackersMap.erase(AttackersIter);
-			continue;
-		}
-		RE::Actor* actor = AttackersIter->first.get().get();
-		if (!actor)
-		{
-			AttackersIter = AttackersMap.erase(AttackersIter);
-			continue;
-		}
-		AttackersIter->second.timeLeft -= delta;
-		if (AttackersIter->second.timeLeft <= 0)
-		{
-			if (AttackersIter->second.attackers.size() > 0)
+			if (!Iter->first)
 			{
-				AttackersIter->second.attackers.erase(AttackersIter->second.attackers.begin());
-				AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+				Iter = StaggerTimer.erase(Iter);
+				continue;
 			}
-			if (AttackersIter->second.attackers.size() == 0)
+			RE::Actor* actor = Iter->first.get().get();
+			if (!actor)
 			{
-				AttackersMap.erase(AttackersIter);
+				Iter = StaggerTimer.erase(Iter);
+				continue;
 			}
-		}
-		AttackersIter++;
-	}
-	AttackersMapMtx.unlock();
+			Iter->second -= delta;
+			if (Iter->second <= 0)
+			{
+				Iter = StaggerTimer.erase(Iter);
+				continue;
 
-	LastParriedMapMtx.lock();
-	auto LastParriedMapIter = LastParriedMap.begin();
-	while (LastParriedMapIter != LastParriedMap.end())
-	{
-		if (!LastParriedMapIter->first)
-		{
-			LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
-			continue;
+			}
+			Iter++;
 		}
-		RE::Actor* actor = LastParriedMapIter->first.get().get();
-		if (!actor)
-		{
-			LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
-			continue;
-		}
-		LastParriedMapIter++;
+		StaggerTimerMtx.unlock();
+
 	}
-	LastParriedMapMtx.unlock();
+
+	{
+
+		HyperArmorTimerMtx.lock();
+		auto HAIter = HyperArmorTimer.begin();
+		while (HAIter != HyperArmorTimer.end())
+		{
+			if (!HAIter->first)
+			{
+				HAIter = HyperArmorTimer.erase(HAIter);
+				continue;
+			}
+			RE::Actor* actor = HAIter->first.get().get();
+			if (!actor)
+			{
+				HAIter = HyperArmorTimer.erase(HAIter);
+				continue;
+			}
+			HAIter->second.TimeLeft -= delta;
+			if (HAIter->second.TimeLeft <= 0)
+			{
+				HAIter = HyperArmorTimer.erase(HAIter);
+				continue;
+
+			}
+			HAIter++;
+		}
+		HyperArmorTimerMtx.unlock();
+	}
+
+	{
+
+		AttackersMapMtx.lock();
+		auto AttackersIter = AttackersMap.begin();
+		while (AttackersIter != AttackersMap.end())
+		{
+			if (!AttackersIter->first)
+			{
+				AttackersIter = AttackersMap.erase(AttackersIter);
+				continue;
+			}
+			RE::Actor* actor = AttackersIter->first.get().get();
+			if (!actor)
+			{
+				AttackersIter = AttackersMap.erase(AttackersIter);
+				continue;
+			}
+			AttackersIter->second.timeLeft -= delta;
+			if (AttackersIter->second.timeLeft <= 0)
+			{
+				if (AttackersIter->second.attackers.size() > 0)
+				{
+					AttackersIter->second.attackers.erase(AttackersIter->second.attackers.begin());
+					AttackersMap[actor->GetHandle()].timeLeft = MultiattackTimer;
+				}
+				if (AttackersIter->second.attackers.size() == 0)
+				{
+					AttackersMap.erase(AttackersIter);
+				}
+			}
+			AttackersIter++;
+		}
+		AttackersMapMtx.unlock();
+	}
+
+
+	{
+		LastParriedMapMtx.lock();
+		auto LastParriedMapIter = LastParriedMap.begin();
+		while (LastParriedMapIter != LastParriedMap.end())
+		{
+			if (!LastParriedMapIter->first)
+			{
+				LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
+				continue;
+			}
+			RE::Actor* actor = LastParriedMapIter->first.get().get();
+			if (!actor)
+			{
+				LastParriedMapIter = LastParriedMap.erase(LastParriedMapIter);
+				continue;
+			}
+			LastParriedMapIter++;
+		}
+		LastParriedMapMtx.unlock();
+	}
+
 }

@@ -23,6 +23,7 @@ bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
 bool Settings::ForHonorMode = false;
 bool Settings::ExperimentalMode = false;
+bool Settings::DMCOSupport = true;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
@@ -82,80 +83,6 @@ bool UISettings::OnlyShowTargetted = true;
 
 void SettingsLoader::InitializeDefaultValues()
 {
-	DifficultySettings::ComboResetTimer = 4.f;
-	DifficultySettings::MeleeDamageMult = 2.f;
-	DifficultySettings::UnblockableDamageMult = 3.f;
-	DifficultySettings::ProjectileDamageMult = 0.25f;
-	DifficultySettings::StaggerResetTimer = 1.5f;
-	DifficultySettings::ChamberWindowTime = 0.2f;
-	DifficultySettings::FeintWindowTime = 0.4f;
-	DifficultySettings::StaminaRegenMult = 39.f;
-	DifficultySettings::HyperarmorTimer = 1.0f;
-	DifficultySettings::AttackTimeoutTime = 1.0f;
-	DifficultySettings::AttacksCostStamina = true;
-	DifficultySettings::NonNPCStaggerMult = 2.f;
-	DifficultySettings::StaminaCost = 0.1f;
-	DifficultySettings::WeaponWeightStaminaMult = 0.33f;
-	DifficultySettings::KnockbackMult = 2.f;
-
-	Settings::ActiveDistance = 4000.f;
-	Settings::HasPrecision = false;
-	Settings::EnableForH2H = true;
-	Settings::MNBMode = false;
-	Settings::ForHonorMode = false;
-	Settings::ExperimentalMode = false;
-	Settings::SwitchingCostsStamina = true;
-
-	InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
-	InputSettings::MouseSens = 5;
-	InputSettings::KeyModifierCode = 56;
-	InputSettings::KeyCodeTR = 2;
-	InputSettings::KeyCodeTL = 3;
-	InputSettings::KeyCodeBL = 4;
-	InputSettings::KeyCodeBR = 5;
-	InputSettings::KeyCodeFeint = 16;
-	InputSettings::InvertY = false;
-
-	WeaponSettings::RebalanceWeapons = true;
-	WeaponSettings::WarhammerSpeed = 0.75f;
-	WeaponSettings::BattleaxeSpeed = 0.78f;
-	WeaponSettings::GreatSwordSpeed = 0.8f;
-	WeaponSettings::SwordSpeed = 0.9f;
-	WeaponSettings::AxeSpeed = 0.8f;
-	WeaponSettings::WeaponSpeedMult = 0.9f;
-	WeaponSettings::BowSpeedMult = 0.6f;
-
-	AISettings::AIWaitTimer = 1.f;
-	AISettings::LegendaryLvl = 11;
-	AISettings::VeryHardLvl = 7;
-	AISettings::HardLvl = 5;
-	AISettings::NormalLvl = 3;
-	AISettings::EasyLvl = -3;
-	AISettings::VeryEasyLvl = -8;
-	AISettings::AIDifficultyMult = 1.0f;
-	AISettings::AIGrowthFactor = 0.04f;
-
-	AISettings::LegendaryUpdateTimer = 0.16f;
-	AISettings::VeryHardUpdateTimer = 0.2f;
-	AISettings::HardUpdateTimer = 0.24f;
-	AISettings::NormalUpdateTimer = 0.24f;
-	AISettings::EasyUpdateTimer = 0.3f;
-	AISettings::VeryEasyUpdateTimer = 0.3f;
-
-	AISettings::LegendaryActionTimer = 0.14f;
-	AISettings::VeryHardActionTimer = 0.17f;
-	AISettings::HardActionTimer = 0.2f;
-	AISettings::NormalActionTimer = 0.2f;
-	AISettings::EasyActionTimer = 0.24f;
-	AISettings::VeryEasyActionTimer = 0.28f;
-
-	UISettings::Size = 300.f;
-	UISettings::Length = 13.f;
-	UISettings::Thickness = 7.f;
-	UISettings::DisplayDistance = 2000.0;
-	UISettings::ShowUI = true;
-	UISettings::FlashUI = false;
-	UISettings::HarderUI = true;
 }
 
 void SettingsLoader::Load(const std::string& path)
@@ -556,6 +483,13 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::ExperimentalMode = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::ExperimentalMode);
+				}
+				else if (fieldName == "DMCOSupport")
+				{
+					bool newval = field.as<bool>();
+					Settings::DMCOSupport = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::DMCOSupport);
 				}
 				else if (fieldName == "SwitchingCostsStamina")
 				{

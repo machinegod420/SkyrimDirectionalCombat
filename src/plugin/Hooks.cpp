@@ -27,7 +27,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && 
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
-			BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
+			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
 			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
@@ -95,6 +95,12 @@ namespace Hooks
 		// make sure attacker actually has directions!
 		if (attacker && target && DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 		{
+			// hacks to try to stop double effects due to enchantments but is clearly inconsistent and non-deterministic
+			if (hitData.totalDamage < 1 || !AttackHandler::GetSingleton()->CanAttack(attacker))
+			{
+				return;
+			}
+			
 			// ignore hit if was bash attack against attacking character
 			// bash can be used to open up enemies but will fail if you bash after an attack started
 			if (hitData.flags.any(RE::HitData::Flag::kBash))
@@ -127,9 +133,11 @@ namespace Hooks
 				hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
 				// restore stamina as well
 				attacker->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina,
-					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.12f);
+					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
 
 			}
+
+			/*
 			int numAttackersTarget = (BlockHandler::GetSingleton()->GetNumberAttackers(target));
 			if (numAttackersTarget > 1)
 			{
@@ -139,7 +147,10 @@ namespace Hooks
 			if (numAttackersAttacker > 1)
 			{
 				hitData.totalDamage *= 1.25f;
-			}
+			}		
+			
+			*/
+
 			
 			if (TargetUnblockable)
 			{
@@ -178,7 +189,7 @@ namespace Hooks
 						typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
 
 						static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
-						foo(target->GetCharController(), t, .5f);
+						//foo(target->GetCharController(), t, .5f);
 					}
 
 					BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
@@ -187,29 +198,43 @@ namespace Hooks
 					
 					if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
 					{
-						if (attacker->IsPlayerRef())
-						{
-							AttackHandler::GetSingleton()->LockoutPlayer(attacker);
-						}
-						else
-						{
-							AttackHandler::GetSingleton()->AddLockout(attacker);
-						}
+						AttackHandler::GetSingleton()->AddLockout(attacker);
+					}
+					else
+					{
+						//lockout defender if attacked w/ powerattack
+						AttackHandler::GetSingleton()->AddLockout(target);
 					}
 
+					// AI stuff
+					if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target) && hitData.flags.none(RE::HitData::Flag::kPowerAttack))
+					{
+						//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
+						AIHandler::GetSingleton()->TryRiposteExternalCalled(target, attacker);
+						AIHandler::GetSingleton()->SignalGoodThingExternalCalled(target, DirectionHandler::GetSingleton()->GetCurrentDirection(attacker));
+					}
+
+					_OnMeleeHit(target, hitData);
+					return;
 				}
 				else
 				{
 
+					if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+					{
+						// AI stuff here
+						Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
+						if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+						{
+							AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+							AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
+							AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
+						}
+
+					}
+
 					//apply lockout to the defender to prevent doubles
-					if (target->IsPlayerRef())
-					{
-						AttackHandler::GetSingleton()->LockoutPlayer(target);
-					}
-					else
-					{
-						AttackHandler::GetSingleton()->AddLockout(target);
-					}
+					AttackHandler::GetSingleton()->AddLockout(target);
 					// prccess hit first in case there are bonuses for attacking staggered characters
 					// and we want to process the hit before we remove the unblockable bonuses
 					_OnMeleeHit(target, hitData);
@@ -223,12 +248,7 @@ namespace Hooks
 						BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
 					}
 
-					// only for NPCs with directional attacks. do not need enemy to have directions
-					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
-					{
-						// attack successfully landed, so the attacker gets to add to their combo
-						DirectionHandler::GetSingleton()->AddCombo(attacker);
-					}
+					DirectionHandler::GetSingleton()->AddCombo(attacker);
 					return;
 				}
 			}
@@ -251,6 +271,10 @@ namespace Hooks
 		if (a_this)
 		{
 			a_this->GetProjectileRuntimeData().weaponDamage *= DifficultySettings::ProjectileDamageMult;
+			if (a_this->GetProjectileRuntimeData().explosion)
+			{
+
+			}
 		}
 		_OnMissileHit(a_this, a_AllCdPointCollector);
 	}
@@ -263,7 +287,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
-			BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
+			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
 			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
@@ -276,9 +300,31 @@ namespace Hooks
 			// make attacks 'safe', a chamber/masterstroke mechanic
 			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
-				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+				if (AttackHandler::GetSingleton()->InChamberWindow(attacker))
 				{
-					return;
+					float TargetMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(target);
+					float AttackerMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(attacker);
+					if (TargetMasterstrikeTime > AttackerMasterstrikeTime)
+					{
+						if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+						{
+							return;
+						}
+					}
+					else
+					{
+						if (BlockHandler::GetSingleton()->HandleMasterstrike(target, attacker))
+						{
+							return;
+						}
+					}
+				}
+				else
+				{
+					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+					{
+						return;
+					}
 				}
 			}
 			else
@@ -643,7 +689,7 @@ namespace Hooks
 			eventName == RE::UserEvents::GetSingleton()->rightAttack)
 		{
 			// if player is prevented from attacking by recoil
-			if (AttackHandler::GetSingleton()->IsPlayerLocked())
+			if (!AttackHandler::GetSingleton()->CanAttack(RE::PlayerCharacter::GetSingleton()))
 			{
 				return false;
 			}
@@ -660,21 +706,7 @@ namespace Hooks
 		}
 		return _ProcessAttackHook(handler, a_event, a_data);
 	}
-	bool isPowerAttacking(RE::Actor* a_actor)
-	{
-		auto currentProcess = a_actor->GetActorRuntimeData().currentProcess;
-		if (currentProcess) {
-			auto highProcess = currentProcess->high;
-			if (highProcess) {
-				auto attackData = highProcess->attackData;
-				if (attackData) {
-					auto flags = attackData->data.flags;
-					return flags.any(RE::AttackData::AttackFlag::kPowerAttack) && !flags.any(RE::AttackData::AttackFlag::kBashAttack);
-				}
-			}
-		}
-		return false;
-	}
+
 	void HookAnimEvent::ProcessCharacterEvent(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
 	{
 		UNUSED(a_sink);
@@ -698,20 +730,25 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 			if (DifficultySettings::AttacksCostStamina)
 			{
-				unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
-				repeatCombos = std::min(3u, repeatCombos);
+				// unblockable attacks are free
+				if (!DirectionHandler::GetSingleton()->IsUnblockable(actor))
+				{
+					unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
+					repeatCombos = std::min(3u, repeatCombos);
 
-				float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[repeatCombos];
-				auto Equipped = actor->GetEquippedObject(false);
-				if (Equipped)
-				{
-					staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
+					float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[repeatCombos];
+					auto Equipped = actor->GetEquippedObject(false);
+					if (Equipped)
+					{
+						staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
+					}
+					if (isPowerAttacking(actor))
+					{
+						staminaCost *= 1.5f;
+					}
+					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 				}
-				if (isPowerAttacking(actor))
-				{
-					//staminaCost *= 2.0f;
-				}
-				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
+
 
 			}
 
@@ -751,7 +788,6 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 			DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
 		}
-
 		// feint events
 		else if (str == "FeintToTR"_h)
 		{ 
@@ -768,6 +804,10 @@ namespace Hooks
 		else if (str == "FeintToBR"_h)
 		{
 			DirectionHandler::GetSingleton()->SwitchDirectionSynchronous(actor, Directions::BR, false);
+		}
+		else if (str == "MCO_DodgeClose"_h)
+		{
+			//logger::info("Got MCO dodge event");
 		}
 	}
 	RE::BSEventNotifyControl HookAnimEvent::ProcessEvent_NPC(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)

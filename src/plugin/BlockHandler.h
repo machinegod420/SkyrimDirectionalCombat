@@ -19,7 +19,7 @@ public:
 	void ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData &hitData);
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
 	void CauseRecoil(RE::Actor* actor) const;
-	void GiveHyperarmor(RE::Actor* actor);
+	void GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker);
 	inline bool HasHyperarmor(RE::Actor* actor) const
 	{
 		HyperArmorTimerMtx.lock_shared();
@@ -55,7 +55,12 @@ private:
 	phmap::flat_hash_map<RE::ActorHandle, float> StaggerTimer;
 	mutable std::shared_mutex StaggerTimerMtx;
 	
-	phmap::flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
+	struct HyperArmorData
+	{
+		RE::ActorHandle Target;
+		float TimeLeft = 0;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, HyperArmorData> HyperArmorTimer;
 	mutable std::shared_mutex HyperArmorTimerMtx;
 
 	struct MultipleAttackers

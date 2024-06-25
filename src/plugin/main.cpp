@@ -67,7 +67,7 @@ void OnDataLoad()
 	InputEventHandler::Register();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
-	AIHandler::GetSingleton()->InitializeValues();
+	AIHandler::GetSingleton()->InitializeValues(precision);
 }
 
 void OnPostLoad()

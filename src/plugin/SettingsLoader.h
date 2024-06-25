@@ -32,6 +32,7 @@ struct Settings
 	static bool MNBMode;
 	static bool ForHonorMode;
 	static bool ExperimentalMode;
+	static bool DMCOSupport;
 	static bool BufferInput;
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;

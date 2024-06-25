@@ -128,6 +128,7 @@ public:
 		}
 	}
 
+	bool CanSwitch(RE::Actor* actor);
 	void Cleanup();
 
 	inline void StartedAttackWindow(RE::Actor* actor)
@@ -171,7 +172,6 @@ private:
 	//std::map<Directions, RE::BGSPerk*> DirectionToPerk;
 	 
 
-	bool CanSwitch(RE::Actor* actor);
 	
 	struct DirectionSwitch
 	{
