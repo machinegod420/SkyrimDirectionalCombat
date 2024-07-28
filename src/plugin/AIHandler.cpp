@@ -22,8 +22,9 @@ constexpr float LowestTime = 0.143f;
 // have to be very careful with this number
 constexpr float AIJitterRange = 0.04f;
 
-constexpr float MaxMistakeRange = 0.1f;
+constexpr float MaxMistakeRange = 0.05f;
 
+constexpr int MaxDirectionTracked = 5;
 
 
 void AIHandler::InitializeValues(PRECISION_API::IVPrecision3* precision)
@@ -181,6 +182,10 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 						float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 						float CurrentStaminaRatio = CurrentStamina / MaxStamina;
+
+						float EnemyCurrentStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+						float EnemyMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+						float EnemyStaminaRatio = EnemyCurrentStamina / EnemyMaxStamina;
 						// always attack if have perk
 						if (DirHandler->IsUnblockable(actor) && TargetDist < DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ)
 						{
@@ -201,7 +206,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							bool ShouldDirectionMatch = false;
 							bool DontChangeDirection = false;
 							// Most important case, attempt to defend
-							if (target->IsAttacking())
+							if (target->IsAttacking() && !DirectionHandler::GetSingleton()->IsUnblockable(target))
 							{
 								Actions action = GetQueuedAction(actor);
 								// try to block or masterstrike
@@ -231,7 +236,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							{
 								// target get attack so start attacking
 								DifficultyMap[actor->GetHandle()].defending = false;
-								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 5;
+								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = MaxDirectionTracked + 1;
 								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 
 								ShouldDirectionMatch = false;
@@ -251,7 +256,24 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							{
 								if (Settings::DMCOSupport)
 								{
-									AddAction(actor, Actions::Dodge);
+									// add another check here because the enemy might be unable to bash
+									bool TargetStaggering = false;
+									target->GetGraphVariableBool("IsStaggering", TargetStaggering);
+									bool ShouldDodge = !TargetStaggering && (EnemyStaminaRatio > 0.5);
+									if (ShouldDodge && mt_rand() % 5 < 2)
+									{
+										ShouldDodge = false;
+									}
+									if (ShouldDodge)
+									{
+										AddAction(actor, Actions::Dodge);
+									}
+									else
+									{
+										AddAction(actor, Actions::Riposte);
+										DifficultyMap[actor->GetHandle()].defending = false;
+									}
+
 								}
 								else
 								{
@@ -259,7 +281,8 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 									DifficultyMap[actor->GetHandle()].defending = false;
 								}
 							}
-							else if (Settings::DMCOSupport && TargetDist < 14000 && CurrentStaminaRatio < 0.4 && DifficultyMap[actor->GetHandle()].defending)
+							else if (Settings::DMCOSupport && TargetDist < 10000 && CurrentStaminaRatio < 0.3 && 
+								DifficultyMap[actor->GetHandle()].defending && mt_rand() % 5 < 2)
 							{
 								AddAction(actor, Actions::Dodge);
 							}
@@ -272,7 +295,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							}
 							// Stop blocking to avoid burning stamina
 							else if (actor->IsBlocking() && DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame < 1 && 
-								(mt_rand() % 5 < 1 || CurrentStaminaRatio < 0.4))
+								(mt_rand() % 5 < 2 || CurrentStaminaRatio < 0.3))
 							{
 								AddAction(actor, Actions::EndBlock);
 								DontChangeDirection = true;
@@ -288,11 +311,11 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							if (DifficultyMap.at(actor->GetHandle()).defending)
 							{
 								ShouldDirectionMatch = true;
-								if (DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame > 4 ||
-									DifficultyMap.at(actor->GetHandle()).numTimesDirectionsSwitched > 4)
+								if (DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame > MaxDirectionTracked ||
+									DifficultyMap.at(actor->GetHandle()).numTimesDirectionsSwitched > MaxDirectionTracked)
 								{
 									DifficultyMap[actor->GetHandle()].defending = false;
-									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 5;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = MaxDirectionTracked + 1;
 									DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 								}
 							}
@@ -554,7 +577,6 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 	// direction match
 	// really follow the last direction tracked then update it
 	int mod = (int)CalcAndInsertDifficulty(actor);
-
 	// follow last tracked direction isntead of the targets current direction
 	// the AI is too easy to confuse with this though, since they can lag behind a bit
 	Directions ToCounter = DifficultyMap[actor->GetHandle()].lastDirectionTracked;
@@ -576,12 +598,13 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 	}
 	if (ToCounter != CurrentTargetDir)
 	{
+		int DifficultyMod = 8 * AISettings::AIMistakeRatio;
 		DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched++;
 		DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
-		if (DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched < 3)
+		if (DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched < MaxDirectionTracked)
 		{
 			DifficultyMap[actor->GetHandle()].directionChangeChance[ToCounter] +=
-				(8 / mod) * DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched;
+				(DifficultyMod / mod) * DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched;
 
 		}
 
@@ -618,13 +641,15 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		if (found)
 		{
 			//logger::info("{} failed direction {} {} {} {}", actor->GetName(), TR, TL, BL, BR);
-			TR -= 6;
+
+			int DifficultyMod = 5;
+			TR -= DifficultyMod;
 			TR = std::max(0, TR);
-			TL -= 6;
+			TL -= DifficultyMod;
 			TL = std::max(0, TL);
-			BL -= 6;
+			BL -= DifficultyMod;
 			BL = std::max(0, BL);
-			BR -= 6;
+			BR -= DifficultyMod;
 			BR = std::max(0, BR);
 			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TR] = TR;
 			DifficultyMap[actor->GetHandle()].directionChangeChance[Directions::TL] = TL;
@@ -663,7 +688,8 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		DifficultyMap[actor->GetHandle()].numTimesDirectionSame++;
 		if (DifficultyMap[actor->GetHandle()].numTimesDirectionSame < 5)
 		{
-			DifficultyMap[actor->GetHandle()].directionChangeChance[ToCounter] += (8 / mod);
+			int DifficultyMod = 8 * AISettings::AIMistakeRatio;
+			DifficultyMap[actor->GetHandle()].directionChangeChance[ToCounter] += (DifficultyMod / mod);
 			TR -= mod / 2;
 			TR = std::max(0, TR);
 			TL -= mod / 2;
@@ -682,8 +708,9 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 	// if currently attacking toward this spot, slowly increase percentage
 	if (force)
 	{
+		int DifficultyMod = 8 * AISettings::AIMistakeRatio;
 		DifficultyMap[actor->GetHandle()].directionChangeChance[CurrentTargetDir]
-			+= (7 / mod);
+			+= (DifficultyMod / mod);
 	}
 
 

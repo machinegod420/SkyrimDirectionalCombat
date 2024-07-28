@@ -47,6 +47,11 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 		return false;
 	}
 
+	if (HasTimedParry(target))
+	{
+		return true;
+	}
+
 	std::shared_lock lock(ActiveDirectionsMtx);
 	if (!ActiveDirections.contains(target->GetHandle()) || !ActiveDirections.contains(attacker->GetHandle()))
 	{
@@ -99,9 +104,13 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 
 		if(Settings::HasTDM && TDM)
 		{
-			if (actor->GetHandle() != TDM->GetCurrentTarget())
+			if (UISettings::OnlyShowTargetted)
 			{
-				return;
+				if (actor->GetHandle() != TDM->GetCurrentTarget())
+				{
+					return;
+				}
+
 			}
 		}
 		else if (UISettings::OnlyShowTargetted)
@@ -162,7 +171,15 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 			RE::BGSBodyPart* bodyPart = actor->GetRace()->bodyPartData->parts[RE::BGSBodyPartDefs::LIMB_ENUM::kTorso];
 			if (bodyPart)
 			{
-				Position = actor->GetNodeByName(bodyPart->targetName)->world.translate;
+				auto Node = actor->GetNodeByName(bodyPart->targetName);
+				if (Node)
+				{
+					Position = Node->world.translate;
+				}
+				else
+				{
+					Position = actor->GetLookingAtLocation();
+				}
 			}
 		}
 		// only mirror if character is facing the camera
@@ -704,7 +721,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 	}
 
-	// Non melee weapon
+	// check if non melee weapon
 	RE::TESObjectWEAP* Weapon = nullptr;
 	RE::TESObjectWEAP* WeaponLeft = nullptr;
 	bool HasWeapon = RaceCanFight;
@@ -712,14 +729,6 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	{
 		Weapon = Equipped->As<RE::TESObjectWEAP>();
 		if (Weapon && Weapon->IsMelee())
-		{
-			HasWeapon = true;
-		}
-	}
-	if (EquippedLeft)
-	{
-		WeaponLeft = EquippedLeft->As<RE::TESObjectWEAP>();
-		if (WeaponLeft && WeaponLeft->IsMelee())
 		{
 			HasWeapon = true;
 		}
@@ -767,7 +776,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			// since during sprint cannot change directions
 			if (actor->AsActorState()->IsSprinting())
 			{
-				if (PikeKeyword && Weapon->HasKeyword(PikeKeyword))
+				if (PikeKeyword && Weapon && Weapon->HasKeyword(PikeKeyword))
 				{
 					if (GetCurrentDirection(actor) != Directions::BR)
 					{
@@ -907,166 +916,202 @@ void DirectionHandler::Update(float delta)
 	ToRemove.clear();
 	ToRemoveMtx.unlock();
 
-	// prevent instant direction switches
-	DirectionTimersMtx.lock();
-	auto Iter = DirectionTimers.begin();
-	while (Iter != DirectionTimers.end())
 	{
-		if (!Iter->first)
+		// prevent instant direction switches
+		DirectionTimersMtx.lock();
+		auto Iter = DirectionTimers.begin();
+		while (Iter != DirectionTimers.end())
 		{
-			Iter = DirectionTimers.erase(Iter);
-			continue;
-		}
-		RE::Actor* actor = Iter->first.get().get();
-		if (!actor)
-		{
-			Iter = DirectionTimers.erase(Iter);
-			continue;
-		}
-
-		Iter->second.timeLeft -= delta;
-		if (Iter->second.timeLeft <= 0)
-		{
-			// make sure actor is not in a state that prevents it from switching directions, first
-			// this will sit in queue until this happens
-			if (CanSwitch(actor))
+			if (!Iter->first)
 			{
-				SwitchDirectionSynchronous(actor, Iter->second.dir, Iter->second.wasBlocking);
-
-				// We use a timer instead of below code in order to slow down the animation transitions (purely visual)
-				// Since we want the animation time to be longer than the actual time to switch directions
-				/*
-				if (actor->IsBlocking())
-				{
-					actor->NotifyAnimationGraph("ForceBlockIdle");
-				}
-				else {
-					actor->NotifyAnimationGraph("ForceIdleTest");
-				}
-				*/
-
-				QueueAnimationEvent(actor);
-				
+				Iter = DirectionTimers.erase(Iter);
+				continue;
+			}
+			RE::Actor* actor = Iter->first.get().get();
+			if (!actor)
+			{
 				Iter = DirectionTimers.erase(Iter);
 				continue;
 			}
 
-		}
-		
-		Iter++;
-	}
-	DirectionTimersMtx.unlock();
-
-	AnimationTimerMtx.lock();
-	// slow down animations
-	auto AnimIter = AnimationTimer.begin();
-	while (AnimIter != AnimationTimer.end())
-	{
-		if (!AnimIter->first)
-		{
-			AnimIter = AnimationTimer.erase(AnimIter);
-			continue;
-		}
-		RE::Actor* actor = AnimIter->first.get().get();
-		if (!actor)
-		{
-			AnimIter = AnimationTimer.erase(AnimIter);
-			continue;
-		}
-
-		AnimIter->second.front() -= delta;
-		if (AnimIter->second.front() <= 0)
-		{
-			// if the actor is in a state that prevents it from registering this animation event, queue up the event instead
-			// this means no attacking and no sprinting
-			if (!actor->IsAttacking() && !actor->AsActorState()->IsSprinting())
+			Iter->second.timeLeft -= delta;
+			if (Iter->second.timeLeft <= 0)
 			{
-				AnimIter->second.erase(AnimIter->second.begin());
-				if (AnimIter->second.empty())
+				// make sure actor is not in a state that prevents it from switching directions, first
+				// this will sit in queue until this happens
+				if (CanSwitch(actor))
 				{
-					AnimIter = AnimationTimer.erase(AnimIter);
+					SwitchDirectionSynchronous(actor, Iter->second.dir, Iter->second.wasBlocking);
+
+					// We use a timer instead of below code in order to slow down the animation transitions (purely visual)
+					// Since we want the animation time to be longer than the actual time to switch directions
+					/*
+					if (actor->IsBlocking())
+					{
+						actor->NotifyAnimationGraph("ForceBlockIdle");
+					}
+					else {
+						actor->NotifyAnimationGraph("ForceIdleTest");
+					}
+					*/
+
+					QueueAnimationEvent(actor);
+
+					Iter = DirectionTimers.erase(Iter);
 					continue;
+				}
+
+			}
+
+			Iter++;
+		}
+		DirectionTimersMtx.unlock();
+	}
+
+	{
+		AnimationTimerMtx.lock();
+		// slow down animations
+		auto AnimIter = AnimationTimer.begin();
+		while (AnimIter != AnimationTimer.end())
+		{
+			if (!AnimIter->first)
+			{
+				AnimIter = AnimationTimer.erase(AnimIter);
+				continue;
+			}
+			RE::Actor* actor = AnimIter->first.get().get();
+			if (!actor)
+			{
+				AnimIter = AnimationTimer.erase(AnimIter);
+				continue;
+			}
+
+			AnimIter->second.front() -= delta;
+			if (AnimIter->second.front() <= 0)
+			{
+				// if the actor is in a state that prevents it from registering this animation event, queue up the event instead
+				// this means no attacking and no sprinting
+				if (!actor->IsAttacking() && !actor->AsActorState()->IsSprinting())
+				{
+					AnimIter->second.erase(AnimIter->second.begin());
+					if (AnimIter->second.empty())
+					{
+						AnimIter = AnimationTimer.erase(AnimIter);
+						continue;
+					}
+					else
+					{
+						SendAnimationEvent(actor);
+					}
+				}
+
+			}
+			AnimIter++;
+		}
+		AnimationTimerMtx.unlock();
+	}
+
+
+	{
+		ComboDatasMtx.lock();
+		auto ComboIter = ComboDatas.begin();
+		while (ComboIter != ComboDatas.end())
+		{
+			if (!ComboIter->first)
+			{
+				ComboIter = ComboDatas.erase(ComboIter);
+				continue;
+			}
+			RE::Actor* actor = ComboIter->first.get().get();
+			if (!actor)
+			{
+				ComboIter = ComboDatas.erase(ComboIter);
+				continue;
+			}
+
+			ComboIter->second.timeLeft -= delta;
+			if (ComboIter->second.timeLeft <= 0)
+			{
+				ComboData& data = ComboIter->second;
+				data.size--;
+				data.size = std::max(0, data.size);
+				if (UnblockableActors.contains(actor->GetHandle()))
+				{
+					UnblockableActors.erase(actor->GetHandle());
+					actor->RemoveSpell(Unblockable);
+				}
+				if (data.size == 0)
+				{
+					data.repeatCount = 0;
+					data.currentIdx = 0;
 				}
 				else
 				{
-					SendAnimationEvent(actor);
+					data.repeatCount--;
+					data.repeatCount = std::max(0, data.repeatCount);
+					data.currentIdx--;
+					if (data.currentIdx < 0)
+					{
+						data.currentIdx = 2;
+					}
 				}
+
 			}
 
+			ComboIter++;
 		}
-		AnimIter++;
+		ComboDatasMtx.unlock();
 	}
-	AnimationTimerMtx.unlock();
 
-
-	ComboDatasMtx.lock();
-	auto ComboIter = ComboDatas.begin();
-	while (ComboIter != ComboDatas.end())
 	{
-		if (!ComboIter->first)
+		ActiveDirectionsMtx.lock();
+		auto DirIter = ActiveDirections.begin();
+		while (DirIter != ActiveDirections.end())
 		{
-			ComboIter = ComboDatas.erase(ComboIter);
-			continue;
-		}
-		RE::Actor* actor = ComboIter->first.get().get();
-		if (!actor)
-		{
-			ComboIter = ComboDatas.erase(ComboIter);
-			continue;
-		}
-
-		ComboIter->second.timeLeft -= delta;
-		if (ComboIter->second.timeLeft <= 0)
-		{
-			ComboData& data = ComboIter->second;
-			data.size--;
-			data.size = std::max(0, data.size);
-			if (UnblockableActors.contains(actor->GetHandle()))
+			if (!DirIter->first)
 			{
-				UnblockableActors.erase(actor->GetHandle());
-				actor->RemoveSpell(Unblockable);
+				DirIter = ActiveDirections.erase(DirIter);
+				continue;
 			}
-			if (data.size == 0)
+			RE::Actor* actor = DirIter->first.get().get();
+			if (!actor)
 			{
-				data.repeatCount = 0;
-				data.currentIdx = 0;
-			}
-			else
-			{
-				data.repeatCount--;
-				data.repeatCount = std::max(0, data.repeatCount);
-				data.currentIdx--;
-				if (data.currentIdx < 0)
-				{
-					data.currentIdx = 2;
-				}
+				DirIter = ActiveDirections.erase(DirIter);
+				continue;
 			}
 
+			DirIter++;
 		}
-
-		ComboIter++;
+		ActiveDirectionsMtx.unlock();
 	}
-	ComboDatasMtx.unlock();
 
-	ActiveDirectionsMtx.lock();
-	auto DirIter = ActiveDirections.begin();
-	while (DirIter != ActiveDirections.end())
 	{
-		if (!DirIter->first)
+		TimedParryMtx.lock();
+		auto ParryIter = TimedParry.begin();
+		
+		while (ParryIter != TimedParry.end())
 		{
-			DirIter = ActiveDirections.erase(DirIter);
-			continue;
+			if (!ParryIter->first)
+			{
+				ParryIter = TimedParry.erase(ParryIter);
+				continue;
+			}
+			RE::Actor* actor = ParryIter->first.get().get();
+			if (!actor)
+			{
+				ParryIter = TimedParry.erase(ParryIter);
+				continue;
+			}
+			ParryIter->second -= delta;
+			if (ParryIter->second <= 0)
+			{
+				ParryIter = TimedParry.erase(ParryIter);
+				continue;
+			}
+			ParryIter++;
 		}
-		RE::Actor* actor = DirIter->first.get().get();
-		if (!actor)
-		{
-			DirIter = ActiveDirections.erase(DirIter);
-			continue;
-		}
-
-		DirIter++;
+		TimedParryMtx.unlock();
 	}
-	ActiveDirectionsMtx.unlock();
 
 }
 

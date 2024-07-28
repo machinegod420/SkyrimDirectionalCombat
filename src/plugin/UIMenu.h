@@ -12,7 +12,8 @@ enum class UIDirectionState
 	Attacking,
 	Blocking,
 	Unblockable,
-	ImperfectBlock
+	ImperfectBlock,
+	TimedBlock
 };
 
 enum class UIHostileState

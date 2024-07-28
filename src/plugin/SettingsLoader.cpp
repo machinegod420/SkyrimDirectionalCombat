@@ -1,5 +1,12 @@
 #include "SettingsLoader.h"
 
+#define SETTING_MACRO(sectionName, settingsClass, settingName, newval) \
+    do { \
+        settingsClass::settingName = newval; \
+        logger::info("Loaded section {} setting {} with new value {}", \
+            sectionName, #settingName, settingsClass::settingName); \
+    } while (0)
+
 float DifficultySettings::ComboResetTimer = 4.f;
 float DifficultySettings::MeleeDamageMult = 2.f;
 float DifficultySettings::UnblockableDamageMult = 3.f;
@@ -23,7 +30,7 @@ bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
 bool Settings::ForHonorMode = false;
 bool Settings::ExperimentalMode = false;
-bool Settings::DMCOSupport = true;
+bool Settings::DMCOSupport = false;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
@@ -56,7 +63,8 @@ int AISettings::NormalLvl = 3;
 int AISettings::EasyLvl = -3;
 int AISettings::VeryEasyLvl = -8;
 float AISettings::AIDifficultyMult = 1.0f;
-float AISettings::AIGrowthFactor = 0.04f;
+float AISettings::AIGrowthFactor = 0.01f;
+float AISettings::AIMistakeRatio = 2.0f;
 
 float AISettings::LegendaryUpdateTimer = 0.15f;
 float AISettings::VeryHardUpdateTimer = 0.18f;
@@ -109,6 +117,7 @@ void SettingsLoader::Load(const std::string& path)
 			{
 				if (fieldName == "InputType")
 				{
+					
 					InputSettings::InputTypes newval = (InputSettings::InputTypes)field.as<int>();
 					InputSettings::InputType = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
@@ -117,23 +126,17 @@ void SettingsLoader::Load(const std::string& path)
 				else if (fieldName == "KeyModifierCode")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyModifierCode = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyModifierCode);
+					SETTING_MACRO(sectionName, InputSettings, KeyModifierCode, newval);
 				}
 				else if (fieldName == "MouseSens")
 				{
-					int newval = field.as<int>();
-					InputSettings::MouseSens = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::MouseSens);
+					int newval = field.as<unsigned>();
+					SETTING_MACRO(sectionName, InputSettings, MouseSens, newval);
 				}
 				else if (fieldName == "KeyCodeTR")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeTR = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeTR);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeTR, newval);
 				}
 				else if (fieldName == "KeyCodeTL")
 				{
@@ -274,6 +277,13 @@ void SettingsLoader::Load(const std::string& path)
 					AISettings::AIGrowthFactor = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, AISettings::AIGrowthFactor);
+				}
+				else if (fieldName == "AIMistakeRatio")
+				{
+					float newval = field.as<float>();
+					AISettings::AIMistakeRatio = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, AISettings::AIMistakeRatio);
 				}
 				else if (fieldName == "VeryEasyLvl")
 				{
@@ -613,45 +623,43 @@ float SettingsLoader::CalcDamage(float diff)
 void SettingsLoader::RebalanceWeapons()
 {
 	logger::info("Rebalancing weapons!");
-	for (auto& actor : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESNPC>())
+
+	for (RE::TESCombatStyle* combatStyle : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESCombatStyle>())
 	{
-		if (actor && actor->combatStyle)
-		{
-			// these have caps so do not break them
+		//logger::info("parsed {}", combatStyle->GetFormEditorID());
+		// these have caps
+		float meleeScoreMult = combatStyle->generalData.meleeScoreMult * 1.2f;
+		//meleeScoreMult = std::min(0.99f, meleeScoreMult);
+		combatStyle->generalData.meleeScoreMult = meleeScoreMult;
 
-			float meleeScoreMult = actor->combatStyle->generalData.meleeScoreMult * 1.2f;
-			meleeScoreMult = std::min(0.99f, meleeScoreMult);
-			actor->combatStyle->generalData.meleeScoreMult = meleeScoreMult;
+		float rangedScoreMult = combatStyle->generalData.rangedScoreMult * 0.8f;
+		//rangedScoreMult = std::min(0.99f, rangedScoreMult);
+		combatStyle->generalData.rangedScoreMult = rangedScoreMult;
 
-			float rangedScoreMult = actor->combatStyle->generalData.rangedScoreMult * 0.8f;
-			rangedScoreMult = std::min(0.99f, rangedScoreMult);
-			actor->combatStyle->generalData.rangedScoreMult = rangedScoreMult;
-
-			float defensiveMult = 0.f;
-			defensiveMult = std::min(0.99f, defensiveMult);
-			actor->combatStyle->generalData.defensiveMult = defensiveMult;
+		float defensiveMult = 0.f;
+		defensiveMult = std::min(0.99f, defensiveMult);
+		combatStyle->generalData.defensiveMult = defensiveMult;
 
 
-			float offensiveMult = actor->combatStyle->generalData.offensiveMult * 1.25f;
-			offensiveMult = std::min(0.99f, offensiveMult);
-			actor->combatStyle->generalData.offensiveMult = offensiveMult;
+		float offensiveMult = combatStyle->generalData.offensiveMult * 2.f;
+		offensiveMult = std::min(1.f, offensiveMult);
+		combatStyle->generalData.offensiveMult = offensiveMult;
 
 
-			//actor->combatStyle->meleeData.powerAttackBlockingMult = 0.33f;
-			//actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
-			actor->combatStyle->meleeData.specialAttackMult = 0.2f;
-			actor->combatStyle->meleeData.bashPowerAttackMult = 0.f;
-			actor->combatStyle->meleeData.bashAttackMult = 0.f;
-			actor->combatStyle->meleeData.bashRecoilMult = 0.f;
+		//actor->combatStyle->meleeData.powerAttackBlockingMult = 0.33f;
+		//actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
+		combatStyle->meleeData.specialAttackMult = 0.2f;
+		combatStyle->meleeData.bashPowerAttackMult = 0.f;
+		combatStyle->meleeData.bashAttackMult = 0.f;
+		combatStyle->meleeData.bashRecoilMult = 0.f;
+		combatStyle->flags.reset(RE::TESCombatStyle::FLAG::kAllowDualWielding);
+		float circleMult = combatStyle->closeRangeData.circleMult * 1.f;
+		circleMult = std::min(0.99f, circleMult);
+		combatStyle->closeRangeData.circleMult = circleMult;
 
-			float circleMult = actor->combatStyle->closeRangeData.circleMult * 1.f;
-			circleMult = std::min(0.99f, circleMult);
-			actor->combatStyle->closeRangeData.circleMult = circleMult;
-
-			//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 1.5f;
-			//fallbackMult = std::min(0.99f, fallbackMult);
-			//actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
-		}
+		//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 1.5f;
+		//fallbackMult = std::min(0.99f, fallbackMult);
+		//actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
 
 	}
 	for (auto& weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())

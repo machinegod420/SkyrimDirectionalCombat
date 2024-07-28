@@ -16,14 +16,23 @@ public:
 		return std::addressof(obj);
 	}
 	void Update(float delta);
+
 	void ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData &hitData);
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
 	void CauseRecoil(RE::Actor* actor) const;
 	void GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker);
-	inline bool HasHyperarmor(RE::Actor* actor) const
+	inline bool HasHyperarmor(RE::Actor* actor, RE::Actor* attacker) const
 	{
+		bool ret = false;
 		HyperArmorTimerMtx.lock_shared();
-		bool ret = HyperArmorTimer.contains(actor->GetHandle());
+		// if the attacker is NOT the same as the original attacker that gave the hyperarmor, count as having hyperarmor
+		if (HyperArmorTimer.contains(actor->GetHandle()))
+		{
+			if (HyperArmorTimer.at(actor->GetHandle()).Target != attacker->GetHandle())
+			{
+				ret = true;
+			}
+		}
 		HyperArmorTimerMtx.unlock_shared();
 		return ret;
 	}

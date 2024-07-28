@@ -86,6 +86,7 @@ struct AISettings
 	static int VeryEasyLvl;
 	static float AIDifficultyMult;
 	static float AIGrowthFactor;
+	static float AIMistakeRatio;
 
 	// you're gonna mess with these for a long time
 	static float LegendaryUpdateTimer;

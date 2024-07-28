@@ -44,7 +44,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	bool hasShield = DefenderShield ? DefenderShield->IsArmor() : false;
 
 	float AdditionalStamDamage = 0;
-	if (!hasShield && AttackerWeaponWeight > DefenderWeaponWeight)
+	if (AttackerWeaponWeight > DefenderWeaponWeight)
 	{
 		AdditionalStamDamage = 0.5f * (AttackerWeaponWeight - DefenderWeaponWeight);
 	}
@@ -53,6 +53,10 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	float skillMod = 0.8f + (0.2f) * ((100.f - a) / 100.f);
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
 	Damage *= skillMod;
+	if (hasShield)
+	{
+		Damage *= 0.5;
+	}
 	// base stamina damage should never exceed 33% of their stamina to prevent instant losses
 	Damage = std::min(Damage, ActorStamina * 0.33f);
 	Damage += AdditionalStamDamage;
@@ -140,7 +144,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	{
 		// succesffully blocked so remove any lockout if they cannot attack
 		AttackHandler::GetSingleton()->RemoveLockout(target);
-
+		GiveHyperarmor(target, attacker);
 	}
 }
 
@@ -194,7 +198,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
 			CauseStagger(attacker, target, 0.25f);
 			// masterstriker gets invulnerability during MS
-			GiveHyperarmor(target, target);
+			GiveHyperarmor(target, attacker);
 			return true;
 		}
 	}

@@ -108,6 +108,14 @@ public:
 		UnblockableActorsMtx.unlock_shared();
 		return ret;
 	}
+	inline bool HasTimedParry(RE::Actor* actor) const
+	{
+		bool ret = false;
+		TimedParryMtx.lock_shared();
+		ret = TimedParry.contains(actor->GetHandle());
+		TimedParryMtx.unlock_shared();
+		return ret;
+	}
 
 	static Directions GetCounterDirection(Directions Direction)
 	{
@@ -221,6 +229,10 @@ private:
 	// Determine who has an imperfect parry
 	phmap::flat_hash_set<RE::ActorHandle> ImperfectParry;
 	mutable std::shared_mutex ImperfectParryMtx;
+
+	// Determine who has a timed parry
+	phmap::flat_hash_map<RE::ActorHandle, float> TimedParry;
+	mutable std::shared_mutex TimedParryMtx;
 
 	phmap::flat_hash_set<RE::ActorHandle> ToAdd;
 	mutable std::shared_mutex ToAddMtx;

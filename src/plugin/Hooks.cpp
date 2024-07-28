@@ -28,7 +28,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
-			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
+			if (BlockHandler::GetSingleton()->HasHyperarmor(target, attacker))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
 				ret.bIgnoreHit = true;
@@ -232,7 +232,7 @@ namespace Hooks
 						}
 
 					}
-
+					DirectionHandler::GetSingleton()->AddCombo(attacker);
 					//apply lockout to the defender to prevent doubles
 					AttackHandler::GetSingleton()->AddLockout(target);
 					// prccess hit first in case there are bonuses for attacking staggered characters
@@ -248,7 +248,7 @@ namespace Hooks
 						BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
 					}
 
-					DirectionHandler::GetSingleton()->AddCombo(attacker);
+					
 					return;
 				}
 			}
@@ -288,7 +288,7 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
-			if (BlockHandler::GetSingleton()->HasHyperarmor(target))
+			if (BlockHandler::GetSingleton()->HasHyperarmor(target, attacker))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
 				return;
@@ -693,7 +693,11 @@ namespace Hooks
 			{
 				return false;
 			}
-
+			// make it so you can only switch direction after feint window has passed
+			if (AttackHandler::GetSingleton()->InFeintWindow(RE::PlayerCharacter::GetSingleton()))
+			{
+				return false;
+			}
 			if (DifficultySettings::AttacksCostStamina)
 			{
 				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 
@@ -744,7 +748,7 @@ namespace Hooks
 					}
 					if (isPowerAttacking(actor))
 					{
-						staminaCost *= 1.5f;
+						staminaCost *= 2.f;
 					}
 					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 				}

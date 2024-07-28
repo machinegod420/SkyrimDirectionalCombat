@@ -320,6 +320,10 @@ void RenderManager::draw()
 		case UIDirectionState::Blocking:
 			active = { 0x40, 0x40, 0xFF, 0x00 };
 			break;
+		case UIDirectionState::TimedBlock:
+			active = { 0x40, 0xD0, 0xFF, 0x00 };
+			white = active;
+			break;
 		case UIDirectionState::ImperfectBlock:
 			active = { 0x40, 0xE0, 0xD0, 0x00 };
 			break;

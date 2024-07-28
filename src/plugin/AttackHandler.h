@@ -26,7 +26,7 @@ public:
 	void AddChamberWindow(RE::Actor* actor);
 	void AddFeintWindow(RE::Actor* actor);
 	void RemoveFeintWindow(RE::Actor* actor);
-	const float AttackSpeedMult = 0.1;
+	const float AttackSpeedMult = 0.25;
 	void GiveAttackSpeedBuff(RE::Actor* actor)
 	{
 		SpeedBuffMtx.lock();
