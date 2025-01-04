@@ -21,6 +21,8 @@ struct DifficultySettings
 	static float StaminaCost;
 	static float WeaponWeightStaminaMult;
 	static float KnockbackMult;
+	static float StaminaDamageCap;
+	static float DMCODodgeCost;
 };
 
 struct Settings
@@ -56,6 +58,7 @@ struct InputSettings
 	static unsigned KeyCodeBL;
 	static unsigned KeyCodeBR;
 	static unsigned KeyCodeFeint;
+	static unsigned KeyCodeBash;
 	static bool InvertY;
 };
 

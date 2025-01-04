@@ -5,7 +5,7 @@ void FXHandler::Initialize()
 	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 	MasterstrikeSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xEBC26, "Skyrim.esm");
 	MasterstrikeSound2 = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3F37C, "Skyrim.esm");
-	BlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x97783, "Skyrim.esm");
+	BlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x4D2DE, "Skyrim.esm");
 	logger::info("FXHandler Initialized");
 }
 

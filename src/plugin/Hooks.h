@@ -214,7 +214,7 @@ namespace Hooks
 			REL::Relocation<uintptr_t> AnimGraphVtbl_PC { RE::VTABLE_PlayerCharacter[3] };
 			REL::Relocation<uintptr_t> AnimGraphVtbl_NPC{ RE::VTABLE_Character[3] };
 			_NotifyAnimationGraph_PC = AnimGraphVtbl_PC.write_vfunc(0x1, NotifyAnimationGraph_PC);
-			_NotifyAnimationGraph_NPC = AnimGraphVtbl_PC.write_vfunc(0x1, NotifyAnimationGraph_NPC);
+			_NotifyAnimationGraph_NPC = AnimGraphVtbl_NPC.write_vfunc(0x1, NotifyAnimationGraph_NPC);
 		}
 		static bool NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName);
 		static bool NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName);
@@ -244,8 +244,6 @@ namespace Hooks
 		static inline REL::Relocation<decltype(ProcessEvent_NPC)> _ProcessEvent_NPC;
 		static inline REL::Relocation<decltype(ProcessEvent_PC)> _ProcessEvent_PC;
 	};
-
-
 
 
 	class Hooks

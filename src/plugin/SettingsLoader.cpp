@@ -22,6 +22,8 @@ float DifficultySettings::NonNPCStaggerMult = 2.f;
 float DifficultySettings::StaminaCost = 0.1f;
 float DifficultySettings::WeaponWeightStaminaMult = 0.33f;
 float DifficultySettings::KnockbackMult = 2.f;
+float DifficultySettings::StaminaDamageCap = 0.4f;
+float DifficultySettings::DMCODodgeCost = 0.4f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -44,6 +46,7 @@ unsigned InputSettings::KeyCodeTL = 3;
 unsigned InputSettings::KeyCodeBL = 4;
 unsigned InputSettings::KeyCodeBR = 5;
 unsigned InputSettings::KeyCodeFeint = 16;
+unsigned InputSettings::KeyCodeBash = 18;
 bool InputSettings::InvertY = false;
 
 bool WeaponSettings::RebalanceWeapons = true;
@@ -141,9 +144,7 @@ void SettingsLoader::Load(const std::string& path)
 				else if (fieldName == "KeyCodeTL")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeTL = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeTL);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeTL, newval);
 				}
 				else if (fieldName == "KeyCodeBL")
 				{
@@ -165,6 +166,13 @@ void SettingsLoader::Load(const std::string& path)
 					InputSettings::KeyCodeFeint = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, InputSettings::KeyCodeFeint);
+				}
+				else if (fieldName == "KeyCodeBash")
+				{
+					int newval = field.as<unsigned>();
+					InputSettings::KeyCodeBash = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, InputSettings::KeyCodeBash);
 				}
 				else if (fieldName == "InvertY")
 				{
@@ -260,6 +268,11 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::KnockbackMult = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::KnockbackMult);
+				}
+				else if (fieldName == "StaminaDamageCap")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, StaminaDamageCap, newval);
 				}
 			}
 			else if (sectionName == "AI")
@@ -721,6 +734,9 @@ void SettingsLoader::RebalanceWeapons()
 
 void SettingsLoader::RemovePowerAttacks()
 {
+	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
+	RE::BGSKeyword* AnimalKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13798, "Skyrim.esm");
+	RE::BGSKeyword* DwemerKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x1397A, "Skyrim.esm");
 	if (!Settings::RemovePowerAttacks)
 	{
 		//return;
@@ -734,62 +750,66 @@ void SettingsLoader::RemovePowerAttacks()
 	{
 		if (race)
 		{
-			for (auto& iter : race->attackDataMap->attackDataMap)
+			if (!race->HasKeyword(AnimalKeyword) && !race->HasKeyword(DwemerKeyword))
 			{
-				//logger::info("got {}", iter.first.c_str());
-				if (iter.first.contains("attack") && iter.first.contains("Power") && !iter.first.contains("InPlace"))
+				for (auto& iter : race->attackDataMap->attackDataMap)
 				{
-					race->attackDataMap->attackDataMap.erase(iter.first);
-					//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+					//logger::info("got {}", iter.first.c_str());
+					if (iter.first.contains("attack") && iter.first.contains("Power") && !iter.first.contains("InPlace"))
+					{
+						race->attackDataMap->attackDataMap.erase(iter.first);
+						//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+					}
+					if (iter.first.contains("attack") && iter.first.contains("Sprint"))
+					{
+						race->attackDataMap->attackDataMap.erase(iter.first);
+						//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+					}
 				}
-				if (iter.first.contains("attack") && iter.first.contains("Sprint"))
+				for (unsigned i = 0; i < RE::SEXES::kTotal; ++i)
 				{
-					race->attackDataMap->attackDataMap.erase(iter.first);
-					//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+					RE::AttackAnimationArrayMap* map = race->attackAnimationArrayMap[i];
+					for (auto& iter : *map)
+					{
+						// gross
+						RE::BSTArray<RE::SetEventData>* newevents = const_cast<RE::BSTArray<RE::SetEventData>*>(iter.second);
+						unsigned j = 0;
+						while (j < newevents->size())
+						{
+
+							//logger::info("{}", (*newevents)[j].eventName);
+							if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Power") && !(*newevents)[j].eventName.contains("InPlace"))
+							{
+								//newevents->erase(&(*newevents)[i]);
+								newevents->erase(newevents->begin() + j);
+							}
+							else if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Sprint"))
+							{
+								//newevents->erase(&(*newevents)[i]);
+								newevents->erase(newevents->begin() + j);
+							}
+							else
+							{
+								++j;
+							}
+
+						}
+						/*
+						// new seems bad
+						for (auto animiter : *iter.second)
+						{
+							if (!animiter.eventName.contains("Power") && !animiter.eventName.contains("power"))
+							{
+								newevents->push_back(animiter);
+							}
+						}
+						//iter.second = newevents;
+						*/
+
+					}
 				}
 			}
-			for (unsigned i = 0; i < RE::SEXES::kTotal; ++i)
-			{
-				RE::AttackAnimationArrayMap* map = race->attackAnimationArrayMap[i];
-				for (auto& iter : *map)
-				{
-					// gross
-					RE::BSTArray<RE::SetEventData>* newevents = const_cast<RE::BSTArray<RE::SetEventData>*>(iter.second);
-					unsigned j = 0;
-					while(j < newevents->size())
-					{
 
-						//logger::info("{}", (*newevents)[j].eventName);
-						if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Power") && !(*newevents)[j].eventName.contains("InPlace"))
-						{
-							//newevents->erase(&(*newevents)[i]);
-							newevents->erase(newevents->begin() + j);
-						}
-						else if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Sprint"))
-						{
-							//newevents->erase(&(*newevents)[i]);
-							newevents->erase(newevents->begin() + j);
-						}
-						else
-						{
-							++j;
-						}
-						
-					}
-					/*
-					// new seems bad
-					for (auto animiter : *iter.second)
-					{
-						if (!animiter.eventName.contains("Power") && !animiter.eventName.contains("power"))
-						{
-							newevents->push_back(animiter);
-						}
-					}
-					//iter.second = newevents;
-					*/
-
-				}
-			}
 
 
 		}

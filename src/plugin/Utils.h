@@ -35,7 +35,7 @@ namespace std
 	};
 }
 
-inline bool isPowerAttacking(RE::Actor* a_actor)
+inline bool IsPowerAttacking(RE::Actor* a_actor)
 {
 	auto currentProcess = a_actor->GetActorRuntimeData().currentProcess;
 	if (currentProcess) {
@@ -49,6 +49,34 @@ inline bool isPowerAttacking(RE::Actor* a_actor)
 		}
 	}
 	return false;
+}
+
+inline bool IsBashing(RE::Actor* a_actor)
+{
+	return a_actor->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kBash;
+}
+
+inline bool HasShield(RE::Actor* a_actor)
+{
+	auto LeftHand = a_actor->GetEquippedObject(true);
+	return LeftHand ? LeftHand->IsArmor() : false;
+}
+
+inline bool HasFullShieldBlock(RE::Actor* a_actor)
+{
+	if (!a_actor->IsBlocking())
+	{
+		return false;
+	}
+	bool bHasShield = HasShield(a_actor);
+	if (!bHasShield)
+	{
+		return false;
+	}
+	float ActorMaxStamina = a_actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+	float ActorCurrentStamina = a_actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+	float Ratio = ActorCurrentStamina / ActorMaxStamina;
+	return Ratio > 0.8f;
 }
 
 class CircularArray

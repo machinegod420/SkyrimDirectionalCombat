@@ -40,8 +40,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	float AttackerWeaponWeight = AttackerWeapon ? AttackerWeapon->GetWeight() : 0.f;
 	auto DefenderWeapon = target->GetEquippedObject(false);
 	float DefenderWeaponWeight = DefenderWeapon ? DefenderWeapon->GetWeight() : 0.f;
-	auto DefenderShield = target->GetEquippedObject(true);
-	bool hasShield = DefenderShield ? DefenderShield->IsArmor() : false;
+	bool hasShield = HasShield(target);
 
 	float AdditionalStamDamage = 0;
 	if (AttackerWeaponWeight > DefenderWeaponWeight)
@@ -55,12 +54,11 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	Damage *= skillMod;
 	if (hasShield)
 	{
-		Damage *= 0.5;
+		Damage *= 0.75;
 	}
-	// base stamina damage should never exceed 33% of their stamina to prevent instant losses
-	Damage = std::min(Damage, ActorStamina * 0.33f);
 	Damage += AdditionalStamDamage;
 
+	float ActorMaxStamina = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 	if(Imperfect)
 	{
 		//take damage if it was imperfect as well as increased stamina damage
@@ -68,10 +66,24 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		Damage *= 1.5f;
 
 		// Always do at least 15% of target stamina if they have imperfect block
-		float ActorMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 		Damage = std::max(Damage, ActorMaxStamina * .15f);
 	}
 
+	if (DirectionHandler::GetSingleton()->HasTimedParry(target))
+	{
+		FXHandler::GetSingleton()->PlayBlock(target);
+		Damage *= 0.5f;
+		CauseStagger(attacker, target, 0.25f, true);
+		// timed block beats power attack
+		if (IsPowerAttacking(attacker))
+		{
+			
+		}
+	}
+
+	// cap stamina damage
+	float ActorMaxStaminaDamage = ActorMaxStamina * DifficultySettings::StaminaDamageCap;
+	Damage = std::min(Damage, ActorMaxStaminaDamage);
 
 	// breaks stamina
 	if (Damage > ActorStamina)
@@ -107,6 +119,9 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	
 	if (ShouldStagger)
 	{
+		// reset actor attack state because sometimes it can get screwed up staggering mid bash
+		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+		actor->NotifyAnimationGraph("blockStop");
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
 		actor->SetGraphVariableFloat("staggerDirection", direction);
@@ -192,9 +207,27 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		bool attackerStaggering = false;
 		target->GetGraphVariableBool("IsStaggering", targetStaggering);
 		attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
+
+		bool targetPowerattack = IsPowerAttacking(target);
+		bool attackerPowerattack = IsPowerAttacking(attacker);
+
 		// we use staggering as a flag that someone has already been in a masterstrike event
 		if (!targetStaggering && !attackerStaggering)
 		{
+			// power attack always has priority, you cannot masterstrike a power attack with a regular attack
+			if (targetPowerattack && !attackerPowerattack)
+			{
+				FXHandler::GetSingleton()->PlayMasterstrike(target);
+				CauseStagger(attacker, target, 0.25f);
+				return true;
+			}
+			if (!targetPowerattack && attackerPowerattack)
+			{
+				FXHandler::GetSingleton()->PlayMasterstrike(attacker);
+				CauseStagger(target, attacker, 0.25f);
+				return true;
+			}
+
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
 			CauseStagger(attacker, target, 0.25f);
 			// masterstriker gets invulnerability during MS

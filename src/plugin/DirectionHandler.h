@@ -76,7 +76,7 @@ public:
 	void Initialize(TDM_API::IVTDM2 *tdm);
 	void UpdateCharacter(RE::Actor* actor, float delta);
 	void Update(float delta);
-	void SendAnimationEvent(RE::Actor* actor);
+	void SendAnimationEvent(RE::Actor* actor, bool slow);
 	void QueueAnimationEvent(RE::Actor* actor);
 	void DebuffActor(RE::Actor* actor);
 	void AddCombo(RE::Actor* actor);
@@ -108,14 +108,9 @@ public:
 		UnblockableActorsMtx.unlock_shared();
 		return ret;
 	}
-	inline bool HasTimedParry(RE::Actor* actor) const
-	{
-		bool ret = false;
-		TimedParryMtx.lock_shared();
-		ret = TimedParry.contains(actor->GetHandle());
-		TimedParryMtx.unlock_shared();
-		return ret;
-	}
+	inline bool HasTimedParry(RE::Actor* actor) const;
+
+	void AddTimedParry(RE::Actor* actor);
 
 	static Directions GetCounterDirection(Directions Direction)
 	{
@@ -145,6 +140,12 @@ public:
 		InAttackWinMtx.lock();
 		InAttackWin.insert(actor->GetHandle());
 		InAttackWinMtx.unlock();
+	}
+
+	inline bool InAttackWindow(RE::Actor* actor)
+	{
+		std::shared_lock lock(InAttackWinMtx);
+		return InAttackWin.contains(actor->GetHandle());
 	}
 
 	inline void EndedAttackWindow(RE::Actor* actor)
@@ -186,7 +187,7 @@ private:
 		// for buffering
 		bool wasBlocking = false;
 		Directions dir;
-		float timeLeft;
+		float timeLeft = 0.f;
 	};
 	// The direction switches are queued as we don't want instant guard switches
 	phmap::flat_hash_map<RE::ActorHandle, DirectionSwitch> DirectionTimers;
@@ -195,7 +196,12 @@ private:
 	// The transition is slower than the actual guard break time since it looks better,
 	// so we need to queue the forceidle events as skyrim does not allow blending multiple animations
 	// during blending another animation transition
-	phmap::flat_hash_map<RE::ActorHandle, std::vector<float>> AnimationTimer;
+	struct AnimationEvent
+	{
+		float timeLeft = 0.f;
+		bool slow = false;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, std::vector<AnimationEvent>> AnimationTimer;
 	mutable std::shared_mutex AnimationTimerMtx;
 
 	struct ComboData
@@ -214,6 +220,7 @@ private:
 
 	// To switch directions after the hitframe but still in attack state for fluid animations
 	// set uses hash so is fast?
+	// <ActorHandle, Last attack was power attack> for tracking attack chains
 	phmap::flat_hash_set<RE::ActorHandle> InAttackWin;
 	mutable std::shared_mutex InAttackWinMtx;
 

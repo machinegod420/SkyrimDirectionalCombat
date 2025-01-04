@@ -12,6 +12,7 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			continue;
 		}
 		auto button = static_cast<RE::ButtonEvent*>(event);
+		auto Player = RE::PlayerCharacter::GetSingleton();
 		if (event->AsButtonEvent()->IsDown())
 		{
 			auto key = button->idCode;
@@ -33,7 +34,7 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 				continue;
 			}
 
-			auto Player = RE::PlayerCharacter::GetSingleton();
+			
 
 			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(Player))
 			{
@@ -61,6 +62,15 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 				else if (key == InputSettings::KeyCodeFeint)
 				{
 					AttackHandler::GetSingleton()->HandleFeint(Player);
+				}
+				else if (key == InputSettings::KeyCodeBash)
+				{
+					if (AttackHandler::GetSingleton()->CanAttack(Player))
+					{
+						Player->NotifyAnimationGraph("bashStart");
+						Player->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kBash;
+					}
+
 				}
 			}
 
@@ -90,6 +100,10 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			if (key == InputSettings::KeyModifierCode)
 			{
 				KeyModifierDown = false;
+			}
+			if (key == InputSettings::KeyCodeBash)
+			{
+				Player->NotifyAnimationGraph("bashRelease");
 			}
 		}
 

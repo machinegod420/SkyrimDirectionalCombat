@@ -13,6 +13,7 @@ enum class UIDirectionState
 	Blocking,
 	Unblockable,
 	ImperfectBlock,
+	FullBlock,
 	TimedBlock
 };
 

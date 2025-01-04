@@ -8,11 +8,20 @@
 // slow time should be a multiple as it affects animation events and we don't want to get stuck in the wrong idle
 // behavior hardcodes transition time as .22 so has to be later than that
 constexpr float TimeBetweenChanges = 0.133f;
-constexpr float BehaviorDefinedTime = 0.22f;
+constexpr float BehaviorDefinedTime = 0.333f;
+constexpr float BehaviorDefinedTimeSlow = 0.5f;
 constexpr float BufferTime = 0.02f;
 // We need to be careful about sending this event at the exact same time a transition has finished.
 // This will cause flickering in the animation
 constexpr float SlowTimeBetweenChanges = BehaviorDefinedTime + BufferTime;
+constexpr float SlowTimeBetweenChanges2 = BehaviorDefinedTimeSlow + BufferTime;
+
+constexpr float TimedBlockTime = 0.33f;
+constexpr float TimedBlockWarmup = 0.3f;
+constexpr float TotalTimedBlock = TimedBlockTime + TimedBlockWarmup;
+constexpr float TimedBlockCooldown = 0.2f;
+
+
 
 void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
@@ -51,7 +60,10 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 	{
 		return true;
 	}
-
+	if (HasFullShieldBlock(target))
+	{
+		return true;
+	}
 	std::shared_lock lock(ActiveDirectionsMtx);
 	if (!ActiveDirections.contains(target->GetHandle()) || !ActiveDirections.contains(attacker->GetHandle()))
 	{
@@ -140,6 +152,14 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		if (ImperfectParry.contains(actor->GetHandle()))
 		{
 			state = UIDirectionState::ImperfectBlock;
+		}
+		if (HasTimedParry(actor))
+		{
+			state = UIDirectionState::TimedBlock;
+		}
+		if (HasFullShieldBlock(actor))
+		{
+			state = UIDirectionState::FullBlock;
 		}
 		if (actor->IsAttacking())
 		{
@@ -303,6 +323,29 @@ bool DirectionHandler::CanSwitch(RE::Actor* actor)
 	return !(actor->IsAttacking() && !InAttackWin.contains(actor->GetHandle()));
 }
 
+bool DirectionHandler::HasTimedParry(RE::Actor* actor) const
+{
+	std::shared_lock lock(TimedParryMtx);
+	if (TimedParry.contains(actor->GetHandle()))
+	{
+		float TimeRemaining = TimedParry.at(actor->GetHandle());
+		if (TimeRemaining > 0 && TimeRemaining < TimedBlockTime)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void DirectionHandler::AddTimedParry(RE::Actor* actor)
+{
+	std::unique_lock lock(TimedParryMtx);
+	if (!TimedParry.contains(actor->GetHandle()))
+	{
+		TimedParry[actor->GetHandle()] = TotalTimedBlock;
+	}
+}
+
 void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking)
 {
 	// ever since the perks were switched to spells, there has been some async problems where there can be a 
@@ -352,8 +395,20 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 		// Use imperfect parry only if we dont want switching guards to cost stamina
 		if (Settings::SwitchingCostsStamina)
 		{
-			float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * 0.1f;
-			actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
+			float ActorMaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+			float staminaCost = ActorMaxStamina * 0.1f;
+			// shield switches direction for free past 80% stamina
+			if (!HasFullShieldBlock(actor))
+			{
+				TimedParryMtx.lock();
+				if (TimedParry.contains(actor->GetHandle()))
+				{
+					TimedParry.erase(actor->GetHandle());
+				}
+				TimedParryMtx.unlock();
+				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
+			}
+			
 		}
 		else
 		{
@@ -893,14 +948,14 @@ void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 			// adds to the queue will cause the delay between the sent event and the transition time to be
 			// greater. For example, if there is 3 items in the queue, the second item will be sent at 0.72, while
 			// the behavior transition will occur at 0.66, which is a 66ms delay. 
-			AnimationTimer[actor->GetHandle()].push_back(SlowTimeBetweenChanges);
+			AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges2, true });
 		}
 	}
 	else
 	{
-		SendAnimationEvent(actor);
+		SendAnimationEvent(actor, false);
 		AnimationTimer[actor->GetHandle()].resize(MaxSize);
-		AnimationTimer[actor->GetHandle()].push_back(SlowTimeBetweenChanges);
+		AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
 	}
 	AnimationTimerMtx.unlock();
 }
@@ -986,8 +1041,8 @@ void DirectionHandler::Update(float delta)
 				continue;
 			}
 
-			AnimIter->second.front() -= delta;
-			if (AnimIter->second.front() <= 0)
+			AnimIter->second.front().timeLeft -= delta;
+			if (AnimIter->second.front().timeLeft <= 0)
 			{
 				// if the actor is in a state that prevents it from registering this animation event, queue up the event instead
 				// this means no attacking and no sprinting
@@ -1001,7 +1056,7 @@ void DirectionHandler::Update(float delta)
 					}
 					else
 					{
-						SendAnimationEvent(actor);
+						SendAnimationEvent(actor, AnimIter->second.front().slow);
 					}
 				}
 
@@ -1103,7 +1158,7 @@ void DirectionHandler::Update(float delta)
 				continue;
 			}
 			ParryIter->second -= delta;
-			if (ParryIter->second <= 0)
+			if (ParryIter->second <= -TimedBlockCooldown)
 			{
 				ParryIter = TimedParry.erase(ParryIter);
 				continue;
@@ -1115,7 +1170,7 @@ void DirectionHandler::Update(float delta)
 
 }
 
-void DirectionHandler::SendAnimationEvent(RE::Actor* actor)
+void DirectionHandler::SendAnimationEvent(RE::Actor* actor, bool slow)
 {
 	// does this still need to be seperate animation events?
 	if (actor->IsBlocking())
@@ -1124,7 +1179,14 @@ void DirectionHandler::SendAnimationEvent(RE::Actor* actor)
 	}
 	else
 	{
-		actor->NotifyAnimationGraph("ForceIdleTest");
+		if (slow && !(actor->IsPlayerRef() && RE::PlayerCamera::GetSingleton()->IsInFirstPerson()))
+		{
+			actor->NotifyAnimationGraph("ForceIdleTestSlow");
+		}
+		else
+		{
+			actor->NotifyAnimationGraph("ForceIdleTest");
+		}
 
 	}
 }

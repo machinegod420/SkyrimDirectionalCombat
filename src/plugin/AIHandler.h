@@ -8,6 +8,8 @@
 #include "Utils.h"
 #include "parallel_hashmap/phmap.h"
 
+
+
 class AIHandler
 {
 public:
@@ -35,6 +37,7 @@ public:
 		StartFeint,
 		EndFeint,
 		Bash,
+		ReleaseBash,
 		EndBlock,
 		PowerAttack,
 		Dodge,

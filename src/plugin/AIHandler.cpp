@@ -9,6 +9,10 @@
 static std::mt19937 mt_rand(0);
 static std::shared_mutex mt_randMtx;
 
+Directions AIAttackCombo[3][3] = { {Directions::TR, Directions::TL, Directions::BL},
+								{Directions::BR, Directions::TR, Directions::BR},
+								{Directions::BL, Directions::BR, Directions::TR}, };
+
 int GetRand()
 {
 	std::unique_lock lock(mt_randMtx);
@@ -26,6 +30,10 @@ constexpr float MaxMistakeRange = 0.05f;
 
 constexpr int MaxDirectionTracked = 5;
 
+// todo replace with reading game setting
+constexpr int BashDistance = 80;
+constexpr int BashDistanceSq = BashDistance * BashDistance;
+constexpr int JudgeDistance = 69000;
 
 void AIHandler::InitializeValues(PRECISION_API::IVPrecision3* precision)
 {
@@ -176,15 +184,15 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				// slower update tick to make AIs reasonable to fight
 				if (CanAct(actor))
 				{
-					int JudgeDistance = 69000;
+					
 					if (TargetDist < JudgeDistance)
 					{
 						float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
-						float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+						float MaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 						float CurrentStaminaRatio = CurrentStamina / MaxStamina;
 
 						float EnemyCurrentStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
-						float EnemyMaxStamina = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+						float EnemyMaxStamina = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 						float EnemyStaminaRatio = EnemyCurrentStamina / EnemyMaxStamina;
 						// always attack if have perk
 						if (DirHandler->IsUnblockable(actor) && TargetDist < DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ)
@@ -196,7 +204,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						{
 							//SwitchToNewDirection(actor, actor);
 							SwitchToNextAttack(actor, true);
-							if (isPowerAttacking(actor))
+							if (IsPowerAttacking(actor))
 							{
 								AddAction(actor, AIHandler::Actions::Followup, Directions::TR, true);
 							}
@@ -205,17 +213,20 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						{
 							bool ShouldDirectionMatch = false;
 							bool DontChangeDirection = false;
+							bool targetStaggering = false;
+							target->GetGraphVariableBool("IsStaggering", targetStaggering);
 							// Most important case, attempt to defend
-							if (target->IsAttacking() && !DirectionHandler::GetSingleton()->IsUnblockable(target))
+							if (target->IsAttacking() && !DirectionHandler::GetSingleton()->IsUnblockable(target) && !IsBashing(target))
 							{
 								Actions action = GetQueuedAction(actor);
 								// try to block or masterstrike
 								if (action != Actions::Riposte && action != Actions::Block)
 								{
+									
 									if (mt_rand() % 10 < 1 && DirHandler->HasBlockAngle(actor, target))
 									{
 										// masterstrike
-										AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+										AddAction(actor, AIHandler::Actions::PowerAttack, Directions::TR, true);
 									}
 									else
 									{
@@ -232,34 +243,36 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
 								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 							}
-							else if (!AttackHandler::GetSingleton()->CanAttack(target))
+							else if (!AttackHandler::GetSingleton()->CanAttack(target) || targetStaggering)
 							{
-								// target get attack so start attacking
+								// target cant attack so start attacking
 								DifficultyMap[actor->GetHandle()].defending = false;
 								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = MaxDirectionTracked + 1;
 								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
-
+								if (actor->IsBlocking())
+								{
+									AddAction(actor, Actions::EndBlock);
+								}
 								ShouldDirectionMatch = false;
 								DontChangeDirection = false;
 							}
 							// If they are too close, try bashing
-							else if (actor->IsBlocking() && TargetDist < 10000 && !target->IsBlocking() && mt_rand() % 5 < 2
-								&& AttackHandler::GetSingleton()->CanAttack(actor) && CurrentStaminaRatio > 0.5)
+							else if (TargetDist < (BashDistanceSq + 1000) && mt_rand() % 5 < 4
+								&& AttackHandler::GetSingleton()->CanAttack(actor) && CurrentStaminaRatio > 0.1)
 							{
 								AddAction(actor, Actions::Bash);
 								ShouldDirectionMatch = true;
 								DontChangeDirection = true;
 							}
 							// uh oh, they might bash us!
-							else if (!actor->IsBlocking() && TargetDist < 10000 && target->IsBlocking() && mt_rand() % 5 < 2 
-								&& AttackHandler::GetSingleton()->CanAttack(actor) && CurrentStaminaRatio > 0.5)
+							else if (TargetDist < (BashDistanceSq + 2000) && mt_rand() % 5 < 4)
 							{
 								if (Settings::DMCOSupport)
 								{
 									// add another check here because the enemy might be unable to bash
 									bool TargetStaggering = false;
 									target->GetGraphVariableBool("IsStaggering", TargetStaggering);
-									bool ShouldDodge = !TargetStaggering && (EnemyStaminaRatio > 0.5);
+									bool ShouldDodge = !TargetStaggering;
 									if (ShouldDodge && mt_rand() % 5 < 2)
 									{
 										ShouldDodge = false;
@@ -270,21 +283,19 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 									}
 									else
 									{
-										AddAction(actor, Actions::Riposte);
-										DifficultyMap[actor->GetHandle()].defending = false;
+										if (AttackHandler::GetSingleton()->CanAttack(actor) && !actor->IsBlocking() && CurrentStaminaRatio > 0.1)
+										{
+											AddAction(actor, Actions::Riposte);
+											DifficultyMap[actor->GetHandle()].defending = false;
+										}
 									}
 
 								}
-								else
+								else if(AttackHandler::GetSingleton()->CanAttack(actor) && !actor->IsBlocking() && CurrentStaminaRatio > 0.1)
 								{
 									AddAction(actor, Actions::Riposte);
 									DifficultyMap[actor->GetHandle()].defending = false;
 								}
-							}
-							else if (Settings::DMCOSupport && TargetDist < 10000 && CurrentStaminaRatio < 0.3 && 
-								DifficultyMap[actor->GetHandle()].defending && mt_rand() % 5 < 2)
-							{
-								AddAction(actor, Actions::Dodge);
 							}
 							// They guarding the same position a lot, maybe they are attacking?
 							else if (!actor->IsBlocking() && DifficultyMap[actor->GetHandle()].defending 
@@ -295,7 +306,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							}
 							// Stop blocking to avoid burning stamina
 							else if (actor->IsBlocking() && DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame < 1 && 
-								(mt_rand() % 5 < 2 || CurrentStaminaRatio < 0.3))
+								(mt_rand() % 5 < 2 || CurrentStaminaRatio < 0.4))
 							{
 								AddAction(actor, Actions::EndBlock);
 								DontChangeDirection = true;
@@ -405,7 +416,7 @@ void AIHandler::SwitchTargetExternalCalled(RE::Actor* actor, RE::Actor* newTarge
 	if (currentTarget)
 	{
 		float TargetDist = actor->GetPosition().GetSquaredDistance(currentTarget->GetPosition());
-		if (TargetDist > 70000)
+		if (TargetDist > JudgeDistance)
 		{
 			actor->GetActorRuntimeData().currentCombatTarget = newTarget->GetHandle();
 		}
@@ -425,7 +436,7 @@ bool AIHandler::ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target)
 	bool HasBlockAngle = DirectionHandler::GetSingleton()->HasBlockAngle(actor, target);
 
 	float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
-	float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+	float MaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 	float CurrentStaminaRatio = CurrentStamina / MaxStamina;
 	// stamina filter
 	if (CurrentStaminaRatio < 0.2)
@@ -514,7 +525,7 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 
 		SwitchToNextAttack(actor, true);
 		bool ShouldFeint = DirectionHandler::GetSingleton()->HasBlockAngle(actor, attacker);
-		float TotalStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+		float TotalStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 		if (CurrentStamina > TotalStamina * 0.15f)
 		{
@@ -741,7 +752,7 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 	{
 		// if the attack direction is where my enemy is blocking, try feinting
 		bool ShouldFeint = mt_rand() % 3 < 1;
-		float MaxStamina = actor->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+		float MaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 		float CurrentStaminaRatio = CurrentStamina / MaxStamina;
 		Actions action = GetQueuedAction(actor);
@@ -1079,22 +1090,12 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 		// instead of using rand, use their native handle as that is unique per actor and is the same between saves
 		// so you can learn after dying
 		uint32_t handle = actor->GetHandle().native_handle();
-		handle += 84;
-		unsigned size = handle % 3 + 2;
-		for (unsigned i = 0; i < 4; ++i)
+		int Idx = handle % 3;
+		for (unsigned i = 0; i < 3; ++i)
 		{
-			//logger::info("{} has attack pattern {}", actor->GetName(), size);
-			// gross
-			// grab the least significant 2 bits, cast to direction, then shift
-			unsigned newDir = (handle & 0x3u);
-			handle >>= 2;
-			if (newDir >= 4)
-			{
-				logger::info("{} error bitshifting", actor->GetName());
-				newDir = 3;
-			}
-			DifficultyMap[actor->GetHandle()].attackPattern.push_back((Directions)newDir);
+			DifficultyMap[actor->GetHandle()].attackPattern.push_back(AIAttackCombo[Idx][i]);
 		}
+
 
 		// create modifier to see how good or bad the AI is at judging distance
 		DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
@@ -1366,6 +1367,14 @@ void AIHandler::Update(float delta)
 			{
 				actor->NotifyAnimationGraph("bashStart");
 				actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kBash;
+				ActionQueueIter->second.toDo = Actions::ReleaseBash;
+				ActionQueueIter->second.timeLeft = 0.1f;
+
+				
+			}
+			else if (ActionQueueIter->second.toDo == Actions::ReleaseBash)
+			{
+				actor->NotifyAnimationGraph("bashRelease");
 				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::EndBlock)
@@ -1417,9 +1426,26 @@ void AIHandler::Update(float delta)
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Dodge)
 			{
-				actor->SetGraphVariableInt("Dodge_Direction", 5);
-				actor->NotifyAnimationGraph("Dodge_B");
-				actor->NotifyAnimationGraph("Dodge");
+				int rand = mt_rand() % 4;
+				if (rand == 3)
+				{
+					actor->SetGraphVariableInt("Dodge_Direction", 4);
+					actor->NotifyAnimationGraph("Dodge_RB");
+					actor->NotifyAnimationGraph("Dodge");
+				}
+				else if (rand == 2)
+				{
+					actor->SetGraphVariableInt("Dodge_Direction", 6);
+					actor->NotifyAnimationGraph("Dodge_LB");
+					actor->NotifyAnimationGraph("Dodge");
+				}
+				else
+				{
+					actor->SetGraphVariableInt("Dodge_Direction", 5);
+					actor->NotifyAnimationGraph("Dodge_B");
+					actor->NotifyAnimationGraph("Dodge");
+				}
+
 				ActionQueueIter->second.toDo = Actions::None;
 			}
 			// once we have executed, the timeleft should be negative and this should be no action

@@ -3,6 +3,8 @@
 #include "DirectionHandler.h"
 
 constexpr float NPCLockoutTime = 0.15f;
+constexpr float AttackSpeedMult = 0.25f;
+constexpr float SmallAttackSpeedMult = 0.12f;
 
 void AttackHandler::Initialize()
 {
@@ -183,10 +185,35 @@ void AttackHandler::Cleanup()
 			SpeedIter = SpeedBuff.erase(SpeedIter);
 			actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -AttackSpeedMult);
 			continue;
-
 		}
 		SpeedBuff.clear();
 		SpeedBuffMtx.unlock();
+	}
+
+	{
+		// make sure we reset values!
+		SmallSpeedBuffMtx.lock();
+		auto SpeedIter = SmallSpeedBuff.begin();
+		while (SpeedIter != SmallSpeedBuff.end())
+		{
+			if (!SpeedIter->first)
+			{
+				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+				continue;
+			}
+			RE::Actor* actor = SpeedIter->first.get().get();
+			if (!actor)
+			{
+				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+				continue;
+			}
+
+			SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+			actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
+			continue;
+		}
+		SmallSpeedBuff.clear();
+		SmallSpeedBuffMtx.unlock();
 	}
 }
 
@@ -214,6 +241,39 @@ void AttackHandler::RemoveActor(RE::ActorHandle actor)
 		}
 		SpeedBuffMtx.unlock();
 	}
+}
+
+void AttackHandler::GiveAttackSpeedBuff(RE::Actor* actor)
+{
+	SpeedBuffMtx.lock();
+	if (!SpeedBuff.contains(actor->GetHandle()))
+	{
+		SpeedBuff[actor->GetHandle()] = 2.f; 
+		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, AttackSpeedMult);
+	}
+	SpeedBuffMtx.unlock();
+}
+
+void AttackHandler::GiveSmallAttackSpeedBuff(RE::Actor* actor)
+{
+	SmallSpeedBuffMtx.lock();
+	if (!SmallSpeedBuff.contains(actor->GetHandle()))
+	{
+		SmallSpeedBuff[actor->GetHandle()] = 2.f;
+		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, SmallAttackSpeedMult);
+	}
+	SmallSpeedBuffMtx.unlock();
+}
+
+void AttackHandler::RemoveSmallAttackSpeedBuff(RE::Actor* actor)
+{
+	SmallSpeedBuffMtx.lock();
+	if (SmallSpeedBuff.contains(actor->GetHandle()))
+	{
+		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
+		SmallSpeedBuff.erase(actor->GetHandle());
+	}
+	SmallSpeedBuffMtx.unlock();
 }
 
 void AttackHandler::Update(float delta)
@@ -330,6 +390,62 @@ void AttackHandler::Update(float delta)
 			SpeedIter++;
 		}
 		SpeedBuffMtx.unlock();
+	}
+
+	{
+
+		SmallSpeedBuffMtx.lock();
+		auto SpeedIter = SmallSpeedBuff.begin();
+		while (SpeedIter != SmallSpeedBuff.end())
+		{
+			if (!SpeedIter->first)
+			{
+				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+				continue;
+			}
+			RE::Actor* actor = SpeedIter->first.get().get();
+			if (!actor)
+			{
+				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+				continue;
+			}
+			SpeedIter->second -= delta;
+			if (SpeedIter->second <= 0)
+			{
+				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
+				actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
+				continue;
+			}
+			SpeedIter++;
+		}
+		SmallSpeedBuffMtx.unlock();
+	}
+
+	{
+		AttackChainMtx.lock();
+		auto Iter = AttackChains.begin();
+		while (Iter != AttackChains.end())
+		{
+			if (!Iter->first)
+			{
+				Iter = AttackChains.erase(Iter);
+				continue;
+			}
+			RE::Actor* actor = Iter->first.get().get();
+			if (!actor)
+			{
+				Iter = AttackChains.erase(Iter);
+				continue;
+			}
+			Iter->second.timeLeft -= delta;
+			if (Iter->second.timeLeft <= 0)
+			{
+				Iter = AttackChains.erase(Iter);
+				continue;
+			}
+			Iter++;
+		}
+		AttackChainMtx.unlock();
 	}
 
 }

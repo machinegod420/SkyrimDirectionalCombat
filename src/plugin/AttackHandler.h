@@ -26,17 +26,11 @@ public:
 	void AddChamberWindow(RE::Actor* actor);
 	void AddFeintWindow(RE::Actor* actor);
 	void RemoveFeintWindow(RE::Actor* actor);
-	const float AttackSpeedMult = 0.25;
-	void GiveAttackSpeedBuff(RE::Actor* actor)
-	{
-		SpeedBuffMtx.lock();
-		if (!SpeedBuff.contains(actor->GetHandle()))
-		{
-			SpeedBuff[actor->GetHandle()] = 2.f;
-			actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, AttackSpeedMult);
-		}
-		SpeedBuffMtx.unlock();
-	}
+	
+	void GiveAttackSpeedBuff(RE::Actor* actor);
+	void GiveSmallAttackSpeedBuff(RE::Actor* actor);
+	void RemoveSmallAttackSpeedBuff(RE::Actor* actor);
+	
 	void AddLockout(RE::Actor* actor);
 	void HandleFeint(RE::Actor* actor);
 	void HandleFeintChangeDirection(RE::Actor* actor);
@@ -48,6 +42,32 @@ public:
 	void RemoveActor(RE::ActorHandle actor);
 
 	void Cleanup();
+
+	void AddAttackChain(RE::Actor* actor, bool DidPowerAttack)
+	{
+		std::unique_lock lock(AttackChainMtx);
+		AttackChains[actor->GetHandle()].PreviousAttackWasPower = DidPowerAttack;
+		AttackChains[actor->GetHandle()].timeLeft = 1.f;
+
+	}
+
+	bool InAttackChain(RE::Actor* actor, bool& OutDidPowerAttack)
+	{
+		std::shared_lock lock(AttackChainMtx);
+		auto Iter = AttackChains.find(actor->GetHandle());
+		if (Iter != AttackChains.end())
+		{
+			OutDidPowerAttack = Iter->second.PreviousAttackWasPower;
+			return true;
+		}
+		return false;
+	}
+
+	void RemoveAttackChain(RE::Actor* actor)
+	{
+		std::unique_lock lock(AttackChainMtx);
+		AttackChains.erase(actor->GetHandle());
+	}
 private:
 	phmap::flat_hash_map<RE::ActorHandle, float> ChamberWindow;
 	mutable std::shared_mutex ChamberWindowMtx;
@@ -60,6 +80,17 @@ private:
 
 	phmap::flat_hash_map<RE::ActorHandle, float> SpeedBuff;
 	mutable std::shared_mutex SpeedBuffMtx;
+
+	phmap::flat_hash_map<RE::ActorHandle, float> SmallSpeedBuff;
+	mutable std::shared_mutex SmallSpeedBuffMtx;
+
+	struct AttackChain
+	{
+		bool PreviousAttackWasPower;
+		float timeLeft;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, AttackChain> AttackChains;
+	mutable std::shared_mutex AttackChainMtx;
 
 	RE::SpellItem* FeintFX;
 	RE::SpellItem* WeaponSpeedBuff;

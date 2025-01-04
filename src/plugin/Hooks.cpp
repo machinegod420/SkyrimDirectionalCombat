@@ -91,11 +91,16 @@ namespace Hooks
 	}
 	void HookOnMeleeHit::OnMeleeHit(RE::Actor* target, RE::HitData& hitData)
 	{
+	
 		RE::Actor* attacker = hitData.aggressor.get().get();
 		// make sure attacker actually has directions!
 		if (attacker && target && DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 		{
 			// hacks to try to stop double effects due to enchantments but is clearly inconsistent and non-deterministic
+			if (hitData.flags.any(RE::HitData::Flag::kBash))
+			{
+				hitData.totalDamage = 5;
+			}
 			if (hitData.totalDamage < 1 || !AttackHandler::GetSingleton()->CanAttack(attacker))
 			{
 				return;
@@ -114,10 +119,20 @@ namespace Hooks
 				{
 					//bash does stamina damage
 					float Damage = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
-					Damage *= 0.5f;
+					
+					if (target->IsBlocking())
+					{
+						Damage *= 0.2f;
+						// staggers as well
+						BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.75f, true);
+					}
+					else
+					{
+						Damage *= 0.05f;
+						// staggers as well
+						BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
+					}
 					target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
-					// staggers as well
-					BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
 					_OnMeleeHit(target, hitData);
 				}
 				
@@ -175,6 +190,10 @@ namespace Hooks
 				{
 					hitData.stagger = 2;
 				}
+				if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
+				{
+					hitData.reflectedDamage = 300;
+				}
 				
 
 				// do no health damage if hit was blocked
@@ -182,7 +201,6 @@ namespace Hooks
 				if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 				{
 					// manual pushback
-
 					if (Settings::ExperimentalMode)
 					{
 						RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
@@ -191,7 +209,6 @@ namespace Hooks
 						static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
 						//foo(target->GetCharController(), t, .5f);
 					}
-
 					BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 					// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 					// riposte instead of being gambled
@@ -232,6 +249,7 @@ namespace Hooks
 						}
 
 					}
+					RE::bhkCharacterController;
 					DirectionHandler::GetSingleton()->AddCombo(attacker);
 					//apply lockout to the defender to prevent doubles
 					AttackHandler::GetSingleton()->AddLockout(target);
@@ -746,19 +764,19 @@ namespace Hooks
 					{
 						staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
 					}
-					if (isPowerAttacking(actor))
+					if (IsPowerAttacking(actor))
 					{
 						staminaCost *= 2.f;
 					}
 					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 				}
-
-
+				AttackHandler::GetSingleton()->AddAttackChain(actor, IsPowerAttacking(actor));
 			}
 
 		}
 
-		// hijack this as started attack as well
+		// hijack this as started attack as well 
+		// this only triggers on the first attack, not chain attacks!
 		else if (str == "TryChamberBegin"_h)
 		{
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
@@ -791,6 +809,7 @@ namespace Hooks
 		{
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 			DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
+			
 		}
 		// feint events
 		else if (str == "FeintToTR"_h)
@@ -825,14 +844,64 @@ namespace Hooks
 		return _ProcessEvent_PC(a_sink, a_event, a_eventSource);
 	}
 
+	void SharedNotifyAnimationGraph(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
+	{
+		if (eventName.contains("blockStart"))
+		{
+			RE::Actor* actor = static_cast<RE::Actor*>(a_graphHolder);
+			DirectionHandler::GetSingleton()->AddTimedParry(actor);
+		}
+		else if (eventName.contains("attack"))
+		{
+			RE::Actor* actor = static_cast<RE::Actor*>(a_graphHolder);
+			if (eventName.contains("Start"))
+			{
+				bool DidPowerAttack = false;
+				if (AttackHandler::GetSingleton()->InAttackChain(actor, DidPowerAttack))
+				{
+					//hack because power attack property flags are not guaranteed to have power in the event name
+					if (eventName.contains("Power"))
+					{
+						if (!DidPowerAttack)
+						{
+							//logger::info("power attack {}", DidPowerAttack);
+							AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+						}
+						else
+						{
+							AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
+						}
+					}
+					else
+					{
+						if (DidPowerAttack)
+						{
+							//logger::info("normal attack {}", DidPowerAttack);
+							AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+						}
+						else
+						{
+							AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
+						}
+					}
+				}
+
+
+			}
+			else if (eventName.contains("Release"))
+			{
+				AttackHandler::GetSingleton()->RemoveAttackChain(actor);
+			}
+		}
+	}
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
-
+		SharedNotifyAnimationGraph(a_graphHolder, eventName);
 		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
 	}
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
-
+		SharedNotifyAnimationGraph(a_graphHolder, eventName);
 		return _NotifyAnimationGraph_NPC(a_graphHolder, eventName);
 	}
 	void Hooks::Install()
