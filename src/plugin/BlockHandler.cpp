@@ -54,7 +54,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	Damage *= skillMod;
 	if (hasShield)
 	{
-		Damage *= 0.75;
+		Damage *= 0.8;
 	}
 	Damage += AdditionalStamDamage;
 
@@ -107,16 +107,12 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	// since they can't block
 
 	StaggerTimerMtx.lock();
-	bool ShouldStagger = !StaggerTimer.contains(actor->GetHandle());
-	if (!actor->IsAttacking())
-	{
-		ShouldStagger = false;
-	}
-	if (force)
+	bool ShouldStagger = actor->IsAttacking();
+	if (force && !StaggerTimer.contains(actor->GetHandle()))
 	{
 		ShouldStagger = true;
 	}
-	
+
 	if (ShouldStagger)
 	{
 		// reset actor attack state because sometimes it can get screwed up staggering mid bash

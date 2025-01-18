@@ -41,7 +41,8 @@ public:
 		EndBlock,
 		PowerAttack,
 		Dodge,
-		Followup
+		Followup,
+		ResetState
 	};
 
 	static AIHandler* GetSingleton()
@@ -68,7 +69,7 @@ public:
 	void DidAttackExternalCalled(RE::Actor* actor);
 	//
 
-	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float TargetDist);
+	void SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float TargetDistSQ);
 	bool TryAttack(RE::Actor* actor, bool force);
 	bool TryPowerAttack(RE::Actor* actor);
 
@@ -178,6 +179,10 @@ private:
 		std::mt19937 npcRand;
 
 		float CurrentWeaponLengthSQ = 0.f;
+
+		float DodgeCooldown = 0.f;
+
+		float BashCooldown = 0.f;
 
 	};
 	phmap::flat_hash_map<RE::TESRace*, RE::NiPointer<RE::BGSAttackData>> RaceToNormalAttack;

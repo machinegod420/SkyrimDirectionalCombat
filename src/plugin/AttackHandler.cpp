@@ -5,12 +5,16 @@
 constexpr float NPCLockoutTime = 0.15f;
 constexpr float AttackSpeedMult = 0.25f;
 constexpr float SmallAttackSpeedMult = 0.12f;
+constexpr float FeintQueueTime = 0.18f; // carefully tailored magic number
 
 void AttackHandler::Initialize()
 {
 	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 	FeintFX = DataHandler->LookupForm<RE::SpellItem>(0x6E60, "DirectionMod.esp");
 	WeaponSpeedBuff = DataHandler->LookupForm<RE::SpellItem>(0x7928, "DirectionMod.esp");
+
+	ActionAttack = (RE::BGSAction*)RE::TESForm::LookupByID(0x13005);
+	ActionPowerAttack = (RE::BGSAction*)RE::TESForm::LookupByID(0x13383);
 }
 
 
@@ -69,18 +73,18 @@ void AttackHandler::HandleFeintChangeDirection(RE::Actor* actor)
 	{
 		if (Settings::ForHonorMode)
 		{
-			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::BL);
+			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::BL, true, true, true);
 		}
 		else
 		{
-			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL);
+			DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TL, true, true, true);
 
 		}
 
 	}
 	else
 	{
-		DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR);
+		DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Directions::TR, true, true, true);
 	}
 
 }
@@ -90,15 +94,15 @@ void AttackHandler::HandleFeint(RE::Actor* actor)
 	FeintWindowMtx.lock();
 	if (FeintWindow.contains(actor->GetHandle()))
 	{
-		actor->NotifyAnimationGraph("attackStop");
+		actor->NotifyAnimationGraph("ForceAttackStop");
 
-		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+		//actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
 		actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(FeintFX, false, actor, 0.f, false, 0.f, nullptr);
-		
+		actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -15);
 		HandleFeintChangeDirection(actor);
 		GiveAttackSpeedBuff(actor);
 		FeintWindow.erase(actor->GetHandle());
-		
+		AddFeintQueue(actor);
 	}
 	FeintWindowMtx.unlock();
 }
@@ -148,6 +152,39 @@ void AttackHandler::AddLockout(RE::Actor* actor)
 
 }
 
+void AttackHandler::AddFeintQueue(RE::Actor* actor)
+{
+	FeintQueueMtx.lock();
+	if (!FeintQueue.contains(actor->GetHandle()))
+	{
+		FeintQueue[actor->GetHandle()] = FeintQueueTime;
+	}
+	FeintQueueMtx.unlock();
+}
+
+void DoAction(RE::Actor* actor, RE::BGSAction* action)
+{
+	std::unique_ptr<RE::TESActionData> data(RE::TESActionData::Create());
+	data->source = RE::NiPointer<RE::TESObjectREFR>(actor);
+	data->action = action;
+	typedef bool func_t(RE::TESActionData*);
+	REL::Relocation<func_t> func{ RELOCATION_ID(40551, 41557) };
+	bool succ = func(data.get());
+	if (!succ)
+	{
+		logger::info("failed attack action! {}", actor->GetName());
+	}
+}
+
+void AttackHandler::DoAttack(RE::Actor* actor)
+{
+	DoAction(actor, ActionAttack);
+}
+
+void AttackHandler::DoPowerAttack(RE::Actor* actor)
+{
+	DoAction(actor, ActionPowerAttack);
+}
 
 void AttackHandler::Cleanup()
 {
@@ -361,6 +398,38 @@ void AttackHandler::Update(float delta)
 		}
 		FeintWindowMtx.unlock();
 
+	}
+
+	{
+		FeintQueueMtx.lock();
+
+		auto Iter = FeintQueue.begin();
+		while (Iter != FeintQueue.end())
+		{
+			if (!Iter->first)
+			{
+				Iter = FeintQueue.erase(Iter);
+				continue;
+			}
+			RE::Actor* actor = Iter->first.get().get();
+			if (!actor)
+			{
+				Iter = FeintQueue.erase(Iter);
+				continue;
+			}
+			Iter->second -= delta;
+			if (Iter->second <= 0)
+			{
+				//actor->NotifyAnimationGraph("attackStart");
+
+				DoAttack(actor);
+
+				Iter = FeintQueue.erase(Iter);
+				continue;
+			}
+			Iter++;
+		}
+		FeintQueueMtx.unlock();
 	}
 
 	{

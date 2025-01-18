@@ -40,7 +40,9 @@ public:
 	void SwitchDirectionUp(RE::Actor* actor, bool ChangeQueued);
 	void SwitchDirectionDown(RE::Actor* actor, bool ChangeQueued);
 	void SwitchDirectionRight(RE::Actor* actor, bool ChangeQueued);
-	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false, bool overwrite = true);
+	// force == override direction and timeLeft value
+	// overwrite == overide timeLeft value
+	void WantToSwitchTo(RE::Actor* actor, Directions dir, bool force = false, bool overwrite = true, bool lock = false);
 	RE::SpellItem* DirectionToPerk(Directions dir) const;
 	RE::SpellItem* GetDirectionalPerk(RE::Actor* actor) const;
 	Directions PerkToDirection(RE::SpellItem* perk) const;
@@ -78,6 +80,7 @@ public:
 	void Update(float delta);
 	void SendAnimationEvent(RE::Actor* actor, bool slow);
 	void QueueAnimationEvent(RE::Actor* actor);
+	void ClearAnimationQueue(RE::Actor* actor);
 	void DebuffActor(RE::Actor* actor);
 	void AddCombo(RE::Actor* actor);
 	inline unsigned GetRepeatCount(RE::Actor* actor) const
@@ -187,6 +190,7 @@ private:
 		// for buffering
 		bool wasBlocking = false;
 		Directions dir;
+		bool locked = false;
 		float timeLeft = 0.f;
 	};
 	// The direction switches are queued as we don't want instant guard switches

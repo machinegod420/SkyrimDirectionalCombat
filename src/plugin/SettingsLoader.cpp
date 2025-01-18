@@ -737,6 +737,7 @@ void SettingsLoader::RemovePowerAttacks()
 	RE::TESDataHandler* DataHandler = RE::TESDataHandler::GetSingleton();
 	RE::BGSKeyword* AnimalKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13798, "Skyrim.esm");
 	RE::BGSKeyword* DwemerKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x1397A, "Skyrim.esm");
+	RE::BGSKeyword* IncludePowerAttackKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x833E, "DirectionMod.esp");
 	if (!Settings::RemovePowerAttacks)
 	{
 		//return;
@@ -750,7 +751,7 @@ void SettingsLoader::RemovePowerAttacks()
 	{
 		if (race)
 		{
-			if (!race->HasKeyword(AnimalKeyword) && !race->HasKeyword(DwemerKeyword))
+			if (!race->HasKeyword(AnimalKeyword) && !race->HasKeyword(DwemerKeyword) && !race->HasKeyword(IncludePowerAttackKeyword))
 			{
 				for (auto& iter : race->attackDataMap->attackDataMap)
 				{
@@ -764,6 +765,10 @@ void SettingsLoader::RemovePowerAttacks()
 					{
 						race->attackDataMap->attackDataMap.erase(iter.first);
 						//logger::info("erasing {} with result {}", iter.first.c_str(), result);
+					}
+					if (iter.first.contains("attack") && iter.first.contains("DualWield"))
+					{
+						race->attackDataMap->attackDataMap.erase(iter.first);
 					}
 				}
 				for (unsigned i = 0; i < RE::SEXES::kTotal; ++i)
@@ -784,6 +789,11 @@ void SettingsLoader::RemovePowerAttacks()
 								newevents->erase(newevents->begin() + j);
 							}
 							else if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Sprint"))
+							{
+								//newevents->erase(&(*newevents)[i]);
+								newevents->erase(newevents->begin() + j);
+							}
+							else if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("DualWield"))
 							{
 								//newevents->erase(&(*newevents)[i]);
 								newevents->erase(newevents->begin() + j);

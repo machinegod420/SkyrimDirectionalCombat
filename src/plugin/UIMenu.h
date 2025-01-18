@@ -8,13 +8,15 @@
 
 enum class UIDirectionState
 {
+	// bitmask?
 	Default,
 	Attacking,
 	Blocking,
 	Unblockable,
 	ImperfectBlock,
 	FullBlock,
-	TimedBlock
+	TimedBlock,
+	FullBlockAndTimedBlock
 };
 
 enum class UIHostileState

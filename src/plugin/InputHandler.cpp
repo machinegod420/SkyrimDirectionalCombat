@@ -13,6 +13,12 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 		}
 		auto button = static_cast<RE::ButtonEvent*>(event);
 		auto Player = RE::PlayerCharacter::GetSingleton();
+		// speculative fix for specific edge case
+		if (Settings::ExperimentalMode && Player->AsActorState()->actorState2.wantBlocking && !Player->IsBlocking())
+		{
+			//logger::info("speculative player block fix");
+			Player->NotifyAnimationGraph("blockStart");
+		}
 		if (event->AsButtonEvent()->IsDown())
 		{
 			auto key = button->idCode;

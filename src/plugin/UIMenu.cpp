@@ -323,6 +323,12 @@ void RenderManager::draw()
 		case UIDirectionState::FullBlock:
 			active = { 0x40, 0x40, 0xFF, 0x00 };
 			white = active;
+			transparency2 = transparency;
+			break;
+		case UIDirectionState::FullBlockAndTimedBlock:
+			active = { 0x80, 0xDA, 0xEA, 0x00 };
+			white = active;
+			transparency2 = transparency;
 			break;
 		case UIDirectionState::ImperfectBlock:
 			active = { 0x30, 0x20, 0xD0, 0x00 };

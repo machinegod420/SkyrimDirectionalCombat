@@ -222,6 +222,20 @@ namespace Hooks
 		static inline REL::Relocation<decltype(NotifyAnimationGraph_NPC)> _NotifyAnimationGraph_NPC;
 	};
 
+	class HookAIMaxRange
+	{
+	public:
+		static void Install()
+		{
+			REL::Relocation<std::uintptr_t> hook1{ RELOCATION_ID(43656, 44889) };  // 778290, 7A64E0
+
+			auto& trampoline = SKSE::GetTrampoline();
+			_GetMaxRange = trampoline.write_call<5>(hook1.address() + REL::Relocate(0x147, 0x128), GetMaxRange);  // 7783D7, 7A6608
+		}
+		static float GetMaxRange(RE::Actor* a_actor, RE::TESBoundObject* a_object, int64_t a3);
+		static inline REL::Relocation<decltype(GetMaxRange)> _GetMaxRange;
+	};
+
 	class HookAnimEvent
 	{
 	public:

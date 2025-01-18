@@ -26,6 +26,13 @@ public:
 	void AddChamberWindow(RE::Actor* actor);
 	void AddFeintWindow(RE::Actor* actor);
 	void RemoveFeintWindow(RE::Actor* actor);
+
+	void AddFeintQueue(RE::Actor* actor);
+	bool InFeintQueue(RE::Actor* actor)
+	{
+		std::shared_lock lock(FeintQueueMtx);
+		return FeintQueue.contains(actor->GetHandle());
+	}
 	
 	void GiveAttackSpeedBuff(RE::Actor* actor);
 	void GiveSmallAttackSpeedBuff(RE::Actor* actor);
@@ -34,6 +41,9 @@ public:
 	void AddLockout(RE::Actor* actor);
 	void HandleFeint(RE::Actor* actor);
 	void HandleFeintChangeDirection(RE::Actor* actor);
+
+	void DoAttack(RE::Actor* actor);
+	void DoPowerAttack(RE::Actor* actor);
 
 	void RemoveLockout(RE::Actor* actor);
 
@@ -75,6 +85,9 @@ private:
 	phmap::flat_hash_map<RE::ActorHandle, float> FeintWindow;
 	mutable std::shared_mutex FeintWindowMtx;
 
+	phmap::flat_hash_map<RE::ActorHandle, float> FeintQueue;
+	mutable std::shared_mutex FeintQueueMtx;
+
 	phmap::flat_hash_map<RE::ActorHandle, float> AttackLockout;
 	mutable std::shared_mutex AttackLockoutMtx;
 
@@ -94,4 +107,7 @@ private:
 
 	RE::SpellItem* FeintFX;
 	RE::SpellItem* WeaponSpeedBuff;
+
+	RE::BGSAction* ActionAttack;
+	RE::BGSAction* ActionPowerAttack;
 };

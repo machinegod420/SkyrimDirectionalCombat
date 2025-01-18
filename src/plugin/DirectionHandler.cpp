@@ -16,8 +16,8 @@ constexpr float BufferTime = 0.02f;
 constexpr float SlowTimeBetweenChanges = BehaviorDefinedTime + BufferTime;
 constexpr float SlowTimeBetweenChanges2 = BehaviorDefinedTimeSlow + BufferTime;
 
-constexpr float TimedBlockTime = 0.33f;
-constexpr float TimedBlockWarmup = 0.3f;
+constexpr float TimedBlockTime = 0.266f;
+constexpr float TimedBlockWarmup = 0.333f;
 constexpr float TotalTimedBlock = TimedBlockTime + TimedBlockWarmup;
 constexpr float TimedBlockCooldown = 0.2f;
 
@@ -145,6 +145,8 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 	{
 		UIDirectionState state = UIDirectionState::Default;
 		UIHostileState hostileState = UIHostileState::Neutral;
+		bool bHasTimedParry = HasTimedParry(actor);
+		bool bHasFullShieldBlock = HasFullShieldBlock(actor);
 		if (actor->IsBlocking())
 		{
 			state = UIDirectionState::Blocking;
@@ -153,13 +155,17 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		{
 			state = UIDirectionState::ImperfectBlock;
 		}
-		if (HasTimedParry(actor))
+		if (bHasTimedParry)
 		{
 			state = UIDirectionState::TimedBlock;
 		}
-		if (HasFullShieldBlock(actor))
+		if (bHasFullShieldBlock)
 		{
 			state = UIDirectionState::FullBlock;
+		}
+		if (bHasFullShieldBlock && bHasTimedParry)
+		{
+			state = UIDirectionState::FullBlockAndTimedBlock;
 		}
 		if (actor->IsAttacking())
 		{
@@ -573,7 +579,7 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor, bool ChangeQueued)
 }
 
 
-void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force, bool overwrite)
+void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force, bool overwrite, bool lock)
 {
 	if (Settings::ForHonorMode)
 	{
@@ -583,18 +589,23 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 		}
 	}
 	// skip if we try to switch to the same dir
-	std::shared_lock lock(ActiveDirectionsMtx);
+	std::shared_lock lock1(ActiveDirectionsMtx);
 	if (ActiveDirections.contains(actor->GetHandle()) && ActiveDirections.at(actor->GetHandle()) == dir)
 	{
 		return;
 	}
 
-	DirectionTimersMtx.lock();
+	std::unique_lock lock2(DirectionTimersMtx);
 	auto Iter = DirectionTimers.find(actor->GetHandle());
 	// skip if we already have a direction to switch to that is the same
 	if (Iter != DirectionTimers.end() && Iter->second.dir == dir)
 	{
-		DirectionTimersMtx.unlock();
+		Iter->second.locked = lock;
+		return;
+	}
+	// skip if locked - very specific case
+	if (Iter != DirectionTimers.end() && Iter->second.locked)
+	{
 		return;
 	}
 	float timeleft = TimeBetweenChanges;
@@ -608,10 +619,11 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 		DirectionSwitch ToDir;
 		ToDir.dir = dir;
 		ToDir.timeLeft = timeleft;
+		ToDir.locked = lock;
 		ToDir.wasBlocking = actor->IsBlocking();
+		
 		DirectionTimers[actor->GetHandle()] = ToDir;
 	}
-	DirectionTimersMtx.unlock();
 }
 
 void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon)
@@ -748,6 +760,11 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 		return;
 	}
+
+	if (actor->IsBlocking())
+	{
+
+	}
 	auto Equipped = actor->GetEquippedObject(false);
 	auto EquippedLeft = actor->GetEquippedObject(true);
 	// Only weapons (no H2H)
@@ -788,7 +805,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			HasWeapon = true;
 		}
 	}
-
+	
 	if (!HasWeapon)
 	{
 		if (HasDirectionalPerks(actor))
@@ -858,7 +875,6 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	// AI stuff
 	if (!actor->IsPlayerRef() && HasDirectionalPerks(actor))
 	{
-		UNUSED(delta);
 		AIHandler::GetSingleton()->RunActor(actor, delta);
 	}
 
@@ -948,7 +964,15 @@ void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 			// adds to the queue will cause the delay between the sent event and the transition time to be
 			// greater. For example, if there is 3 items in the queue, the second item will be sent at 0.72, while
 			// the behavior transition will occur at 0.66, which is a 66ms delay. 
-			AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges2, true });
+			if (!actor->IsBlocking() && !actor->IsAttacking())
+			{
+				AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges2, true });
+			}
+			else
+			{
+				// blocking actors dont get the slow transition
+				AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
+			}
 		}
 	}
 	else
@@ -956,6 +980,17 @@ void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 		SendAnimationEvent(actor, false);
 		AnimationTimer[actor->GetHandle()].resize(MaxSize);
 		AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
+	}
+	AnimationTimerMtx.unlock();
+}
+
+void DirectionHandler::ClearAnimationQueue(RE::Actor* actor)
+{
+	AnimationTimerMtx.lock();
+	auto Iter = AnimationTimer.find(actor->GetHandle());
+	if (Iter != AnimationTimer.end())
+	{
+		AnimationTimer.erase(Iter);
 	}
 	AnimationTimerMtx.unlock();
 }
@@ -1157,7 +1192,26 @@ void DirectionHandler::Update(float delta)
 				ParryIter = TimedParry.erase(ParryIter);
 				continue;
 			}
-			ParryIter->second -= delta;
+			// only decrement if they are blocking if this has not started yet
+			// basically if they get staggered before they can enter block stance
+			// this is a very particular case
+			// if they already started blocking and ticking and then get staggered, then we still tick
+			// basically it is if the blocking input was made but the actor did not start blocking due to an attack or something else that caused them not to actually block 
+			// the reason why this is a problem is because we have a cooldown period before you can attempt another timed block
+			// the other way to do this is to have another map that just tracks the cooldown but that requires more mutexes etc
+			
+			if (actor->IsBlocking())
+			{
+				ParryIter->second -= delta;
+			}
+			else
+			{
+				if (ParryIter->second < TotalTimedBlock - 0.001)
+				{
+					ParryIter->second -= delta;
+				}
+			}
+			
 			if (ParryIter->second <= -TimedBlockCooldown)
 			{
 				ParryIter = TimedParry.erase(ParryIter);
