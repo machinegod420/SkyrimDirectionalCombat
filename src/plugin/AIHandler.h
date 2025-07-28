@@ -207,4 +207,7 @@ private:
 	mutable std::shared_mutex DifficultyActionTimerMtx;
 
 	PRECISION_API::IVPrecision3* Precision = nullptr;
+
+	int NumPlayerAttackers;
+	mutable std::shared_mutex AIHandlerDataMtx;
 };

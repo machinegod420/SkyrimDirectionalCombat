@@ -60,6 +60,7 @@ public:
 private:
 	RE::BGSKeyword* NPCKeyword;
 	RE::SpellItem* MultiAttackerFX;
+	RE::SpellItem* DisarmSpell;
 
 	phmap::flat_hash_map<RE::ActorHandle, float> StaggerTimer;
 	mutable std::shared_mutex StaggerTimerMtx;

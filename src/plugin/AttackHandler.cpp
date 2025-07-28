@@ -3,9 +3,9 @@
 #include "DirectionHandler.h"
 
 constexpr float NPCLockoutTime = 0.15f;
-constexpr float AttackSpeedMult = 0.25f;
+constexpr float AttackSpeedMult = 0.35f;
 constexpr float SmallAttackSpeedMult = 0.12f;
-constexpr float FeintQueueTime = 0.18f; // carefully tailored magic number
+constexpr float FeintQueueTime = 0.2f; // carefully tailored magic number
 
 void AttackHandler::Initialize()
 {
@@ -15,6 +15,14 @@ void AttackHandler::Initialize()
 
 	ActionAttack = (RE::BGSAction*)RE::TESForm::LookupByID(0x13005);
 	ActionPowerAttack = (RE::BGSAction*)RE::TESForm::LookupByID(0x13383);
+
+	for (auto& iter : RE::PlayerCharacter::GetSingleton()->GetRace()->attackDataMap->attackDataMap)
+	{
+		if (iter.first == "attackStart")
+		{
+			PlayerAttackData = iter.second;
+		}
+	}
 }
 
 
@@ -285,7 +293,7 @@ void AttackHandler::GiveAttackSpeedBuff(RE::Actor* actor)
 	SpeedBuffMtx.lock();
 	if (!SpeedBuff.contains(actor->GetHandle()))
 	{
-		SpeedBuff[actor->GetHandle()] = 2.f; 
+		SpeedBuff[actor->GetHandle()] = 1.f; 
 		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, AttackSpeedMult);
 	}
 	SpeedBuffMtx.unlock();

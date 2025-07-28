@@ -34,13 +34,13 @@ static std::mutex mtx2;
 
 namespace UI
 {
-	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout)
+	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer)
 	{
 		// surprised this hasnt crashed from all the race conditions
 		// this is populated on the game thread and emptied on the UI thread
 		mtx.lock();
 		//logger::info("Attempting to add new draw command");
-		DrawCommands.push_back({ position, dir, mirror, state, hostileState, firstperson, lockout });
+		DrawCommands.push_back({ position, dir, mirror, state, hostileState, firstperson, lockout, isplayer });
 		mtx.unlock();
 	}
 
@@ -339,6 +339,7 @@ void RenderManager::draw()
 		case UIDirectionState::Unblockable:
 			white = { 0xFF, 0x66, 0x00, 0x00 };
 			active = white;
+			transparency2 = transparency;
 			break;
 		}
 
@@ -362,21 +363,29 @@ void RenderManager::draw()
 
 		if (depth >= 0 && IsOnScreen(StartPos, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y))
 		{
-
-			// only flip horizontal axes
-			if (!DrawCommands[i].mirror)
+			float scale = 1.f;
+			if (DrawCommands[i].isplayer)
 			{
-				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
+				scale = UISettings::PlayerUIScale;
 			}
 			else
 			{
-				DrawDirection(StartPos, depth, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
+				scale = UISettings::NPCUIScale;
+			}
+			// only flip horizontal axes
+			if (!DrawCommands[i].mirror)
+			{
+				DrawDirection(StartPos, depth, scale, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
+			}
+			else
+			{
+				DrawDirection(StartPos, depth, scale, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
+				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
 			}
 		}
 		//logger::info("Direction pos {} {}", StartPos.x, StartPos.y);
@@ -406,7 +415,7 @@ void RenderManager::draw()
 	ImGui::End();
 }
 
-void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency)
+void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency)
 {
 	/*
 	logger::info("Drawing quad at pos {} {} with colors {} {} transparency {}", StartPos.x, StartPos.x,
@@ -418,6 +427,7 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, Directions
 	depth = std::clamp(depth, 300.f, 1000.f);
 	RE::NiPoint2 EndPos = StartPos;
 	float scale = UISettings::Size / depth;
+	scale *= uiscale;
 	float dist = UISettings::Length * scale;
 	float size = UISettings::Length * scale;
 	float thickness = UISettings::Thickness * scale;

@@ -36,6 +36,7 @@ struct DrawCommand
 	UIHostileState hostileState;
 	bool firstperson;
 	bool lockout;
+	bool isplayer;
 };
 
 struct TextAlert
@@ -47,7 +48,7 @@ struct TextAlert
 
 namespace UI
 {
-	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout);
+	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer);
 }
 
 
@@ -143,7 +144,7 @@ private:
 	static inline bool ShowMeters = false;
 	static inline ID3D11Device* device = nullptr;
 	static inline ID3D11DeviceContext* context = nullptr;
-	static void DrawDirection(RE::NiPoint2 StartPos, float depth, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency);
+	static void DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency);
 	static void LoadTexture(const std::string &path, bool png, IconTypes idx);
 
 

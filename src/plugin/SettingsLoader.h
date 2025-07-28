@@ -23,6 +23,9 @@ struct DifficultySettings
 	static float KnockbackMult;
 	static float StaminaDamageCap;
 	static float DMCODodgeCost;
+	static float TimedBlockStartup;
+	static float TimedBlockActiveTime;
+	static float TimedBlockCooldown;
 };
 
 struct Settings
@@ -39,6 +42,7 @@ struct Settings
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;
 	static bool VerboseLogging;
+	
 };
 
 struct InputSettings
@@ -59,6 +63,7 @@ struct InputSettings
 	static unsigned KeyCodeBR;
 	static unsigned KeyCodeFeint;
 	static unsigned KeyCodeBash;
+	static unsigned KeyCodeSwitchHud;
 	static bool InvertY;
 };
 
@@ -117,6 +122,9 @@ struct UISettings
 	static bool FlashUI;
 	static bool HarderUI;
 	static bool OnlyShowTargetted; 
+	static float PlayerUIScale;
+	static float NPCUIScale;
+	static bool Force1PHud;
 };
 
 class SettingsLoader

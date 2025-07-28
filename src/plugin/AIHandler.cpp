@@ -315,7 +315,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								DontChangeDirection = true;
 							}
 							// uh oh, they might bash us!
-							else if (Settings::DMCOSupport && TargetDistSQ < (BashDistanceSq + 3000) && !actor->IsAttacking()
+							else if (Settings::DMCOSupport && TargetDistSQ < (BashDistanceSq + 3000) && !actor->IsAttacking() && mt_rand() % 8 < ((mod + 1) * 0.5 + 2)
 								&& AttackHandler::GetSingleton()->CanAttack(target) && AttackHandler::GetSingleton()->CanAttack(actor) 
 								&& DifficultyMap[actor->GetHandle()].DodgeCooldown <= 0.f && !targetStaggering)
 							{
@@ -332,7 +332,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								}
 							}
 							// too close, try to attack to prevent the bash
-							else if (TargetDistSQ < (BashDistanceSq + 1700) && !actor->IsAttacking() && mt_rand() % 11 < ((mod * 0.5) + 2)
+							else if (TargetDistSQ < (BashDistanceSq + 1700) && !actor->IsAttacking() && mt_rand() % 14 < ((mod * 0.5) + 2)
 								&& AttackHandler::GetSingleton()->CanAttack(target) && AttackHandler::GetSingleton()->CanAttack(actor) 
 								&& CurrentStaminaRatio > 0.3)
 							{
@@ -584,11 +584,11 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 		if (CurrentStamina > TotalStamina * 0.15f)
 		{
 			DifficultyMap[actor->GetHandle()].defending = false;
-			if (CurrentStamina < TotalStamina * 0.3f)
+			if (CurrentStamina < TotalStamina * 0.4f)
 			{
 				ShouldFeint = false;
 			}
-			if (val < 2)
+			if (val < 6)
 			{
 				ShouldFeint = false;
 			}
@@ -801,18 +801,22 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 	float MaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 	float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 	float CurrentStaminaRatio = CurrentStamina / MaxStamina;
+	int mod = (int)CalcAndInsertDifficulty(actor);
 	if (DifficultyMap[ActorHandle].attackPattern[idx] != CounterDirection)
 	{
 		SwitchToNextAttack(actor, true);
-		if (CurrentStaminaRatio > 0.7 && mt_rand() % 4 < 1 && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
+		if (CurrentStaminaRatio > 0.7 && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
 		{
-			if (mt_rand() % 3 < 2)
+			if (mt_rand() % 8 < mod)
 			{
-				AddAction(actor, AIHandler::Actions::Riposte);
-			}
-			else
-			{
-				AddAction(actor, AIHandler::Actions::PowerAttack);
+				if (mt_rand() % 3 < 2)
+				{
+					AddAction(actor, AIHandler::Actions::Riposte);
+				}
+				else
+				{
+					AddAction(actor, AIHandler::Actions::PowerAttack);
+				}
 			}
 		}
 	}
@@ -823,18 +827,28 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 
 		if (CurrentStaminaRatio > 0.4)
 		{
-			if (ShouldFeint && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
+			if (mt_rand() % 8 < mod)
 			{
-				SwitchToNextAttack(actor, false);
-				if (mt_rand() % 2 < 1)
+				if (ShouldFeint && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
 				{
-					AddAction(actor, AIHandler::Actions::StartFeint);
-				}
-				else
-				{
-					AddAction(actor, AIHandler::Actions::PowerAttack);
+					SwitchToNextAttack(actor, false);
+					int i = mt_rand() % 3;
+					
+					if (i == 2)
+					{
+						AddAction(actor, AIHandler::Actions::StartFeint);
+					}
+					else if (i == 1)
+					{
+						AddAction(actor, AIHandler::Actions::PowerAttack);
+					}
+					else
+					{
+						AddAction(actor, AIHandler::Actions::Riposte);
+					}
 				}
 			}
+
 
 		}
 		else
@@ -1295,11 +1309,17 @@ void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percen
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 {
+	std::shared_lock lock(AIHandlerDataMtx);
 	DifficultyUpdateTimerMtx.lock_shared();
-	float base = DifficultyUpdateTimer.at(CalcAndInsertDifficulty(actor));
+	Difficulty mod = CalcAndInsertDifficulty(actor);
+	float base = DifficultyUpdateTimer.at(mod);
 	DifficultyUpdateTimerMtx.unlock_shared();
 	float mistakeRatio = DifficultyMap.at(actor->GetHandle()).mistakeRatio;
 	base += mistakeRatio;
+	if (mod < Difficulty::VeryHard && NumPlayerAttackers > 3)
+	{
+		base += NumPlayerAttackers * 0.05;
+	}
 	// add jitter
 	// so ugly
 	//float result = (float)(mt_rand()) / ((float)(mt_rand.max() / (AIJitterRange * 2.f)));
@@ -1311,6 +1331,7 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 
 float AIHandler::CalcActionTimer(RE::Actor* actor)
 {
+	std::shared_lock lock(AIHandlerDataMtx);
 	DifficultyActionTimerMtx.lock_shared();
 	float base = DifficultyActionTimer.at(CalcAndInsertDifficulty(actor));
 	DifficultyActionTimerMtx.unlock_shared();
@@ -1425,7 +1446,11 @@ void AIHandler::Update(float delta)
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Block)
 			{
-				actor->NotifyAnimationGraph("blockStart");
+				if (!actor->IsBlocking())
+				{
+					actor->NotifyAnimationGraph("blockStart");
+				}
+				
 				ActionQueueIter->second.toDo = Actions::None;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::ProBlock)
@@ -1564,6 +1589,7 @@ void AIHandler::Update(float delta)
 	UpdateTimerMtx.lock();
 	// spread out AI actions to control difficulty
 	auto UpdateTimerIter = UpdateTimer.begin();
+	int NumActorsTargettingPlayer = 0;
 	while (UpdateTimerIter != UpdateTimer.end())
 	{
 		if (!UpdateTimerIter->first)
@@ -1576,6 +1602,11 @@ void AIHandler::Update(float delta)
 		{
 			UpdateTimerIter = UpdateTimer.erase(UpdateTimerIter);
 			continue;
+		}
+		RE::Actor* currentTarget = actor->GetActorRuntimeData().currentCombatTarget.get().get();
+		if (currentTarget && currentTarget->IsPlayer() && actor->IsHostileToActor(currentTarget))
+		{
+			NumActorsTargettingPlayer++;
 		}
 		if (UpdateTimerIter->second >= 0)
 		{
@@ -1591,8 +1622,15 @@ void AIHandler::Update(float delta)
 			//continue;
 		}
 		UpdateTimerIter++;
+
+
 	}
+	AIHandlerDataMtx.lock();
+	NumPlayerAttackers = NumActorsTargettingPlayer;
+	AIHandlerDataMtx.unlock();
 	UpdateTimerMtx.unlock();
+
+	
 }
 
 

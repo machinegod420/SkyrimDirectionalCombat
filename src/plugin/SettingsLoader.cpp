@@ -24,6 +24,9 @@ float DifficultySettings::WeaponWeightStaminaMult = 0.33f;
 float DifficultySettings::KnockbackMult = 2.f;
 float DifficultySettings::StaminaDamageCap = 0.4f;
 float DifficultySettings::DMCODodgeCost = 0.4f;
+float DifficultySettings::TimedBlockStartup = 0.333f;
+float DifficultySettings::TimedBlockActiveTime = 0.2f;
+float DifficultySettings::TimedBlockCooldown = 0.2f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -47,6 +50,7 @@ unsigned InputSettings::KeyCodeBL = 4;
 unsigned InputSettings::KeyCodeBR = 5;
 unsigned InputSettings::KeyCodeFeint = 16;
 unsigned InputSettings::KeyCodeBash = 18;
+unsigned InputSettings::KeyCodeSwitchHud = 6;
 bool InputSettings::InvertY = false;
 
 bool WeaponSettings::RebalanceWeapons = true;
@@ -91,6 +95,9 @@ bool UISettings::ShowUI = true;
 bool UISettings::FlashUI = false;
 bool UISettings::HarderUI = true;
 bool UISettings::OnlyShowTargetted = true;
+float UISettings::NPCUIScale = 0.9f;
+float UISettings::PlayerUIScale = 1.f;
+bool UISettings::Force1PHud = false;
 
 void SettingsLoader::InitializeDefaultValues()
 {
@@ -149,37 +156,32 @@ void SettingsLoader::Load(const std::string& path)
 				else if (fieldName == "KeyCodeBL")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeBL = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeBL);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeBL, newval);
 				}
 				else if (fieldName == "KeyCodeBR")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeBR = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeBR);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeBR, newval);
 				}
 				else if (fieldName == "KeyCodeFeint")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeFeint = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeFeint);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeFeint, newval);
 				}
 				else if (fieldName == "KeyCodeBash")
 				{
 					int newval = field.as<unsigned>();
-					InputSettings::KeyCodeBash = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::KeyCodeBash);
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeBash, newval);
+				}
+				else if (fieldName == "KeyCodeSwitchHud")
+				{
+					int newval = field.as<unsigned>();
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeSwitchHud, newval);
 				}
 				else if (fieldName == "InvertY")
 				{
 					bool newval = field.as<bool>();
-					InputSettings::InvertY = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, InputSettings::InvertY);
+					SETTING_MACRO(sectionName, InputSettings, InvertY, newval);
 				}
 			}
 			else if (sectionName == "Difficulty")
@@ -475,6 +477,21 @@ void SettingsLoader::Load(const std::string& path)
 					UISettings::OnlyShowTargetted = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, UISettings::OnlyShowTargetted);
+				}
+				else if (fieldName == "PlayerUIScale")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, UISettings, PlayerUIScale, newval);
+				}
+				else if (fieldName == "NPCUIScale")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, UISettings, NPCUIScale, newval);
+				}
+				else if (fieldName == "Force1PHud")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, UISettings, Force1PHud, newval);
 				}
 			}
 			else if (sectionName == "Settings")

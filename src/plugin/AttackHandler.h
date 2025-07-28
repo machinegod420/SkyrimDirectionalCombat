@@ -7,7 +7,7 @@
 class AttackHandler
 {
 public:
-
+	RE::NiPointer<RE::BGSAttackData> PlayerAttackData;
 	AttackHandler() : FeintFX(nullptr)
 	{
 	}

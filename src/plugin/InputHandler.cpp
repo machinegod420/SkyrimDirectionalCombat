@@ -78,6 +78,10 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 					}
 
 				}
+				else if (key == InputSettings::KeyCodeSwitchHud)
+				{
+					UISettings::Force1PHud = !UISettings::Force1PHud;
+				}
 			}
 
 		}

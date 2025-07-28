@@ -16,12 +16,6 @@ constexpr float BufferTime = 0.02f;
 constexpr float SlowTimeBetweenChanges = BehaviorDefinedTime + BufferTime;
 constexpr float SlowTimeBetweenChanges2 = BehaviorDefinedTimeSlow + BufferTime;
 
-constexpr float TimedBlockTime = 0.266f;
-constexpr float TimedBlockWarmup = 0.333f;
-constexpr float TotalTimedBlock = TimedBlockTime + TimedBlockWarmup;
-constexpr float TimedBlockCooldown = 0.2f;
-
-
 
 void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
@@ -56,10 +50,6 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 		return false;
 	}
 
-	if (HasTimedParry(target))
-	{
-		return true;
-	}
 	if (HasFullShieldBlock(target))
 	{
 		return true;
@@ -189,6 +179,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 			hostileState = UIHostileState::Hostile;
 		}
 		bool FirstPerson = (actor->IsPlayerRef() && RE::PlayerCamera::GetSingleton()->IsInFirstPerson());
+		FirstPerson |= actor->IsPlayerRef() && UISettings::Force1PHud;
 		RE::NiPoint3 Position = actor->GetPosition() + RE::NiPoint3(0, 0, 90);
 		
 		if (!FirstPerson)
@@ -222,7 +213,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		});	
 		*/
 
-		UI::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout);
+		UI::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout, actor->IsPlayerRef());
 	}
 	ActiveDirectionsMtx.unlock_shared();
 }
@@ -335,7 +326,7 @@ bool DirectionHandler::HasTimedParry(RE::Actor* actor) const
 	if (TimedParry.contains(actor->GetHandle()))
 	{
 		float TimeRemaining = TimedParry.at(actor->GetHandle());
-		if (TimeRemaining > 0 && TimeRemaining < TimedBlockTime)
+		if (TimeRemaining > 0 && TimeRemaining < DifficultySettings::TimedBlockActiveTime)
 		{
 			return true;
 		}
@@ -348,7 +339,7 @@ void DirectionHandler::AddTimedParry(RE::Actor* actor)
 	std::unique_lock lock(TimedParryMtx);
 	if (!TimedParry.contains(actor->GetHandle()))
 	{
-		TimedParry[actor->GetHandle()] = TotalTimedBlock;
+		TimedParry[actor->GetHandle()] = DifficultySettings::TimedBlockActiveTime + DifficultySettings::TimedBlockStartup;
 	}
 }
 
@@ -391,12 +382,23 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 		{
 			actor->RemoveSpell(BR);
 		}
+		
 		actor->AddSpell(SpellToAdd);
 	}
 
 	// if blocking they have an imperfect parry
 	if (actor->IsBlocking() && wasBlocking)
 	{
+		if (!HasFullShieldBlock(actor))
+		{
+			// set timed parry to cooldown
+			TimedParryMtx.lock();
+			if (TimedParry.contains(actor->GetHandle()))
+			{
+				TimedParry[actor->GetHandle()] = -0.001;
+			}
+			TimedParryMtx.unlock();
+		}
 
 		// Use imperfect parry only if we dont want switching guards to cost stamina
 		if (Settings::SwitchingCostsStamina)
@@ -406,12 +408,7 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 			// shield switches direction for free past 80% stamina
 			if (!HasFullShieldBlock(actor))
 			{
-				TimedParryMtx.lock();
-				if (TimedParry.contains(actor->GetHandle()))
-				{
-					TimedParry.erase(actor->GetHandle());
-				}
-				TimedParryMtx.unlock();
+
 				actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 			}
 			
@@ -652,7 +649,8 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 		actor->AddSpell(TR);
 	}
 	ActiveDirectionsMtx.unlock();
-
+	// hack to fix unblockable issues
+	actor->RemoveSpell(Unblockable);
 }
 
 void DirectionHandler::AdjustActorScale(RE::Actor* actor)
@@ -1206,13 +1204,13 @@ void DirectionHandler::Update(float delta)
 			}
 			else
 			{
-				if (ParryIter->second < TotalTimedBlock - 0.001)
+				if (ParryIter->second < DifficultySettings::TimedBlockActiveTime + DifficultySettings::TimedBlockStartup - 0.001)
 				{
 					ParryIter->second -= delta;
 				}
 			}
 			
-			if (ParryIter->second <= -TimedBlockCooldown)
+			if (ParryIter->second <= -DifficultySettings::TimedBlockCooldown)
 			{
 				ParryIter = TimedParry.erase(ParryIter);
 				continue;
@@ -1258,6 +1256,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 
 	if (UnblockableActors.contains(actor->GetHandle()))
 	{
+		actor->RemoveSpell(Unblockable);
 		UnblockableActors.erase(actor->GetHandle());
 		return;
 	}
@@ -1308,7 +1307,7 @@ void DirectionHandler::AddCombo(RE::Actor* actor)
 		{
 			UnblockableActors.insert(actor->GetHandle());
 			actor->AddSpell(Unblockable);
-			actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(Unblockable, false, actor, 0.f, false, 0.f, nullptr);
+			//actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(Unblockable, false, actor, 0.f, false, 0.f, nullptr);
 			data.currentIdx = 0;
 			data.size = 0;
 			data.repeatCount = 0;

@@ -11,6 +11,7 @@ BlockHandler::BlockHandler()
 {
 	NPCKeyword = nullptr;
 	MultiAttackerFX = nullptr;
+	DisarmSpell = nullptr;
 }
 
 void BlockHandler::Initialize()
@@ -24,6 +25,10 @@ void BlockHandler::Initialize()
 	if (!MultiAttackerFX)
 	{
 		MultiAttackerFX = DataHandler->LookupForm<RE::SpellItem>(0x6E60, "DirectionMod.esp");
+	}
+	if (!DisarmSpell)
+	{
+		DisarmSpell = DataHandler->LookupForm<RE::SpellItem>(0x83EF, "DirectionMod.esp");
 	}
 }
 
@@ -93,6 +98,10 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		{
 			CauseStagger(target, hitData.aggressor.get().get(), 1.f, true);
 		}
+		if (target->IsPlayerRef())
+		{
+
+		}
 	}
 	
 	target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
@@ -155,7 +164,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	{
 		// succesffully blocked so remove any lockout if they cannot attack
 		AttackHandler::GetSingleton()->RemoveLockout(target);
-		GiveHyperarmor(target, attacker);
+		//GiveHyperarmor(target, attacker);
 	}
 }
 
@@ -227,7 +236,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 			FXHandler::GetSingleton()->PlayMasterstrike(target);
 			CauseStagger(attacker, target, 0.25f);
 			// masterstriker gets invulnerability during MS
-			GiveHyperarmor(target, attacker);
+			//GiveHyperarmor(target, attacker);
 			return true;
 		}
 	}

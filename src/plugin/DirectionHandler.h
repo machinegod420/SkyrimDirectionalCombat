@@ -13,7 +13,7 @@
 class DirectionHandler
 {
 public:
-
+	
 	DirectionHandler()
 	{
 		TR = nullptr;

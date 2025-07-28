@@ -28,19 +28,22 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
-			if (BlockHandler::GetSingleton()->HasHyperarmor(target, attacker))
+			/*
+					if (BlockHandler::GetSingleton()->HasHyperarmor(target, attacker))
 			{
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
 				ret.bIgnoreHit = true;
 				return ret;
-			}
+			}	
+			*/
+
 			if (target->IsBlocking())
 			{
 				BlockHandler::GetSingleton()->HandleBlock(attacker, target);
 			}
 			// make attacks 'safe', a chamber/masterstroke mechanic
 			// you are safe during attack windup
-			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
+			else if (target->IsAttacking() && AttackHandler::GetSingleton()->InChamberWindow(target))
 			{
 				if (AttackHandler::GetSingleton()->InChamberWindow(attacker))
 				{
@@ -125,7 +128,6 @@ namespace Hooks
 			
 			*/
 
-			
 			if (TargetUnblockable)
 			{
 				hitData.totalDamage *= 0.3f;
@@ -171,26 +173,20 @@ namespace Hooks
 							{
 								Damage *= 0.05f;
 								// staggers as well
-								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
+								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
 							}
-							target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
 							_OnMeleeHit(target, hitData);
+							target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
+							
 						}
-
+						//hitData.stagger = 0;
+						
 					}
 
 					return;
 				}
 			}
 
-			RE::NiPoint3 dir = attacker->GetPosition() - target->GetPosition();
-			if (hitData.weapon && hitData.weapon->IsMelee())
-			{
-				//hitData.reflectedDamage = std::max(DifficultySettings::KnockbackMult * dir.Length(), hitData.reflectedDamage);
-			}
-
-			//hitData.reflectedDamage = 0.f; 
-			//dir -= target->GetPosition();
 
 			if (hitData.stagger)
 			{
@@ -200,7 +196,6 @@ namespace Hooks
 			{
 				hitData.reflectedDamage = 300;
 			}
-				
 
 			// do no health damage if hit was blocked
 			// for some reason this flag is the only flag that gets set
@@ -209,7 +204,7 @@ namespace Hooks
 				// manual pushback
 				if (Settings::ExperimentalMode)
 				{
-					RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
+					//RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
 					//typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
 
 					//static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 0) };
@@ -314,18 +309,13 @@ namespace Hooks
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
-			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
-			if (BlockHandler::GetSingleton()->HasHyperarmor(target, attacker))
-			{
-				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
-				return;
-			}
+
 			if (target->IsBlocking())
 			{
 				BlockHandler::GetSingleton()->HandleBlock(attacker, target);
 			}
 			// make attacks 'safe', a chamber/masterstroke mechanic
-			else if (AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
+			else if (!IsBashing(attacker) && !IsBashing(target) && AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
 				if (AttackHandler::GetSingleton()->InChamberWindow(attacker))
 				{
@@ -771,7 +761,6 @@ namespace Hooks
 		}
 		if (str == "preHitFrame"_h)
 		{
-
 			// use this to signal that an attack did happen with the AI
 			if (!actor->IsPlayerRef())
 			{
@@ -815,6 +804,7 @@ namespace Hooks
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
 			AttackHandler::GetSingleton()->AddFeintWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
+
 			//logger::info("trychamberbegin {}", actor->GetName());
 
 		}
@@ -877,10 +867,15 @@ namespace Hooks
 	{
 		if (eventName.contains("blockStart"))
 		{
+		
 			RE::Actor* actor = static_cast<RE::Actor*>(a_graphHolder);
-			DirectionHandler::GetSingleton()->AddTimedParry(actor);
-			// should be called on any event that might interrupt actor changing guards
-			DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
+			if (!actor->IsBlocking())
+			{
+				DirectionHandler::GetSingleton()->AddTimedParry(actor);
+				// should be called on any event that might interrupt actor changing guards
+				DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
+			}
+
 		}
 		else if (eventName.contains("attack"))
 		{
@@ -889,7 +884,7 @@ namespace Hooks
 			{
 				bool DidPowerAttack = false;
 				// should be called on any event that might interrupt actor changing guards
-				DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
+				DirectionHandler::GetSingleton()->ClearAnimationQueue(actor); 
 				if (AttackHandler::GetSingleton()->InAttackChain(actor, DidPowerAttack))
 				{
 					//hack because power attack property flags are not guaranteed to have power in the event name
