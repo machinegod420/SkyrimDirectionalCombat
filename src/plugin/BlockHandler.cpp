@@ -6,6 +6,7 @@
 #include "FXHandler.h"
 
 constexpr float MultiattackTimer = 2.5f;
+constexpr float HyperarmorTimer = 0.1f;
 
 BlockHandler::BlockHandler()
 {
@@ -124,15 +125,25 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 
 	if (ShouldStagger)
 	{
+		
 		// reset actor attack state because sometimes it can get screwed up staggering mid bash
 		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
-		actor->NotifyAnimationGraph("blockStop");
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
 		actor->SetGraphVariableFloat("staggerDirection", direction);
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
 		actor->NotifyAnimationGraph("staggerStart");
+		actor->AsActorState()->actorState2.staggered = true;
 		//actor->NotifyAnimationGraph("attackStop");
+		
+
+		/*
+			typedef void (*tfoo)(RE::Actor* a_target, float a_staggerMult, RE::Actor* a_aggressor);
+		REL::Relocation<tfoo> func{ REL::RelocationID(36700, 37710) };
+		func(actor, magnitude, heading);	
+		
+		*/
+
 		if (actor->GetRace()->HasKeyword(NPCKeyword))
 		{
 			StaggerTimer[actor->GetHandle()] = DifficultySettings::StaggerResetTimer;
@@ -153,7 +164,11 @@ void BlockHandler::CauseRecoil(RE::Actor* actor) const
 
 void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 {
-
+	// hyperarmor acts as a fullblock
+	if (HasHyperarmor(target))
+	{
+		return;
+	}
 	if (!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
 	{
 		target->SetGraphVariableBool("IsBlocking", false);
@@ -164,7 +179,7 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	{
 		// succesffully blocked so remove any lockout if they cannot attack
 		AttackHandler::GetSingleton()->RemoveLockout(target);
-		//GiveHyperarmor(target, attacker);
+		GiveHyperarmor(target, attacker);
 	}
 }
 
@@ -208,10 +223,10 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 {
 	if (DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
 	{
-		bool targetStaggering = false;
-		bool attackerStaggering = false;
-		target->GetGraphVariableBool("IsStaggering", targetStaggering);
-		attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
+		bool targetStaggering = target->AsActorState()->actorState2.staggered;
+		bool attackerStaggering = attacker->AsActorState()->actorState2.staggered;
+		//target->GetGraphVariableBool("IsStaggering", targetStaggering);
+		//attacker->GetGraphVariableBool("IsStaggering", attackerStaggering);
 
 		bool targetPowerattack = IsPowerAttacking(target);
 		bool attackerPowerattack = IsPowerAttacking(attacker);
@@ -220,12 +235,6 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		if (!targetStaggering && !attackerStaggering)
 		{
 			// power attack always has priority, you cannot masterstrike a power attack with a regular attack
-			if (targetPowerattack && !attackerPowerattack)
-			{
-				FXHandler::GetSingleton()->PlayMasterstrike(target);
-				CauseStagger(attacker, target, 0.25f);
-				return true;
-			}
 			if (!targetPowerattack && attackerPowerattack)
 			{
 				FXHandler::GetSingleton()->PlayMasterstrike(attacker);
@@ -246,8 +255,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 void BlockHandler::GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker)
 {
 	HyperArmorTimerMtx.lock();
-	HyperArmorTimer[actor->GetHandle()].Target = attacker->GetHandle();
-	HyperArmorTimer[actor->GetHandle()].TimeLeft = DifficultySettings::HyperarmorTimer;
+	HyperArmorTimer[actor->GetHandle()] = HyperarmorTimer;
 	HyperArmorTimerMtx.unlock();
 }
 
@@ -311,8 +319,8 @@ void BlockHandler::Update(float delta)
 				HAIter = HyperArmorTimer.erase(HAIter);
 				continue;
 			}
-			HAIter->second.TimeLeft -= delta;
-			if (HAIter->second.TimeLeft <= 0)
+			HAIter->second -= delta;
+			if (HAIter->second <= 0)
 			{
 				HAIter = HyperArmorTimer.erase(HAIter);
 				continue;

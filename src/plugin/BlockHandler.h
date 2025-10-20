@@ -21,17 +21,13 @@ public:
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
 	void CauseRecoil(RE::Actor* actor) const;
 	void GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker);
-	inline bool HasHyperarmor(RE::Actor* actor, RE::Actor* attacker) const
+	inline bool HasHyperarmor(RE::Actor* actor) const
 	{
 		bool ret = false;
 		HyperArmorTimerMtx.lock_shared();
-		// if the attacker is NOT the same as the original attacker that gave the hyperarmor, count as having hyperarmor
 		if (HyperArmorTimer.contains(actor->GetHandle()))
 		{
-			if (HyperArmorTimer.at(actor->GetHandle()).Target != attacker->GetHandle())
-			{
-				ret = true;
-			}
+			ret = true;
 		}
 		HyperArmorTimerMtx.unlock_shared();
 		return ret;
@@ -65,12 +61,7 @@ private:
 	phmap::flat_hash_map<RE::ActorHandle, float> StaggerTimer;
 	mutable std::shared_mutex StaggerTimerMtx;
 	
-	struct HyperArmorData
-	{
-		RE::ActorHandle Target;
-		float TimeLeft = 0;
-	};
-	phmap::flat_hash_map<RE::ActorHandle, HyperArmorData> HyperArmorTimer;
+	phmap::flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
 	mutable std::shared_mutex HyperArmorTimerMtx;
 
 	struct MultipleAttackers

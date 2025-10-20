@@ -65,7 +65,6 @@ namespace Hooks
 			auto& trampoline = SKSE::GetTrampoline();
 			_OnBeginMeleeHit = trampoline.write_call<5>(OnMeleeHitBase.address() + REL::Relocate(0x38B, 0x45A), OnBeginMeleeHit);
 			logger::info("Hook BeginMeleeHit");
-			logger::info("WARNING: THIS MOD MAY NOT RETURN ON RELOCATION_ID(37650, 38603). THIS MAY RESULT IN COMPATIBILITY ISSUES WITH OTHER SKSE PLUGINS");
 
 		}
 		static void OnBeginMeleeHit(RE::Actor* attacker, RE::Actor* target, std::int64_t a_int1, bool a_bool, void* a_unkptr);

@@ -150,6 +150,8 @@ void AttackHandler::AddLockout(RE::Actor* actor)
 	if (actor->IsAttacking())
 	{
 		actor->NotifyAnimationGraph("attackStop");
+		// sometimes this gets busted so we might have to force reset the state
+		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
 	}
 
 	{

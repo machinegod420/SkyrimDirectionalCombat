@@ -48,23 +48,26 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 				{
 					KeyModifierDown = true;
 				}
+				if (InputSettings::InputType == InputSettings::InputTypes::Keyboard)
+				{
+					if (key == InputSettings::KeyCodeTR)
+					{
+						DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+					}
+					else if (key == InputSettings::KeyCodeTL)
+					{
+						DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
+					}
+					else if (key == InputSettings::KeyCodeBL)
+					{
+						DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+					}
+					else if (key == InputSettings::KeyCodeBR)
+					{
+						DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
+					}
+				}
 
-				if (key == InputSettings::KeyCodeTR)
-				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
-				}
-				else if (key == InputSettings::KeyCodeTL)
-				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
-				}
-				else if (key == InputSettings::KeyCodeBL)
-				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
-				}
-				else if (key == InputSettings::KeyCodeBR)
-				{
-					DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BR);
-				}
 				else if (key == InputSettings::KeyCodeFeint)
 				{
 					AttackHandler::GetSingleton()->HandleFeint(Player);

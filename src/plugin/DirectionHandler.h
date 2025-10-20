@@ -26,6 +26,7 @@ public:
 		ParryVFX = nullptr;
 		BattleaxeKeyword = nullptr;
 		PikeKeyword = nullptr;
+		PikeKeyword2 = nullptr;
 	}
 	static DirectionHandler* GetSingleton()
 	{
@@ -177,6 +178,7 @@ private:
 	// This is so incredibly specific i hate having it
 	RE::BGSKeyword* BattleaxeKeyword;
 	RE::BGSKeyword* PikeKeyword;
+	RE::BGSKeyword* PikeKeyword2;
 
 	// is mapping really better?
 	// 5 compares versus hashing?

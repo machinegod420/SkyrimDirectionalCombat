@@ -30,6 +30,7 @@ void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 	NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
 	BattleaxeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x6D932, "Skyrim.esm");
 	PikeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x0E457E, "NewArmoury.esp");
+	PikeKeyword2 = DataHandler->LookupForm<RE::BGSKeyword>(0x00080D, "MordhauWeaponsReplacer.esp");
 	logger::info("DirectionHandler Initialized");
  }
 
@@ -91,6 +92,7 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 
 void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 {
+
 	if (!UISettings::ShowUI)
 	{
 		return;
@@ -179,7 +181,7 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 			hostileState = UIHostileState::Hostile;
 		}
 		bool FirstPerson = (actor->IsPlayerRef() && RE::PlayerCamera::GetSingleton()->IsInFirstPerson());
-		FirstPerson |= actor->IsPlayerRef() && UISettings::Force1PHud;
+		FirstPerson |= (actor->IsPlayerRef() && UISettings::Force1PHud);
 		RE::NiPoint3 Position = actor->GetPosition() + RE::NiPoint3(0, 0, 90);
 		
 		if (!FirstPerson)
@@ -198,6 +200,11 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 					Position = actor->GetLookingAtLocation();
 				}
 			}
+			actor->SetGraphVariableInt("DirModBodyBlendSelect", 0);
+		}
+		else
+		{
+			actor->SetGraphVariableInt("DirModBodyBlendSelect", 1);
 		}
 		// only mirror if character is facing the camera
 		bool Mirror = DetermineMirrored(actor);
@@ -625,6 +632,8 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 
 void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon)
 {
+	// initialize for correctness
+	actor->SetGraphVariableInt("DirModBodyBlendSelect", 0);
 	// top right by default
 	// battleaxes are thrusting polearms so they get BR
 	ActiveDirectionsMtx.lock();
@@ -639,6 +648,11 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 		actor->AddSpell(BR);
 	}
 	else if (PikeKeyword && weapon->HasKeyword(PikeKeyword))
+	{
+		ActiveDirections[actor->GetHandle()] = Directions::BR;
+		actor->AddSpell(BR);
+	}
+	else if (PikeKeyword2 && weapon->HasKeyword(PikeKeyword2))
 	{
 		ActiveDirections[actor->GetHandle()] = Directions::BR;
 		actor->AddSpell(BR);
@@ -768,11 +782,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	// Only weapons (no H2H)
 	// however, if race can attack then we force it anyway
 	bool RaceCanFight = AIHandler::GetSingleton()->RaceForcedDirectionalCombat(actor);
-	// Is NPC so allow h2h if have setting
-	if (Settings::EnableForH2H && actor->GetRace()->HasKeyword(NPCKeyword))
-	{
-		RaceCanFight = true;
-	}
+	
 	if (!RaceCanFight)
 	{
 		if (!Equipped || (Equipped && !Equipped->IsWeapon()))
@@ -816,7 +826,22 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 
 		return;
 	}
-	
+	//check h2h here
+	if (Weapon && Weapon->IsHandToHandMelee())
+	{
+		if (!Settings::EnableForH2H)
+		{
+			if (HasDirectionalPerks(actor))
+			{
+				logger::info("{} removed cause wepaon is h2h", actor->GetName());
+				ToRemoveMtx.lock();
+				ToRemove.insert(actor->GetHandle());
+				ToRemoveMtx.unlock();
+			}
+			return;
+		}
+	}
+
 	if (WeaponState == RE::WEAPON_STATE::kDrawn)
 	{
 		if (!HasDirectionalPerks(actor))
@@ -847,6 +872,13 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			if (actor->AsActorState()->IsSprinting())
 			{
 				if (PikeKeyword && Weapon && Weapon->HasKeyword(PikeKeyword))
+				{
+					if (GetCurrentDirection(actor) != Directions::BR)
+					{
+						SwitchDirectionSynchronous(actor, Directions::BR, false);
+					}
+				}
+				else if (PikeKeyword2 && Weapon && Weapon->HasKeyword(PikeKeyword2))
 				{
 					if (GetCurrentDirection(actor) != Directions::BR)
 					{

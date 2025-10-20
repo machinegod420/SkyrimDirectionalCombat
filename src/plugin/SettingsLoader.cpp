@@ -14,7 +14,6 @@ float DifficultySettings::ProjectileDamageMult = 0.25f;
 float DifficultySettings::StaggerResetTimer = 1.5f;
 float DifficultySettings::ChamberWindowTime = 0.2f;
 float DifficultySettings::FeintWindowTime = 0.4f;
-float DifficultySettings::HyperarmorTimer = 1.0f;
 float DifficultySettings::StaminaRegenMult = 39.f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;

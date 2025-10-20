@@ -105,13 +105,27 @@ void AIHandler::InitializeValues(PRECISION_API::IVPrecision3* precision)
 	}
 }
 
-void AIHandler::AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir, bool force)
+void AIHandler::AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir, bool force, int priority)
 {
 	std::unique_lock lock(ActionQueueMtx);
 	auto Iter = ActionQueue.find(actor->GetHandle());
 	// don't do anything if we already have the same action queued
+	if (actor->IsBlocking() && toDo == Actions::Block)
+	{
+		return;
+	}
+	if (!actor->IsBlocking() && toDo == Actions::EndBlock)
+	{
+		return;
+	}
 	if (Iter != ActionQueue.end() && Iter->second.toDo == toDo)
 	{
+		return;
+	}
+	// prevent infinite queuing
+	if (Iter != ActionQueue.end() && Iter->second.wasForced && force)
+	{
+		logger::info("duplicate action! {} tried to {} but already was trying to {}", actor->GetName(), (int)toDo, (int)Iter->second.toDo);
 		return;
 	}
 	// hack to prevent anything from getting in the way of resetting state
@@ -120,6 +134,13 @@ void AIHandler::AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir
 	{
 		return;
 	}
+	// short circuit here because this causes issues where the actor will block forever
+	if (Iter != ActionQueue.end() && actor->IsBlocking() && Iter->second.toDo == Actions::EndBlock)
+	{
+		return;
+	}
+
+
 	// if no action or time has expired
 	if (Iter == ActionQueue.end() || force || Iter->second.timeLeft <= 0.f || Iter->second.toDo == Actions::None)
 	{
@@ -127,6 +148,8 @@ void AIHandler::AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir
 		action.timeLeft = CalcActionTimer(actor);
 		action.toDo = toDo;
 		action.targetDir = attackedDir;
+		action.wasForced = force;
+		action.priority = priority;
 		ActionQueue[actor->GetHandle()] = action;
 	}
 
@@ -175,6 +198,7 @@ void AIHandler::DidAct(RE::Actor* actor)
 	UpdateTimerMtx.unlock();
 }
 
+// i abandoned good coding conventions a long time ago
 void AIHandler::RunActor(RE::Actor* actor, float delta)
 {
 	if (actor->GetActorRuntimeData().currentCombatTarget)
@@ -244,10 +268,14 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						// always attack if have perk
 						if (DirHandler->IsUnblockable(actor) && TargetDistSQ < DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ)
 						{
-							AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+							AddAction(actor, AIHandler::Actions::Attack, Directions::TR, true);
+							DifficultyMap[actor->GetHandle()].defending = false;
+							DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
+							DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 							//logger::info("try attacking! {} {}", actor->GetName(), TargetDistSQ);
 						}
-						if (actor->IsAttacking())
+						// always follow up power attack with another attack
+						else if (actor->IsAttacking())
 						{
 							//SwitchToNewDirection(actor, actor);
 							SwitchToNextAttack(actor, true);
@@ -260,21 +288,20 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						{
 							bool ShouldDirectionMatch = false;
 							bool DontChangeDirection = false;
-							bool targetStaggering = false;
+							bool targetStaggering = target->AsActorState()->actorState2.staggered;
 							int mod = (int)CalcAndInsertDifficulty(actor);
-							target->GetGraphVariableBool("IsStaggering", targetStaggering);
 							// Most important case, attempt to defend
 							if (target->IsAttacking() && !DirectionHandler::GetSingleton()->IsUnblockable(target) && !IsBashing(target))
 							{
 								Actions action = GetQueuedAction(actor);
 								// try to block or masterstrike
-								if (action != Actions::Riposte && action != Actions::Block)
+								if (action != Actions::Attack && action != Actions::Block)
 								{
 									
 									if (mt_rand() % 10 < 1 && DirHandler->HasBlockAngle(actor, target))
 									{
 										// masterstrike
-										AddAction(actor, AIHandler::Actions::PowerAttack, Directions::TR, true);
+										AddAction(actor, AIHandler::Actions::PowerAttack, Directions::TR);
 									}
 									else
 									{
@@ -287,16 +314,23 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								}
 								ShouldDirectionMatch = true;
 
-								DifficultyMap[actor->GetHandle()].defending = true;
-								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
-								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+								if (!DifficultyMap[actor->GetHandle()].defending)
+								{
+									DifficultyMap[actor->GetHandle()].defending = true;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+								}
 							}
-							else if (!AttackHandler::GetSingleton()->CanAttack(target) || targetStaggering)
+							else if (!AttackHandler::GetSingleton()->CanAttack(target) || targetStaggering || target->IsBlocking())
 							{
 								// target cant attack so start attacking
-								DifficultyMap[actor->GetHandle()].defending = false;
-								DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = MaxDirectionTracked + 1;
-								DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+								if (DifficultyMap[actor->GetHandle()].defending)
+								{
+									DifficultyMap[actor->GetHandle()].defending = false;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+								}
+								
 								if (actor->IsBlocking())
 								{
 									AddAction(actor, Actions::EndBlock);
@@ -315,7 +349,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								DontChangeDirection = true;
 							}
 							// uh oh, they might bash us!
-							else if (Settings::DMCOSupport && TargetDistSQ < (BashDistanceSq + 3000) && !actor->IsAttacking() && mt_rand() % 8 < ((mod + 1) * 0.5 + 2)
+							else if (Settings::DMCOSupport && TargetDistSQ < (BashDistanceSq + 2000) && !actor->IsAttacking() && mt_rand() % 8 < ((mod + 1) * 0.5 + 2)
 								&& AttackHandler::GetSingleton()->CanAttack(target) && AttackHandler::GetSingleton()->CanAttack(actor) 
 								&& DifficultyMap[actor->GetHandle()].DodgeCooldown <= 0.f && !targetStaggering)
 							{
@@ -332,35 +366,40 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 								}
 							}
 							// too close, try to attack to prevent the bash
-							else if (TargetDistSQ < (BashDistanceSq + 1700) && !actor->IsAttacking() && mt_rand() % 14 < ((mod * 0.5) + 2)
+							else if (TargetDistSQ < (BashDistanceSq + 1500) && !actor->IsAttacking() && mt_rand() % 14 < ((mod * 0.5) + 2)
 								&& AttackHandler::GetSingleton()->CanAttack(target) && AttackHandler::GetSingleton()->CanAttack(actor) 
 								&& CurrentStaminaRatio > 0.3)
 							{
 
 								DontChangeDirection = false;
 								ShouldDirectionMatch = false;
-								DifficultyMap[actor->GetHandle()].defending = false;
+								if (DifficultyMap[actor->GetHandle()].defending)
+								{
+									DifficultyMap[actor->GetHandle()].defending = false;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
+									DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
+								}
 								if (actor->IsBlocking())
 								{
 									AddAction(actor, Actions::EndBlock);
 								}
 								else
 								{
-									AddAction(actor, Actions::Riposte);
+									AddAction(actor, Actions::Attack);
 									
 								}
 
 							}
 							// They guarding the same position a lot, maybe they are attacking?
 							else if (!actor->IsBlocking() && DifficultyMap[actor->GetHandle()].defending 
-								&& DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame > 3)
+								&& DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame > 3 && CurrentStaminaRatio > 0.4)
 							{
 								AddAction(actor, Actions::Block);
 								ShouldDirectionMatch = true;
 							}
 							// Stop blocking to avoid burning stamina
 							else if (actor->IsBlocking() && DifficultyMap.at(actor->GetHandle()).numTimesDirectionSame < 1 && 
-								(mt_rand() % 5 < 3 || CurrentStaminaRatio < 0.4))
+								(mt_rand() % 5 < 3 || CurrentStaminaRatio < 0.6))
 							{
 								AddAction(actor, Actions::EndBlock);
 								DontChangeDirection = true;
@@ -370,8 +409,6 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							if (!AttackHandler::GetSingleton()->CanAttack(actor))
 							{
 								DifficultyMap.at(actor->GetHandle()).defending = true;
-
-								ShouldDirectionMatch = true;
 							}
 							if (DifficultyMap.at(actor->GetHandle()).defending)
 							{
@@ -380,7 +417,8 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 									DifficultyMap.at(actor->GetHandle()).numTimesDirectionsSwitched > MaxDirectionTracked)
 								{
 									DifficultyMap[actor->GetHandle()].defending = false;
-									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = MaxDirectionTracked + 1;
+									// set to 1 because sometimes used as a countdown
+									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
 									DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 								}
 							}
@@ -392,6 +430,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 									if (DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched < 1)
 									{
 										DifficultyMap[actor->GetHandle()].defending = true;
+										DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
 									}
 									DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched--;
 									DontChangeDirection = false;
@@ -427,7 +466,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						if (DifficultyMap.contains(actor->GetHandle()))
 						{
 							ReduceDifficulty(actor);
-							DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 0;
+							DifficultyMap[actor->GetHandle()].numTimesDirectionsSwitched = 1;
 							DifficultyMap[actor->GetHandle()].numTimesDirectionSame = 0;
 							DifficultyMap[actor->GetHandle()].defending = false;
 						}
@@ -513,11 +552,6 @@ bool AIHandler::ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target)
 		}
 	}
 
-	// if target is attacking another angle don't attack wildly ie not masterstriking
-	if (target->IsAttacking() && !HasBlockAngle)
-	{
-		return false;
-	}
 	if (DirectionHandler::GetSingleton()->GetCurrentDirection(actor) ==
 		DifficultyMap[actor->GetHandle()].attackPattern[DifficultyMap[actor->GetHandle()].currentAttackIdx])
 	{
@@ -546,13 +580,11 @@ bool AIHandler::ShouldAttackExternalCalled(RE::Actor* actor, RE::Actor* target)
 			return true;
 		}
 	}
-	else
+
+	// some RNG to attack anyways
+	if (mt_rand() % 10 < 1)
 	{
-		// some RNG to attack anyways
-		if (mt_rand() % 10 < 1 && !HasBlockAngle)
-		{
-			return true;
-		}
+		return true;
 	}
 	return false;
 }
@@ -594,30 +626,22 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor* attacker)
 			}
 			if (ShouldFeint)
 			{
-				if (actor->IsBlocking())
-				{
-					actor->NotifyAnimationGraph("blockStop");
-				}
-				AddAction(actor, AIHandler::Actions::StartFeint, Directions::TR, true);
+				AddAction(actor, Actions::UnblockStartFeint);
 			}
 			else
 			{
-				if (actor->IsBlocking())
-				{
-					actor->NotifyAnimationGraph("blockStop");
-				}
-				AddAction(actor, AIHandler::Actions::Riposte, Directions::TR, true);
+				AddAction(actor, Actions::UnblockRiposte);
 			}
 		}
 		else
 		{
-			AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR);
+			AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock);
 		}
 
 	}
 	else
 	{
-		AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock, Directions::TR);
+		AIHandler::GetSingleton()->AddAction(actor, AIHandler::Actions::EndBlock);
 	}
 }
 
@@ -805,13 +829,13 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 	if (DifficultyMap[ActorHandle].attackPattern[idx] != CounterDirection)
 	{
 		SwitchToNextAttack(actor, true);
-		if (CurrentStaminaRatio > 0.7 && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
+		if (CurrentStaminaRatio > 0.5 && DifficultyMap[actor->GetHandle()].CurrentWeaponLengthSQ < TargetDistSQ)
 		{
 			if (mt_rand() % 8 < mod)
 			{
 				if (mt_rand() % 3 < 2)
 				{
-					AddAction(actor, AIHandler::Actions::Riposte);
+					AddAction(actor, AIHandler::Actions::Attack);
 				}
 				else
 				{
@@ -844,7 +868,7 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 					}
 					else
 					{
-						AddAction(actor, AIHandler::Actions::Riposte);
+						AddAction(actor, AIHandler::Actions::Attack);
 					}
 				}
 			}
@@ -1422,7 +1446,10 @@ void AIHandler::Update(float delta)
 		}
 		else
 		{
-			if (ActionQueueIter->second.toDo == Actions::Riposte)
+			// reset flags, follow up actions may set them again
+			ActionQueueIter->second.wasForced = false;
+			ActionQueueIter->second.priority = 0;
+			if (ActionQueueIter->second.toDo == Actions::Attack)
 			{
 				// sit in queue until we can attack again
 				if (TryAttack(actor, false))
@@ -1441,8 +1468,6 @@ void AIHandler::Update(float delta)
 						ActionQueueIter->second.toDo = Actions::None;
 					}
 				}
-				 
-
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Block)
 			{
@@ -1453,22 +1478,30 @@ void AIHandler::Update(float delta)
 				
 				ActionQueueIter->second.toDo = Actions::None;
 			}
-			else if (ActionQueueIter->second.toDo == Actions::ProBlock)
+			else if (ActionQueueIter->second.toDo == Actions::UnblockRiposte)
 			{
-				actor->NotifyAnimationGraph("blockStart");
-				ActionQueueIter->second.toDo = Actions::None;
+				actor->AsActorState()->actorState2.wantBlocking = 0;
+				actor->NotifyAnimationGraph("blockStop");
+				ActionQueueIter->second.toDo = Actions::Attack;
+				ActionQueueIter->second.timeLeft = 0.1f;
+			}
+			else if (ActionQueueIter->second.toDo == Actions::UnblockStartFeint)
+			{
+				actor->AsActorState()->actorState2.wantBlocking = 0;
+				actor->NotifyAnimationGraph("blockStop");
+				ActionQueueIter->second.toDo = Actions::StartFeint;
+				ActionQueueIter->second.timeLeft = 0.1f;
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Bash)
 			{
 				// dont start if we cannot bash
-				bool staggering = false;
-				actor->GetGraphVariableBool("IsStaggering", staggering);
+				bool staggering = actor->AsActorState()->actorState2.staggered;
 				if (!actor->IsAttacking() && !staggering && AttackHandler::GetSingleton()->CanAttack(actor))
 				{
 					actor->NotifyAnimationGraph("bashStart");
 					actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kBash;
 					ActionQueueIter->second.toDo = Actions::ReleaseBash;
-					ActionQueueIter->second.timeLeft = 0.2f;
+					ActionQueueIter->second.timeLeft = LowestTime;
 					std::unique_lock lock(DifficultyMapMtx);
 					DifficultyMap[actor->GetHandle()].BashCooldown = 2.f;
 				}
@@ -1505,6 +1538,7 @@ void AIHandler::Update(float delta)
 			{
 				if (actor->IsBlocking())
 				{
+					actor->AsActorState()->actorState2.wantBlocking = 0;
 					actor->NotifyAnimationGraph("blockStop");
 				}
 				if (TryAttack(actor, false))
@@ -1513,6 +1547,8 @@ void AIHandler::Update(float delta)
 					// hack fix later
 					ActionQueueIter->second.toDo = Actions::EndFeint;
 					ActionQueueIter->second.timeLeft = DifficultySettings::FeintWindowTime - (CalcActionTimer(actor) * .5f);
+					ActionQueueIter->second.wasForced = true;
+					ActionQueueIter->second.priority = 2;
 				}
 
 
@@ -1524,8 +1560,10 @@ void AIHandler::Update(float delta)
 					AttackHandler::GetSingleton()->HandleFeint(actor);
 
 					// queue another attack
-					ActionQueueIter->second.toDo = Actions::Riposte;
+					ActionQueueIter->second.toDo = Actions::Attack;
 					ActionQueueIter->second.timeLeft = 0.18f;
+					ActionQueueIter->second.wasForced = true;
+					ActionQueueIter->second.priority = 2;
 				}
 				else
 				{
@@ -1574,6 +1612,7 @@ void AIHandler::Update(float delta)
 				}
 
 			}
+
 			// once we have executed, the timeleft should be negative and this should be no action
 			// this is what we use to determine if we are done with actions for this actor
 

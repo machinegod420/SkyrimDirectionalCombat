@@ -53,14 +53,16 @@ namespace Hooks
 					{
 						if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 						{
-							ret.bIgnoreHit = true;
+							logger::info("handle masterstrike! {}", attacker->GetName());
+							//ret.bIgnoreHit = true;
 						}
 					}
 					else
 					{
 						if (BlockHandler::GetSingleton()->HandleMasterstrike(target, attacker))
 						{
-							ret.bIgnoreHit = true;
+							logger::info("handle masterstrike! {}", target->GetName());
+							//ret.bIgnoreHit = true;
 						}
 					}
 				}
@@ -68,7 +70,8 @@ namespace Hooks
 				{
 					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 					{
-						ret.bIgnoreHit = true;
+						logger::info("handle masterstrike! {}", attacker->GetName());
+						//ret.bIgnoreHit = true;
 					}
 				}
 
@@ -105,13 +108,34 @@ namespace Hooks
 			bool TargetUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(target);
 			hitData.totalDamage *= DifficultySettings::MeleeDamageMult;
 
-			if (AttackerUnblockable)
+			if (hitData.weapon)
 			{
-				hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
-				// restore stamina as well
-				attacker->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina,
-					attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
+				if (AttackerUnblockable)
+				{
+					// hack for true armor and to simulate armor piercing effect
+					float damage = hitData.weapon->GetAttackDamage() * DifficultySettings::MeleeDamageMult;
+					damage = std::max(damage, hitData.totalDamage) * DifficultySettings::UnblockableDamageMult;
 
+					hitData.totalDamage = damage;
+					// restore stamina as well
+					attacker->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina,
+						attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
+
+				}
+				bool isTargetStaggered = target->AsActorState()->actorState2.staggered;
+
+				if (isTargetStaggered)
+				{
+					float damage = hitData.weapon->GetAttackDamage() * DifficultySettings::MeleeDamageMult;
+					damage = std::max(damage, hitData.totalDamage) * DifficultySettings::UnblockableDamageMult;
+
+					hitData.totalDamage = damage;
+				}
+				if (target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < hitData.weapon->GetAttackDamage())
+				{
+					float damage = hitData.weapon->GetAttackDamage() * DifficultySettings::MeleeDamageMult;
+					damage = std::max(damage, hitData.totalDamage);
+				}
 			}
 
 			/*
@@ -127,22 +151,23 @@ namespace Hooks
 			}		
 			
 			*/
-
+			
 			if (TargetUnblockable)
 			{
-				hitData.totalDamage *= 0.3f;
+				hitData.totalDamage *= 0.5f;
 				hitData.stagger = 0;
 			}
-			// hacks to try to stop double effects due to enchantments but is clearly inconsistent and non-deterministic
-			if (hitData.flags.any(RE::HitData::Flag::kBash))
+
+			if (hitData.totalDamage < 0.5 && hitData.attackDataSpell 
+				&& (hitData.attackDataSpell->GetSpellType() == RE::MagicSystem::SpellType::kEnchantment || hitData.attackDataSpell->GetDelivery() == RE::MagicSystem::Delivery::kTouch))
 			{
-				hitData.totalDamage = 5;
-			}
-			if (hitData.totalDamage < 1 || !AttackHandler::GetSingleton()->CanAttack(attacker))
-			{
+				
+				logger::info("empty hit {}", hitData.attackDataSpell->GetName());
+				_OnMeleeHit(target, hitData);
 				return;
 			}
 
+			//logger::info("attack info {} {} {}", hitData.totalDamage, hitData.attackData->data.damageMult, hitData.resistedTypedDamage);
 			// only do extra stuff if in melee with directional attacker
 			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 			{
@@ -152,7 +177,7 @@ namespace Hooks
 				{
 					if (target->IsAttacking())
 					{
-						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 1.f);
+						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 0.25f);
 
 					}
 					else
@@ -167,20 +192,23 @@ namespace Hooks
 							{
 								Damage *= 0.2f;
 								// staggers as well
-								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.75f, true);
+								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
+								target->NotifyAnimationGraph("blockStop");
+								hitData.stagger = 100;
 							}
 							else
 							{
 								Damage *= 0.05f;
-								// staggers as well
-								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
+								hitData.stagger = 100;
+								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
 							}
-							_OnMeleeHit(target, hitData);
 							target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
+							_OnMeleeHit(target, hitData);
 							
+							return;
 						}
 						//hitData.stagger = 0;
-						
+						logger::info("failed bash!");
 					}
 
 					return;
@@ -188,10 +216,6 @@ namespace Hooks
 			}
 
 
-			if (hitData.stagger)
-			{
-				hitData.stagger = 2;
-			}
 			if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
 			{
 				hitData.reflectedDamage = 300;
@@ -201,6 +225,13 @@ namespace Hooks
 			// for some reason this flag is the only flag that gets set
 			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
 			{
+				// something happened and a hit happened from someone who already got flagged as unable to attack so we ignore it
+				if (hitData.totalDamage < 0.5 && !AttackHandler::GetSingleton()->CanAttack(attacker))
+				{
+					logger::info("empty hit {} should not have been able to attack", attacker->GetName());
+					return;
+				}
+
 				// manual pushback
 				if (Settings::ExperimentalMode)
 				{
@@ -250,7 +281,6 @@ namespace Hooks
 							AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
 							AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 						}
-
 					}
 					DirectionHandler::GetSingleton()->AddCombo(attacker);
 					//apply lockout to the defender to prevent doubles
@@ -260,16 +290,6 @@ namespace Hooks
 				// prccess hit first in case there are bonuses for attacking staggered characters
 				// and we want to process the hit before we remove the unblockable bonuses
 				_OnMeleeHit(target, hitData);
-				if (!TargetUnblockable)
-				{
-					float magnitude = 0.f;
-					if (AttackerUnblockable)
-					{
-						magnitude = 0.5f;
-					}
-					BlockHandler::GetSingleton()->CauseStagger(target, attacker, magnitude, AttackerUnblockable);
-				}
-
 					
 				return;
 			}
@@ -325,14 +345,14 @@ namespace Hooks
 					{
 						if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 						{
-							return;
+							logger::info("handle masterstrike! {}", attacker->GetName());
 						}
 					}
 					else
 					{
 						if (BlockHandler::GetSingleton()->HandleMasterstrike(target, attacker))
 						{
-							return;
+							logger::info("handle masterstrike! {}", target->GetName());
 						}
 					}
 				}
@@ -340,7 +360,7 @@ namespace Hooks
 				{
 					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 					{
-						return;
+						logger::info("handle masterstrike! {}", attacker->GetName());
 					}
 				}
 			}
@@ -786,7 +806,7 @@ namespace Hooks
 					}
 					if (IsPowerAttacking(actor))
 					{
-						staminaCost *= 2.f;
+						staminaCost *= 1.75f;
 					}
 					actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -staminaCost);
 				}

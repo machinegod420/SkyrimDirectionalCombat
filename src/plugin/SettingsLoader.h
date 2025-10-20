@@ -13,7 +13,6 @@ struct DifficultySettings
 	static float StaggerResetTimer;
 	static float ChamberWindowTime;
 	static float FeintWindowTime;
-	static float HyperarmorTimer;
 	static float StaminaRegenMult;
 	static float AttackTimeoutTime;
 	static bool AttacksCostStamina;

@@ -31,11 +31,12 @@ public:
 	enum class Actions
 	{
 		None,
-		Riposte,
+		Attack,
 		Block,
-		ProBlock,
+		UnblockRiposte,
+		UnblockStartFeint,
 		StartFeint,
-		EndFeint,
+		EndFeint, 
 		Bash,
 		ReleaseBash,
 		EndBlock,
@@ -115,7 +116,7 @@ public:
 private:
 	RE::BGSKeyword* EnableRaceKeyword = nullptr;
 	RE::BGSAction* RightPowerAttackAction = nullptr;
-	void AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir = Directions::TR, bool force = false);
+	void AddAction(RE::Actor* actor, Actions toDo, Directions attackedDir = Directions::TR, bool force = false, int priority = 0);
 	float CalcUpdateTimer(RE::Actor* actor);
 	float CalcActionTimer(RE::Actor* actor);
 	void DidAct(RE::Actor* actor);
@@ -128,6 +129,8 @@ private:
 		float timeLeft;
 		// for pro block
 		Directions targetDir;
+		bool wasForced;
+		int priority;
 	};
 
 	enum class AIState
