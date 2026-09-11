@@ -13,10 +13,10 @@ void InitLogger()
 		return;
 	
 	auto plugin = SKSE::PluginDeclaration::GetSingleton();
-	*path /= fmt::format(FMT_STRING("{}.log"), plugin->GetName());
+	*path /= std::format("{}.log", plugin->GetName());
 
 	std::shared_ptr<spdlog::sinks::sink> sink;
-	if (WinAPI::IsDebuggerPresent()) {
+	if (IsDebuggerPresent()) {
 		sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
 	} else {
 		sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
@@ -64,6 +64,7 @@ void OnDataLoad()
 	FXHandler::GetSingleton()->Initialize();
 	BlockHandler::GetSingleton()->Initialize();
 	AttackHandler::GetSingleton()->Initialize();
+	DodgeHandler::GetSingleton()->Initialize();
 	InputEventHandler::Register();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
@@ -76,6 +77,7 @@ void OnPostLoad()
 	DirectionHandler::GetSingleton()->Cleanup();
 	BlockHandler::GetSingleton()->Cleanup();
 	AttackHandler::GetSingleton()->Cleanup();
+	DodgeHandler::GetSingleton()->Cleanup();
 }
 
 
@@ -99,7 +101,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	InitLogger();
 
 	auto plugin = SKSE::PluginDeclaration::GetSingleton();
-	logger::info("{} v{}"sv, plugin->GetName(), plugin->GetVersion());
+	logger::info("{} v{}"sv, plugin->GetName(), plugin->GetVersion().string());
 
 	SKSE::Init(a_skse);
 

@@ -63,9 +63,10 @@ public:
 	{
 		bool ret = false;
 		DirectionTimersMtx.lock_shared();
-		if (DirectionTimers.contains(actor->GetHandle()))
+		auto Iter = DirectionTimers.find(actor->GetHandle());
+		if (Iter != DirectionTimers.end())
 		{
-			OutDirection = DirectionTimers.at(actor->GetHandle()).dir;
+			OutDirection = Iter->second.dir;
 			ret = true;
 		}
 		DirectionTimersMtx.unlock_shared();
@@ -77,13 +78,96 @@ public:
 	void AdjustActorScale(RE::Actor* actor);
 
 	void Initialize(TDM_API::IVTDM2 *tdm);
+	// Pure capability — does this actor's race/equipment/alive state support
+	// directional combat? Independent of distance, lock state, or current
+	// target.
+	bool CanHaveDirectionalPerks(RE::Actor* actor, RE::TESObjectWEAP*& outWeapon) const;
+
+	bool ShouldHaveDirectionalPerks(RE::Actor* actor, RE::TESObjectWEAP*& outWeapon);
 	void UpdateCharacter(RE::Actor* actor, float delta);
 	void Update(float delta);
 	void SendAnimationEvent(RE::Actor* actor, bool slow);
 	void QueueAnimationEvent(RE::Actor* actor);
 	void ClearAnimationQueue(RE::Actor* actor);
 	void DebuffActor(RE::Actor* actor);
-	void AddCombo(RE::Actor* actor);
+	// ForceComplete grants outright, skipping the direction recording and the
+	// distinctness test. Also skips the consume path, so it can never eat a
+	// token already held.
+	void AddCombo(RE::Actor* actor, bool ForceComplete = false);
+	// The combo rule: every direction in the window must differ.
+	// Pointer + count rather than a container so callers can pass a stack
+	// buffer — WouldCompleteCombo runs under two locks and must not allocate.
+	static bool AllDirectionsDistinct(const Directions* Dirs, int Count)
+	{
+		for (int i = 0; i < Count; ++i)
+		{
+			for (int j = i + 1; j < Count; ++j)
+			{
+				if (Dirs[i] == Dirs[j])
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+	// TR/BR are the right side, TL/BL the left. Used by the same-side combo
+	// penalty: a continuation that crosses is the strong one, staying on the
+	// same side is the weak one.
+	static bool IsLeftSide(Directions Dir)
+	{
+		return Dir == Directions::TL || Dir == Directions::BL;
+	}
+	// Direction of the PREVIOUS landed attack. False when there is no history,
+	// so the opening attack of a chain is never penalised. Read before AddCombo
+	// runs for the current hit, so currentIdx - 1 is the last one recorded.
+	inline bool GetLastAttackDirection(RE::Actor* actor, Directions& OutDirection) const
+	{
+		bool ret = false;
+		ComboDatasMtx.lock_shared();
+		auto Iter = ComboDatas.find(actor->GetHandle());
+		if (Iter != ComboDatas.end() && Iter->second.size > 0)
+		{
+			const ComboData& Data = Iter->second;
+			const int ComboSize = static_cast<int>(Data.lastAttackDirs.size());
+			if (ComboSize > 0)
+			{
+				int LastIdx = Data.currentIdx - 1;
+				if (LastIdx < 0)
+				{
+					LastIdx = ComboSize - 1;
+				}
+				OutDirection = Data.lastAttackDirs[LastIdx];
+				ret = true;
+			}
+		}
+		ComboDatasMtx.unlock_shared();
+		return ret;
+	}
+	// True when dir already appears in the actor's live combo window, so a hit
+	// there cannot advance the combo.
+	inline bool IsInComboWindow(RE::Actor* actor, Directions dir) const
+	{
+		bool ret = false;
+		ComboDatasMtx.lock_shared();
+		auto Iter = ComboDatas.find(actor->GetHandle());
+		if (Iter != ComboDatas.end())
+		{
+			const ComboData& Data = Iter->second;
+			const int Count = std::min(Data.size,
+				static_cast<int>(Data.lastAttackDirs.size()));
+			for (int i = 0; i < Count; ++i)
+			{
+				if (Data.lastAttackDirs[i] == dir)
+				{
+					ret = true;
+					break;
+				}
+			}
+		}
+		ComboDatasMtx.unlock_shared();
+		return ret;
+	}
 	inline unsigned GetRepeatCount(RE::Actor* actor) const
 	{
 		unsigned ret = 0;
@@ -92,6 +176,57 @@ public:
 		if (Iter != ComboDatas.end())
 		{
 			ret = Iter->second.repeatCount;
+		}
+		ComboDatasMtx.unlock_shared();
+		return ret;
+	}
+	// How far into a combo the actor is: 0 fresh, 1 when a single landed hit
+	// would finish it. Stays at 1 while repeats keep failing the distinct rule.
+	inline float GetComboProgress(RE::Actor* actor) const
+	{
+		float ret = 0.f;
+		ComboDatasMtx.lock_shared();
+		auto Iter = ComboDatas.find(actor->GetHandle());
+		if (Iter != ComboDatas.end())
+		{
+			const int ComboSize = static_cast<int>(Iter->second.lastAttackDirs.size());
+			if (ComboSize > 1)
+			{
+				ret = std::clamp(static_cast<float>(Iter->second.size) /
+					static_cast<float>(ComboSize - 1), 0.f, 1.f);
+			}
+		}
+		ComboDatasMtx.unlock_shared();
+		return ret;
+	}
+	// True when a landed hit in NextDirection would complete the combo. size
+	// saturates at comboSize and only resets on a grant, so a size test alone
+	// can't answer this — an actor that has attacked many times sits at the cap
+	// while any distinct direction would still finish.
+	inline bool WouldCompleteCombo(RE::Actor* actor, Directions NextDirection) const
+	{
+		bool ret = false;
+		// stack buffer: this runs under ComboDatasMtx and, via RunActor,
+		// DifficultyMapMtx exclusive — an allocation here would extend both
+		Directions Next[4];
+		ComboDatasMtx.lock_shared();
+		auto Iter = ComboDatas.find(actor->GetHandle());
+		if (Iter != ComboDatas.end())
+		{
+			const ComboData& Data = Iter->second;
+			// the array is sized to comboSize at creation, so it is the
+			// authority — no need to re-derive it from settings here
+			const int ComboSize = static_cast<int>(Data.lastAttackDirs.size());
+			if (ComboSize > 0 && Data.size >= ComboSize - 1 &&
+				ComboSize <= static_cast<int>(std::size(Next)))
+			{
+				for (int i = 0; i < ComboSize; ++i)
+				{
+					Next[i] = Data.lastAttackDirs[i];
+				}
+				Next[Data.currentIdx] = NextDirection;
+				ret = AllDirectionsDistinct(Next, ComboSize);
+			}
 		}
 		ComboDatasMtx.unlock_shared();
 		return ret;
@@ -107,14 +242,25 @@ public:
 	inline bool HasImperfectParry(RE::Actor* actor) const
 	{
 		bool ret = false;
-		UnblockableActorsMtx.lock_shared();
+		ImperfectParryMtx.lock_shared();
 		ret = ImperfectParry.contains(actor->GetHandle());
-		UnblockableActorsMtx.unlock_shared();
+		ImperfectParryMtx.unlock_shared();
 		return ret;
 	}
 	inline bool HasTimedParry(RE::Actor* actor) const;
 
 	void AddTimedParry(RE::Actor* actor);
+
+	// Guard charge ("being set"): wall-clock seconds the actor has held its
+	// current guard line without attacking. Accrued in UpdateCharacter, zeroed
+	// on any completed direction switch and on taking a clean hit. Cashed in at
+	// attack start as a proportional attack-speed bonus — patience buys speed,
+	// mixing up costs it. Same design as the timed parry (commitment earns
+	// readiness), on the offensive side.
+	float GetGuardChargeRatio(RE::Actor* actor) const;
+	// returns the 0-1 ratio AND zeroes the clock — call once, at attack start
+	float ConsumeGuardCharge(RE::Actor* actor);
+	void ResetGuardCharge(RE::Actor* actor);
 
 	static Directions GetCounterDirection(Directions Direction)
 	{
@@ -135,7 +281,7 @@ public:
 		}
 	}
 
-	bool CanSwitch(RE::Actor* actor);
+	bool CanSwitch(RE::Actor* actor) const;
 	void Cleanup();
 
 	inline void StartedAttackWindow(RE::Actor* actor)
@@ -162,6 +308,12 @@ public:
 
 	// DO NOT CALL THIS PUBLICALLY UNLESS IN VERY SPECIFIC SITUATIONS
 	void SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking);
+	// Swaps the direction spells to `dir`. Split out of the switch because
+	// AddSpell/RemoveSpell do NOT apply immediately — the effect list updates on
+	// the actor's own tick, and attack animation selection reads the effect. So
+	// this is issued a tick early while the rest of the switch (ActiveDirections,
+	// the animation event) still lands on time. Idempotent.
+	void ApplyDirectionSpells(RE::Actor* actor, Directions dir);
 private:
 	TDM_API::IVTDM2 *TDM;
 	void CleanupActor(RE::ActorHandle actor);
@@ -246,6 +398,11 @@ private:
 	// Determine who has a timed parry
 	phmap::flat_hash_map<RE::ActorHandle, float> TimedParry;
 	mutable std::shared_mutex TimedParryMtx;
+
+	// Seconds held on the current guard line without attacking (see
+	// GetGuardChargeRatio). Pruned alongside TimedParry in Update.
+	phmap::flat_hash_map<RE::ActorHandle, float> GuardCharge;
+	mutable std::shared_mutex GuardChargeMtx;
 
 	phmap::flat_hash_set<RE::ActorHandle> ToAdd;
 	mutable std::shared_mutex ToAddMtx;

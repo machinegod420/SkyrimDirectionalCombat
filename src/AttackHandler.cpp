@@ -3,9 +3,11 @@
 #include "DirectionHandler.h"
 
 constexpr float NPCLockoutTime = 0.15f;
-constexpr float AttackSpeedMult = 0.35f;
+constexpr float AttackSpeedMult = 0.25f;
 constexpr float SmallAttackSpeedMult = 0.12f;
 constexpr float FeintQueueTime = 0.2f; // carefully tailored magic number
+// Leak-guard only. 
+constexpr float ChargeBuffDuration = 3.0f;
 
 void AttackHandler::Initialize()
 {
@@ -58,9 +60,9 @@ bool AttackHandler::InFeintWindow(RE::Actor* actor)
 
 void AttackHandler::RemoveFeintWindow(RE::Actor* actor)
 {
-	FeintWindowMtx.lock_shared();
+	// Exclusive lock — erase is a write, and mutating under a shared lock is UB.
+	std::unique_lock lock(FeintWindowMtx);
 	FeintWindow.erase(actor->GetHandle());
-	FeintWindowMtx.unlock_shared();
 }
 
 bool AttackHandler::CanAttack(RE::Actor* actor)
@@ -72,6 +74,28 @@ bool AttackHandler::CanAttack(RE::Actor* actor)
 	AttackLockoutMtx.unlock_shared();
 
 	return ret;
+}
+
+bool AttackHandler::CanInitiateAttack(RE::Actor* actor)
+{
+	if (!CanAttack(actor))
+	{
+		return false;
+	}
+	if (InFeintWindow(actor) || InFeintQueue(actor))
+	{
+		return false;
+	}
+	if (DifficultySettings::AttacksCostStamina)
+	{
+		auto* Values = actor->AsActorValueOwner();
+		if (Values->GetActorValue(RE::ActorValue::kStamina) <
+			Values->GetPermanentActorValue(RE::ActorValue::kStamina) * DifficultySettings::StaminaCost)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 void AttackHandler::HandleFeintChangeDirection(RE::Actor* actor)
@@ -106,7 +130,7 @@ void AttackHandler::HandleFeint(RE::Actor* actor)
 
 		//actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
 		actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(FeintFX, false, actor, 0.f, false, 0.f, nullptr);
-		actor->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -15);
+		actor->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,15);
 		HandleFeintChangeDirection(actor);
 		GiveAttackSpeedBuff(actor);
 		FeintWindow.erase(actor->GetHandle());
@@ -151,6 +175,7 @@ void AttackHandler::AddLockout(RE::Actor* actor)
 	{
 		actor->NotifyAnimationGraph("attackStop");
 		// sometimes this gets busted so we might have to force reset the state
+		// there's actually big problems with setting state like this as skyrim has certain expectations on what state is filled in the actor as well
 		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
 	}
 
@@ -182,7 +207,7 @@ void DoAction(RE::Actor* actor, RE::BGSAction* action)
 	bool succ = func(data.get());
 	if (!succ)
 	{
-		logger::info("failed attack action! {}", actor->GetName());
+		if (Settings::VerboseLogging) logger::info("[attack] failed attack action! {}", actor->GetName());
 	}
 }
 
@@ -212,55 +237,23 @@ void AttackHandler::Cleanup()
 	FeintWindowMtx.unlock();
 
 	{
-		// make sure we reset values!
-		SpeedBuffMtx.lock();
-		auto SpeedIter = SpeedBuff.begin();
-		while (SpeedIter != SpeedBuff.end())
+		// One pass: back out each actor's applied net, then drop everything.
+		std::unique_lock lock(SpeedModsMtx);
+		for (auto& Entry : SpeedMods)
 		{
-			if (!SpeedIter->first)
+			if (!Entry.first)
 			{
-				SpeedIter = SpeedBuff.erase(SpeedIter);
 				continue;
 			}
-			RE::Actor* actor = SpeedIter->first.get().get();
-			if (!actor)
+			if (RE::Actor* actor = Entry.first.get().get())
 			{
-				SpeedIter = SpeedBuff.erase(SpeedIter);
-				continue;
+				if (Entry.second.appliedDelta != 0.f)
+				{
+					actor->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kWeaponSpeedMult, -Entry.second.appliedDelta);
+				}
 			}
-
-			SpeedIter = SpeedBuff.erase(SpeedIter);
-			actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -AttackSpeedMult);
-			continue;
 		}
-		SpeedBuff.clear();
-		SpeedBuffMtx.unlock();
-	}
-
-	{
-		// make sure we reset values!
-		SmallSpeedBuffMtx.lock();
-		auto SpeedIter = SmallSpeedBuff.begin();
-		while (SpeedIter != SmallSpeedBuff.end())
-		{
-			if (!SpeedIter->first)
-			{
-				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-				continue;
-			}
-			RE::Actor* actor = SpeedIter->first.get().get();
-			if (!actor)
-			{
-				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-				continue;
-			}
-
-			SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-			actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
-			continue;
-		}
-		SmallSpeedBuff.clear();
-		SmallSpeedBuffMtx.unlock();
+		SpeedMods.clear();
 	}
 }
 
@@ -277,50 +270,95 @@ void AttackHandler::RemoveActor(RE::ActorHandle actor)
 	FeintWindow.erase(actor);
 	FeintWindowMtx.unlock();
 
+	RE::Actor* a = actor.get().get();
+
 	{
-		// make sure we reset values!
-		SpeedBuffMtx.lock();
-		if (SpeedBuff.contains(actor))
+		std::unique_lock lock(SpeedModsMtx);
+		auto Iter = SpeedMods.find(actor);
+		if (Iter != SpeedMods.end())
 		{
-			SpeedBuff.erase(actor);
-			
-			actor.get().get()->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -AttackSpeedMult);
+			if (a && Iter->second.appliedDelta != 0.f)
+			{
+				a->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kWeaponSpeedMult, -Iter->second.appliedDelta);
+			}
+			SpeedMods.erase(Iter);
 		}
-		SpeedBuffMtx.unlock();
 	}
+}
+
+// The single point that writes WeaponSpeedMult. Backs out the previously
+// applied value and applies the new net — never a recomputed removal, so the
+// two can't drift even if a slot's inputs changed underneath.
+
+void AttackHandler::ApplySpeedNet(RE::Actor* actor, SpeedEntry& Entry)
+{
+	const float Target = Entry.Chain.Live() + Entry.SmallChain.Live() +
+		Entry.Charge.Live() + Entry.SameSide.Live();
+	if (Target == Entry.appliedDelta)
+	{
+		return;
+	}
+	if (Entry.appliedDelta != 0.f)
+	{
+		actor->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kWeaponSpeedMult, -Entry.appliedDelta);
+	}
+	if (Target != 0.f)
+	{
+		actor->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kWeaponSpeedMult, Target);
+	}
+	Entry.appliedDelta = Target;
 }
 
 void AttackHandler::GiveAttackSpeedBuff(RE::Actor* actor)
 {
-	SpeedBuffMtx.lock();
-	if (!SpeedBuff.contains(actor->GetHandle()))
-	{
-		SpeedBuff[actor->GetHandle()] = 1.f; 
-		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, AttackSpeedMult);
-	}
-	SpeedBuffMtx.unlock();
+	std::unique_lock lock(SpeedModsMtx);
+	auto& Entry = SpeedMods[actor->GetHandle()];
+	Entry.Chain.Set(AttackSpeedMult, 1.f);
+	ApplySpeedNet(actor, Entry);
 }
 
 void AttackHandler::GiveSmallAttackSpeedBuff(RE::Actor* actor)
 {
-	SmallSpeedBuffMtx.lock();
-	if (!SmallSpeedBuff.contains(actor->GetHandle()))
-	{
-		SmallSpeedBuff[actor->GetHandle()] = 2.f;
-		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, SmallAttackSpeedMult);
-	}
-	SmallSpeedBuffMtx.unlock();
+	std::unique_lock lock(SpeedModsMtx);
+	auto& Entry = SpeedMods[actor->GetHandle()];
+	Entry.SmallChain.Set(SmallAttackSpeedMult, 2.f);
+	ApplySpeedNet(actor, Entry);
+}
+
+// Signed: this slot carries the NET attack-speed delta at swing start, not just
+// the charge bonus. The same-side penalty rides here rather than becoming a
+// fourth WeaponSpeedMult consumer — three already write to that actor value
+// (AttackSpeedMult, SmallAttackSpeedMult, and this), each with its own removal
+// sites, and a missed removal is permanent speed drift on that actor. Netting
+// into an existing slot adds no bookkeeping and no new cleanup paths.
+void AttackHandler::GiveChargeSpeedBuff(RE::Actor* actor, float Ratio)
+{
+	std::unique_lock lock(SpeedModsMtx);
+	auto& Entry = SpeedMods[actor->GetHandle()];
+	Entry.Charge.Set(std::clamp(Ratio, 0.f, 1.f) * DifficultySettings::GuardChargeMaxSpeedBonus,
+		ChargeBuffDuration);
+	ApplySpeedNet(actor, Entry);
+}
+
+void AttackHandler::SetSameSideSpeedPenalty(RE::Actor* actor, bool Penalise)
+{
+	std::unique_lock lock(SpeedModsMtx);
+	auto& Entry = SpeedMods[actor->GetHandle()];
+	Entry.SameSide.Set(-DifficultySettings::SameSideSpeedPenalty,
+		Penalise ? ChargeBuffDuration : 0.f);
+	ApplySpeedNet(actor, Entry);
 }
 
 void AttackHandler::RemoveSmallAttackSpeedBuff(RE::Actor* actor)
 {
-	SmallSpeedBuffMtx.lock();
-	if (SmallSpeedBuff.contains(actor->GetHandle()))
+	std::unique_lock lock(SpeedModsMtx);
+	auto Iter = SpeedMods.find(actor->GetHandle());
+	if (Iter == SpeedMods.end())
 	{
-		actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
-		SmallSpeedBuff.erase(actor->GetHandle());
+		return;
 	}
-	SmallSpeedBuffMtx.unlock();
+	Iter->second.SmallChain.Set(0.f, 0.f);
+	ApplySpeedNet(actor, Iter->second);
 }
 
 void AttackHandler::Update(float delta)
@@ -373,6 +411,13 @@ void AttackHandler::Update(float delta)
 			AttackIter->second -= delta;
 			if (AttackIter->second <= 0)
 			{
+				// Same as the stagger case: a blocked attack recoils out to a
+				// default idle instead of the directional one. Skipped
+				// mid-attack so a ForceIdle can't cancel a fresh swing.
+				if (!actor->IsAttacking())
+				{
+					DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
+				}
 				AttackIter = AttackLockout.erase(AttackIter);
 				continue;
 			}
@@ -443,61 +488,40 @@ void AttackHandler::Update(float delta)
 	}
 
 	{
-
-		SpeedBuffMtx.lock();
-		auto SpeedIter = SpeedBuff.begin();
-		while (SpeedIter != SpeedBuff.end())
+		// One expiry pass for every speed contribution. Each slot runs its own
+		// clock; when one lapses the net is recomputed and the actor value moved
+		// to it, so a lapsing slot can never remove more (or less) than it added.
+		std::unique_lock lock(SpeedModsMtx);
+		auto Iter = SpeedMods.begin();
+		while (Iter != SpeedMods.end())
 		{
-			if (!SpeedIter->first)
+			if (!Iter->first)
 			{
-				SpeedIter = SpeedBuff.erase(SpeedIter);
+				Iter = SpeedMods.erase(Iter);
 				continue;
 			}
-			RE::Actor* actor = SpeedIter->first.get().get();
+			RE::Actor* actor = Iter->first.get().get();
 			if (!actor)
 			{
-				SpeedIter = SpeedBuff.erase(SpeedIter);
+				Iter = SpeedMods.erase(Iter);
 				continue;
 			}
-			SpeedIter->second -= delta;
-			if (SpeedIter->second <= 0)
+			SpeedEntry& Entry = Iter->second;
+			Entry.Chain.Tick(delta);
+			Entry.SmallChain.Tick(delta);
+			Entry.Charge.Tick(delta);
+			Entry.SameSide.Tick(delta);
+			ApplySpeedNet(actor, Entry);
+			// Nothing live and nothing applied: drop the entry entirely.
+			if (!Entry.Chain.Active() && !Entry.SmallChain.Active() &&
+				!Entry.Charge.Active() && !Entry.SameSide.Active() &&
+				Entry.appliedDelta == 0.f)
 			{
-				SpeedIter = SpeedBuff.erase(SpeedIter);
-				actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -AttackSpeedMult);
+				Iter = SpeedMods.erase(Iter);
 				continue;
 			}
-			SpeedIter++;
+			++Iter;
 		}
-		SpeedBuffMtx.unlock();
-	}
-
-	{
-
-		SmallSpeedBuffMtx.lock();
-		auto SpeedIter = SmallSpeedBuff.begin();
-		while (SpeedIter != SmallSpeedBuff.end())
-		{
-			if (!SpeedIter->first)
-			{
-				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-				continue;
-			}
-			RE::Actor* actor = SpeedIter->first.get().get();
-			if (!actor)
-			{
-				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-				continue;
-			}
-			SpeedIter->second -= delta;
-			if (SpeedIter->second <= 0)
-			{
-				SpeedIter = SmallSpeedBuff.erase(SpeedIter);
-				actor->AsActorValueOwner()->ModActorValue(RE::ActorValue::kWeaponSpeedMult, -SmallAttackSpeedMult);
-				continue;
-			}
-			SpeedIter++;
-		}
-		SmallSpeedBuffMtx.unlock();
 	}
 
 	{

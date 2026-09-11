@@ -20,7 +20,10 @@ public:
 
 	bool InChamberWindow(RE::Actor* actor);
 	float GetChamberWindowTime(RE::Actor* actor);
+	// Attack lockout only. For "may this actor swing right now", use
+	// CanInitiateAttack — this one is also read as a strategic signal.
 	bool CanAttack(RE::Actor* actor);
+	bool CanInitiateAttack(RE::Actor* actor);
 	bool InFeintWindow(RE::Actor* actor);
 
 	void AddChamberWindow(RE::Actor* actor);
@@ -37,6 +40,15 @@ public:
 	void GiveAttackSpeedBuff(RE::Actor* actor);
 	void GiveSmallAttackSpeedBuff(RE::Actor* actor);
 	void RemoveSmallAttackSpeedBuff(RE::Actor* actor);
+	// Guard-charge attack speed: Ratio is 0-1 from DirectionHandler's guard
+	// charge, cashed in at swing start.
+	void GiveChargeSpeedBuff(RE::Actor* actor, float Ratio);
+	// Attack-speed penalty for a cut thrown from the same horizontal side as the
+	// last one. Its own slot rather than netted into the charge: unrelated
+	// mechanic, and it must keep applying when guard charge is switched off.
+	// Passing false clears it. Everything here routes through ApplySpeedNet;
+	// none of it touches WeaponSpeedMult directly.
+	void SetSameSideSpeedPenalty(RE::Actor* actor, bool Penalise);
 	
 	void AddLockout(RE::Actor* actor);
 	void HandleFeint(RE::Actor* actor);
@@ -91,11 +103,49 @@ private:
 	phmap::flat_hash_map<RE::ActorHandle, float> AttackLockout;
 	mutable std::shared_mutex AttackLockoutMtx;
 
-	phmap::flat_hash_map<RE::ActorHandle, float> SpeedBuff;
-	mutable std::shared_mutex SpeedBuffMtx;
 
-	phmap::flat_hash_map<RE::ActorHandle, float> SmallSpeedBuff;
-	mutable std::shared_mutex SmallSpeedBuffMtx;
+	// One contribution: a delta and its own clock. Expiring zeroes the delta so
+	// a lapsed slot contributes nothing without needing to be erased.
+	struct SpeedMod
+	{
+		float Delta = 0.f;
+		float TimeLeft = 0.f;
+		bool Active() const { return TimeLeft > 0.f; }
+		float Live() const { return TimeLeft > 0.f ? Delta : 0.f; }
+		void Set(float NewDelta, float Duration)
+		{
+			Delta = (Duration > 0.f) ? NewDelta : 0.f;
+			TimeLeft = (Duration > 0.f) ? Duration : 0.f;
+		}
+		void Tick(float delta)
+		{
+			if (TimeLeft <= 0.f)
+			{
+				return;
+			}
+			TimeLeft -= delta;
+			if (TimeLeft <= 0.f)
+			{
+				Set(0.f, 0.f);
+			}
+		}
+	};
+	struct SpeedEntry
+	{
+		SpeedMod Chain;       // attack chain, 1s
+		SpeedMod SmallChain;  // small attack chain, 2s
+		SpeedMod Charge;      // guard charge cashed in at swing start
+		SpeedMod SameSide;    // negative: combo continued on the same side
+		// The one value ever written to WeaponSpeedMult for this actor. Removals
+		// use THIS, never a recomputed figure, so the slots above can change
+		// underneath without the two drifting apart.
+		float appliedDelta = 0.f;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, SpeedEntry> SpeedMods;
+	mutable std::shared_mutex SpeedModsMtx;
+	// Recomputes the net from live slots and moves the actor value to it.
+	// Caller holds SpeedModsMtx.
+	void ApplySpeedNet(RE::Actor* actor, SpeedEntry& Entry);
 
 	struct AttackChain
 	{

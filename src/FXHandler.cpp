@@ -6,6 +6,9 @@ void FXHandler::Initialize()
 	MasterstrikeSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xEBC26, "Skyrim.esm");
 	MasterstrikeSound2 = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3F37C, "Skyrim.esm");
 	BlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x4D2DE, "Skyrim.esm");
+	//TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xF69C2, "Skyrim.esm");
+	TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x10F804, "Skyrim.esm");
+	TimedBlockSound2 = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3EDD8, "Skyrim.esm");
 	logger::info("FXHandler Initialized");
 }
 
@@ -41,6 +44,13 @@ static inline char set_sound_position(RE::BSSoundHandle* a1, float x, float y, f
 void FXHandler::PlayBlock(RE::Actor* actor)
 {
 	PlaySound(actor, BlockSound);
+}
+
+void FXHandler::PlayTimedBlock(RE::Actor* actor)
+{
+	PlaySound(actor, TimedBlockSound);
+	PlaySound(actor, TimedBlockSound);
+	PlaySound(actor, TimedBlockSound2);
 }
 
 void FXHandler::PlayMasterstrike(RE::Actor* actor)

@@ -7,25 +7,37 @@
             sectionName, #settingName, settingsClass::settingName); \
     } while (0)
 
-float DifficultySettings::ComboResetTimer = 4.f;
+float DifficultySettings::ComboResetTimer = 3.f;
 float DifficultySettings::MeleeDamageMult = 2.f;
-float DifficultySettings::UnblockableDamageMult = 3.f;
+float DifficultySettings::SameSideSpeedPenalty = 0.15f;
+float DifficultySettings::UnblockableDamageMult = 2.5f;
 float DifficultySettings::ProjectileDamageMult = 0.25f;
 float DifficultySettings::StaggerResetTimer = 1.5f;
 float DifficultySettings::ChamberWindowTime = 0.2f;
 float DifficultySettings::FeintWindowTime = 0.4f;
 float DifficultySettings::StaminaRegenMult = 39.f;
+float DifficultySettings::MaxRegenBonus = 0.5f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
 float DifficultySettings::StaminaCost = 0.1f;
-float DifficultySettings::WeaponWeightStaminaMult = 0.33f;
+float DifficultySettings::WeaponWeightStaminaMult = 0.25f;
 float DifficultySettings::KnockbackMult = 2.f;
 float DifficultySettings::StaminaDamageCap = 0.4f;
-float DifficultySettings::DMCODodgeCost = 0.4f;
+float DifficultySettings::BlockCostRatio = 0.1f;
+float DifficultySettings::BlockSkillMaxReduction = 0.5f;
+float DifficultySettings::PowerAttackBlockCostMult = 1.75f;
+float DifficultySettings::PowerAttackStaminaMult = 1.5f;
+float DifficultySettings::DodgeCost = 0.15f;
 float DifficultySettings::TimedBlockStartup = 0.333f;
 float DifficultySettings::TimedBlockActiveTime = 0.2f;
 float DifficultySettings::TimedBlockCooldown = 0.2f;
+bool DifficultySettings::KCDStyleCombos = false;
+bool DifficultySettings::EnableGuardCharge = true;
+float DifficultySettings::GuardChargeStartup = 0.5f;
+float DifficultySettings::GuardChargeFull = 2.0f;
+// for scale: the existing small attack-speed buff is 0.12, the full one 0.25
+float DifficultySettings::GuardChargeMaxSpeedBonus = 0.20f;
 
 float Settings::ActiveDistance = 4000.f;
 bool Settings::HasPrecision = false;
@@ -34,22 +46,26 @@ bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
 bool Settings::ForHonorMode = false;
 bool Settings::ExperimentalMode = false;
-bool Settings::DMCOSupport = false;
+DodgeSystem Settings::ActiveDodgeSystem = DodgeSystem::None;
 bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
 bool Settings::VerboseLogging = false;
+bool Settings::TDMOnlyLockedHumanoids = false;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
 unsigned InputSettings::KeyModifierCode = 56;
+bool InputSettings::KeyModifierLocksCamera = false;
 unsigned InputSettings::KeyCodeTR = 2;
 unsigned InputSettings::KeyCodeTL = 3;
 unsigned InputSettings::KeyCodeBL = 4;
 unsigned InputSettings::KeyCodeBR = 5;
 unsigned InputSettings::KeyCodeFeint = 16;
 unsigned InputSettings::KeyCodeBash = 18;
+unsigned InputSettings::KeyCodePowerAttack = 260;
 unsigned InputSettings::KeyCodeSwitchHud = 6;
+unsigned InputSettings::KeyCodeDodge = 56;
 bool InputSettings::InvertY = false;
 
 bool WeaponSettings::RebalanceWeapons = true;
@@ -72,19 +88,36 @@ float AISettings::AIDifficultyMult = 1.0f;
 float AISettings::AIGrowthFactor = 0.01f;
 float AISettings::AIMistakeRatio = 2.0f;
 
-float AISettings::LegendaryUpdateTimer = 0.15f;
-float AISettings::VeryHardUpdateTimer = 0.18f;
-float AISettings::HardUpdateTimer = 0.2f;
-float AISettings::NormalUpdateTimer = 0.2f;
-float AISettings::EasyUpdateTimer = 0.24f;
-float AISettings::VeryEasyUpdateTimer = 0.3f;
+int AISettings::PreBlockBeliefThreshold = 40;
+int AISettings::BeliefAccumBase = 5;
+int AISettings::MaxDirectionTracked = 5;
+float AISettings::PreBlockBaseChance = 20.f;
+float AISettings::PreBlockCautionScale = 55.f;
+float AISettings::PreBlockMaxChance = 75.f;
+float AISettings::ConditionedFixationSeconds = 0.5f;
+float AISettings::CommitWindowTicks = 1.0f;
+float AISettings::DefendPatienceSeconds = 2.0f;
+float AISettings::ComboReadStrength = 0.5f;
+float AISettings::ComboReadLowTierScale = 0.2f;
+float AISettings::BeliefDisconfirmFraction = 0.5f;
+int AISettings::BeliefDisconfirmFloor = 5;
+int AISettings::BeliefCascadeDrain = 5;
+int AISettings::BeliefSpreadModifierHit = 4;
+int AISettings::BeliefSpreadModifierBlock = 5;
 
-float AISettings::LegendaryActionTimer = 0.13f;
-float AISettings::VeryHardActionTimer = 0.17f;
-float AISettings::HardActionTimer = 0.2f;
-float AISettings::NormalActionTimer = 0.2f;
-float AISettings::EasyActionTimer = 0.24f;
-float AISettings::VeryEasyActionTimer = 0.28f;
+float AISettings::LegendaryUpdateTimer = 0.15f;
+float AISettings::VeryHardUpdateTimer = 0.16f;
+float AISettings::HardUpdateTimer = 0.16f;
+float AISettings::NormalUpdateTimer = 0.16f;
+float AISettings::EasyUpdateTimer = 0.18f;
+float AISettings::VeryEasyUpdateTimer = 0.18f;
+
+float AISettings::LegendaryActionTimer = 0.15f;
+float AISettings::VeryHardActionTimer = 0.16f;
+float AISettings::HardActionTimer = 0.16f;
+float AISettings::NormalActionTimer = 0.17f;
+float AISettings::EasyActionTimer = 0.18f;
+float AISettings::VeryEasyActionTimer = 0.18f;
 
 float UISettings::Size = 300.f;
 float UISettings::Length = 13.f;
@@ -97,6 +130,8 @@ bool UISettings::OnlyShowTargetted = true;
 float UISettings::NPCUIScale = 0.9f;
 float UISettings::PlayerUIScale = 1.f;
 bool UISettings::Force1PHud = false;
+bool UISettings::ShowConditioningArcs = true;
+bool UISettings::ShowDebugOverlay = false;
 
 void SettingsLoader::InitializeDefaultValues()
 {
@@ -137,6 +172,11 @@ void SettingsLoader::Load(const std::string& path)
 					int newval = field.as<unsigned>();
 					SETTING_MACRO(sectionName, InputSettings, KeyModifierCode, newval);
 				}
+				else if (fieldName == "KeyModifierLocksCamera")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, InputSettings, KeyModifierLocksCamera, newval);
+				}
 				else if (fieldName == "MouseSens")
 				{
 					int newval = field.as<unsigned>();
@@ -172,10 +212,20 @@ void SettingsLoader::Load(const std::string& path)
 					int newval = field.as<unsigned>();
 					SETTING_MACRO(sectionName, InputSettings, KeyCodeBash, newval);
 				}
+				else if (fieldName == "KeyCodePowerAttack")
+				{
+					int newval = field.as<unsigned>();
+					SETTING_MACRO(sectionName, InputSettings, KeyCodePowerAttack, newval);
+				}
 				else if (fieldName == "KeyCodeSwitchHud")
 				{
 					int newval = field.as<unsigned>();
 					SETTING_MACRO(sectionName, InputSettings, KeyCodeSwitchHud, newval);
+				}
+				else if (fieldName == "KeyCodeDodge")
+				{
+					int newval = field.as<unsigned>();
+					SETTING_MACRO(sectionName, InputSettings, KeyCodeDodge, newval);
 				}
 				else if (fieldName == "InvertY")
 				{
@@ -192,7 +242,14 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::MeleeDamageMult);
 				}
-				if (fieldName == "UnblockableDamageMult")
+				else if (fieldName == "SameSideSpeedPenalty")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::SameSideSpeedPenalty = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::SameSideSpeedPenalty);
+				}
+				else if (fieldName == "UnblockableDamageMult")
 				{
 					float newval = field.as<float>();
 					DifficultySettings::UnblockableDamageMult = newval;
@@ -256,12 +313,24 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::StaminaRegenMult);
 				}
+				else if (fieldName == "MaxRegenBonus")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, MaxRegenBonus, newval);
+				}
 				else if (fieldName == "StaminaCost")
 				{
 					float newval = field.as<float>();
 					DifficultySettings::StaminaCost = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::StaminaCost);
+				}
+				else if (fieldName == "DodgeCost")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::DodgeCost = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::DodgeCost);
 				}
 				else if (fieldName == "KnockbackMult")
 				{
@@ -274,6 +343,71 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, DifficultySettings, StaminaDamageCap, newval);
+				}
+				else if (fieldName == "WeaponWeightStaminaMult")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, WeaponWeightStaminaMult, newval);
+				}
+				else if (fieldName == "BlockCostRatio")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, BlockCostRatio, newval);
+				}
+				else if (fieldName == "BlockSkillMaxReduction")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, BlockSkillMaxReduction, newval);
+				}
+				else if (fieldName == "PowerAttackBlockCostMult")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, PowerAttackBlockCostMult, newval);
+				}
+				else if (fieldName == "PowerAttackStaminaMult")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, PowerAttackStaminaMult, newval);
+				}
+				else if (fieldName == "TimedBlockStartup")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, TimedBlockStartup, newval);
+				}
+				else if (fieldName == "TimedBlockActiveTime")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, TimedBlockActiveTime, newval);
+				}
+				else if (fieldName == "TimedBlockCooldown")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, TimedBlockCooldown, newval);
+				}
+				else if (fieldName == "KCDStyleCombos")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, DifficultySettings, KCDStyleCombos, newval);
+				}
+				else if (fieldName == "EnableGuardCharge")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, DifficultySettings, EnableGuardCharge, newval);
+				}
+				else if (fieldName == "GuardChargeStartup")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, GuardChargeStartup, newval);
+				}
+				else if (fieldName == "GuardChargeFull")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, GuardChargeFull, newval);
+				}
+				else if (fieldName == "GuardChargeMaxSpeedBonus")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, GuardChargeMaxSpeedBonus, newval);
 				}
 			}
 			else if (sectionName == "AI")
@@ -298,6 +432,86 @@ void SettingsLoader::Load(const std::string& path)
 					AISettings::AIMistakeRatio = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, AISettings::AIMistakeRatio);
+				}
+				else if (fieldName == "PreBlockBeliefThreshold")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, PreBlockBeliefThreshold, newval);
+				}
+				else if (fieldName == "BeliefAccumBase")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, BeliefAccumBase, newval);
+				}
+				else if (fieldName == "MaxDirectionTracked")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, MaxDirectionTracked, newval);
+				}
+				else if (fieldName == "PreBlockBaseChance")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, PreBlockBaseChance, newval);
+				}
+				else if (fieldName == "PreBlockCautionScale")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, PreBlockCautionScale, newval);
+				}
+				else if (fieldName == "PreBlockMaxChance")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, PreBlockMaxChance, newval);
+				}
+				else if (fieldName == "ConditionedFixationSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, ConditionedFixationSeconds, newval);
+				}
+				else if (fieldName == "CommitWindowTicks")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, CommitWindowTicks, newval);
+				}
+				else if (fieldName == "DefendPatienceSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, DefendPatienceSeconds, newval);
+				}
+				else if (fieldName == "ComboReadStrength")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, ComboReadStrength, newval);
+				}
+				else if (fieldName == "ComboReadLowTierScale")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, ComboReadLowTierScale, newval);
+				}
+				else if (fieldName == "BeliefDisconfirmFraction")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, BeliefDisconfirmFraction, newval);
+				}
+				else if (fieldName == "BeliefDisconfirmFloor")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, BeliefDisconfirmFloor, newval);
+				}
+				else if (fieldName == "BeliefCascadeDrain")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, BeliefCascadeDrain, newval);
+				}
+				else if (fieldName == "BeliefSpreadModifierHit")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, BeliefSpreadModifierHit, newval);
+				}
+				else if (fieldName == "BeliefSpreadModifierBlock")
+				{
+					int newval = field.as<int>();
+					SETTING_MACRO(sectionName, AISettings, BeliefSpreadModifierBlock, newval);
 				}
 				else if (fieldName == "VeryEasyLvl")
 				{
@@ -492,6 +706,16 @@ void SettingsLoader::Load(const std::string& path)
 					bool newval = field.as<bool>();
 					SETTING_MACRO(sectionName, UISettings, Force1PHud, newval);
 				}
+				else if (fieldName == "ShowConditioningArcs")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, UISettings, ShowConditioningArcs, newval);
+				}
+				else if (fieldName == "ShowDebugOverlay")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, UISettings, ShowDebugOverlay, newval);
+				}
 			}
 			else if (sectionName == "Settings")
 			{
@@ -523,12 +747,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::ExperimentalMode);
 				}
-				else if (fieldName == "DMCOSupport")
+				else if (fieldName == "DodgeSystem")
 				{
-					bool newval = field.as<bool>();
-					Settings::DMCOSupport = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, Settings::DMCOSupport);
+					int newval = field.as<int>();
+					Settings::ActiveDodgeSystem = static_cast<DodgeSystem>(newval);
+					logger::info("Loaded section {} setting {} with new value {} ({})",
+						sectionName, fieldName, newval,
+						newval == 1 ? "DMCO" : (newval == 2 ? "Custom" : "None"));
 				}
 				else if (fieldName == "SwitchingCostsStamina")
 				{
@@ -555,6 +780,13 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					bool newval = field.as<bool>();
 					Settings::VerboseLogging = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::VerboseLogging);
+				}
+				else if (fieldName == "TDMOnlyHumanoids")
+				{
+					bool newval = field.as<bool>();
+					Settings::TDMOnlyLockedHumanoids = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::VerboseLogging);
 				}
@@ -677,7 +909,7 @@ void SettingsLoader::RebalanceWeapons()
 
 		//actor->combatStyle->meleeData.powerAttackBlockingMult = 0.33f;
 		//actor->combatStyle->meleeData.powerAttackIncapacitatedMult = 0.5f;
-		combatStyle->meleeData.specialAttackMult = 0.2f;
+		//combatStyle->meleeData.specialAttackMult = 0.2f;
 		combatStyle->meleeData.bashPowerAttackMult = 0.f;
 		combatStyle->meleeData.bashAttackMult = 0.f;
 		combatStyle->meleeData.bashRecoilMult = 0.f;
@@ -686,9 +918,6 @@ void SettingsLoader::RebalanceWeapons()
 		circleMult = std::min(0.99f, circleMult);
 		combatStyle->closeRangeData.circleMult = circleMult;
 
-		//float fallbackMult = actor->combatStyle->closeRangeData.fallbackMult * 1.5f;
-		//fallbackMult = std::min(0.99f, fallbackMult);
-		//actor->combatStyle->closeRangeData.fallbackMult = fallbackMult; 
 
 	}
 	for (auto& weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())
@@ -756,6 +985,7 @@ void SettingsLoader::RemovePowerAttacks()
 	RE::BGSKeyword* IncludePowerAttackKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x833E, "DirectionMod.esp");
 	if (!Settings::RemovePowerAttacks)
 	{
+		// allowing users to not remove power attacks was too dangerous
 		//return;
 	}
 	logger::info("erasing power attacks");
@@ -840,6 +1070,5 @@ void SettingsLoader::RemovePowerAttacks()
 
 		}
 	}
-
 
 }

@@ -6,6 +6,32 @@
 #include "FXHandler.h"
 
 constexpr float MultiattackTimer = 2.5f;
+// Stamina drain reduction on a blocked hit at peak brace. Deliberately small —
+// a quality gradient under the direction game, not a way to out-block a mixup,
+// and it must not blunt a power attack's guard-breaking role.
+constexpr float BraceMaxReduction = 0.2f;
+// Ramp over TimedBlockStartup, hold across the parry window, then nothing.
+// The bonus is for committing the guard early enough to be set when the attack
+// lands — once the window has passed you weren't, so it ends rather than
+// fading. Holding longer is a stale block, not a braced one.
+static float BraceRatioFromSeconds(float seconds)
+{
+	const float RampEnd = DifficultySettings::TimedBlockStartup;
+	const float PeakEnd = RampEnd + DifficultySettings::TimedBlockActiveTime;
+	if (seconds <= 0.f || RampEnd <= 0.f)
+	{
+		return 0.f;
+	}
+	if (seconds < RampEnd)
+	{
+		return seconds / RampEnd;
+	}
+	if (seconds < PeakEnd)
+	{
+		return 1.f;
+	}
+	return 0.f;
+}
 constexpr float HyperarmorTimer = 0.1f;
 
 BlockHandler::BlockHandler()
@@ -34,9 +60,19 @@ void BlockHandler::Initialize()
 }
 
 
+// The defender's whole scaling on a blocked hit
+static float BlockSkillMod(RE::Actor* target)
+{
+	const float Skill = std::clamp(
+		target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock), 0.f, 100.f);
+	return 1.f - DifficultySettings::BlockSkillMaxReduction * (Skill * 0.01f);
+}
+
 void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData& hitData)
 {
-	float Damage = hitData.totalDamage;
+	// needs to be similar to attack formula, ie no weapon damage or armor is factored in
+	float ActorMaxStamina = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+	float Damage = ActorMaxStamina * DifficultySettings::BlockCostRatio * BlockSkillMod(target);
 	float ActorStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 	
 	float FinalDamage = 0.f;
@@ -53,18 +89,23 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	{
 		AdditionalStamDamage = 0.5f * (AttackerWeaponWeight - DefenderWeaponWeight);
 	}
-	float a = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kBlock);
-	a = std::min(a, 99.f);
-	float skillMod = 0.8f + (0.2f) * ((100.f - a) / 100.f);
+
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
-	Damage *= skillMod;
+	Damage += AdditionalStamDamage;
+	if (hitData.flags.any(RE::HitData::Flag::kPowerAttack))
+	{
+		Damage *= DifficultySettings::PowerAttackBlockCostMult;
+	}
+	// After the weight term, so the discount covers the mass being absorbed too.
 	if (hasShield)
 	{
-		Damage *= 0.8;
+		Damage *= 0.8f;
 	}
-	Damage += AdditionalStamDamage;
 
-	float ActorMaxStamina = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+	// Braced block: a set guard absorbs better than one thrown up at the last
+	// instant. Peaks across the parry window then decays, so it can't be camped.
+	Damage *= 1.f - GetBraceRatio(target) * BraceMaxReduction;
+
 	if(Imperfect)
 	{
 		//take damage if it was imperfect as well as increased stamina damage
@@ -77,13 +118,13 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 
 	if (DirectionHandler::GetSingleton()->HasTimedParry(target))
 	{
-		FXHandler::GetSingleton()->PlayBlock(target);
+		FXHandler::GetSingleton()->PlayTimedBlock(target);
 		Damage *= 0.5f;
-		CauseStagger(attacker, target, 0.25f, true);
-		// timed block beats power attack
-		if (IsPowerAttacking(attacker))
+		CauseStagger(attacker, target, 0.1f, true);
+		// Lights only
+		if (!IsPowerAttacking(attacker))
 		{
-			
+			DirectionHandler::GetSingleton()->AddCombo(target, true);
 		}
 	}
 
@@ -91,21 +132,34 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	float ActorMaxStaminaDamage = ActorMaxStamina * DifficultySettings::StaminaDamageCap;
 	Damage = std::min(Damage, ActorMaxStaminaDamage);
 
+	target->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,Damage);
 	// breaks stamina
 	if (Damage > ActorStamina)
 	{
 		FinalDamage = Damage - ActorStamina;
 		if (target->IsBlocking())
 		{
-			CauseStagger(target, hitData.aggressor.get().get(), 1.f, true);
+			CauseStagger(target, hitData.aggressor.get().get(), 0.5f, true);
 		}
+		// Block fully drained their stamina — disarm them. Uses the engine's
+		// disarm task queue (same path as the Disarm shout) which handles
+		// the inventory/extra-data bookkeeping internally.
+		const bool fullDisarm = target->IsPlayerRef()
+			|| (target->IsHostileToActor(RE::PlayerCharacter::GetSingleton()));
+		if (fullDisarm)
+		{
+			QueueDisarm(target, attacker);
+		}
+		
+		attacker->AsActorValueOwner()->RestoreActorValue(RE::ActorValue::kStamina,
+			attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
+		target->AsActorValueOwner()->RestoreActorValue(RE::ActorValue::kStamina,
+			target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
 		if (target->IsPlayerRef())
 		{
 
 		}
 	}
-	
-	target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -Damage);
 	hitData.totalDamage = FinalDamage;
 
 }
@@ -115,6 +169,10 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	// make sure we can stagger them
 	// todo: make sure we can only stagger NPCs since the staggering of trolls and shit totally breaks the game
 	// since they can't block
+	if (actor->AsActorState()->actorState2.staggered)
+	{
+		return;
+	}
 
 	StaggerTimerMtx.lock();
 	bool ShouldStagger = actor->IsAttacking();
@@ -123,11 +181,17 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		ShouldStagger = true;
 	}
 
+
 	if (ShouldStagger)
 	{
-		
+		if (actor->IsBlocking())
+		{
+			actor->SetGraphVariableBool("IsBlocking", false);
+			actor->NotifyAnimationGraph("blockStop");
+			actor->AsActorState()->actorState2.wantBlocking = false;
+		}
 		// reset actor attack state because sometimes it can get screwed up staggering mid bash
-		actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+		// actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
 		actor->SetGraphVariableFloat("staggerDirection", direction);
@@ -157,6 +221,15 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 	StaggerTimerMtx.unlock();
 }
 
+void BlockHandler::CauseKnockdown(RE::Actor* target, RE::Actor* attacker, float magnitude)
+{
+	typedef void(_fastcall* tPushActorAway_sub_14067D4A0)(RE::AIProcess* a_causer, RE::Actor* a_target, RE::NiPoint3& a_origin, float a_magnitude);
+	static REL::Relocation<tPushActorAway_sub_14067D4A0> pushActorAway{ RELOCATION_ID(38858, 39895) };
+	auto targetPoint = attacker->GetNodeByName(attacker->GetActorRuntimeData().race->bodyPartData->parts[0]->targetName.c_str());
+	RE::NiPoint3 vec = targetPoint->world.translate;
+	pushActorAway(attacker->GetActorRuntimeData().currentProcess, target, vec, magnitude);
+}
+
 void BlockHandler::CauseRecoil(RE::Actor* actor) const
 {
 	actor->NotifyAnimationGraph("recoilLargeStart");
@@ -173,7 +246,17 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	{
 		target->SetGraphVariableBool("IsBlocking", false);
 		target->NotifyAnimationGraph("blockStop");
+		target->AsActorState()->actorState2.wantBlocking = false;
 		//logger::info("had wrong block angle");
+
+		// Disconfirmation must fire HERE: this strip clears IsBlocking before
+		// the hit event reaches SignalBadThing, so its wasBlocking check can
+		// never see the wrong-line case — the AI's failed belief has to drain
+		// at the moment the wrong guard is caught out.
+		if (!target->IsPlayerRef())
+		{
+			AIHandler::GetSingleton()->SignalWrongLineBlockExternalCalled(target);
+		}
 	}
 	else
 	{
@@ -221,6 +304,7 @@ void BlockHandler::ParriedAttacker(RE::Actor* actor, RE::Actor* attacker)
 
 bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 {
+	// only the attacker should be allowed to get staggered
 	if (DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
 	{
 		bool targetStaggering = target->AsActorState()->actorState2.staggered;
@@ -231,22 +315,24 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 		bool targetPowerattack = IsPowerAttacking(target);
 		bool attackerPowerattack = IsPowerAttacking(attacker);
 
+		float TargetMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(target);
+		float AttackerMasterstrikeTime = AttackHandler::GetSingleton()->GetChamberWindowTime(attacker);
+
 		// we use staggering as a flag that someone has already been in a masterstrike event
 		if (!targetStaggering && !attackerStaggering)
 		{
-			// power attack always has priority, you cannot masterstrike a power attack with a regular attack
-			if (!targetPowerattack && attackerPowerattack)
+			// greater time means they attacked later
+			if (TargetMasterstrikeTime >= AttackerMasterstrikeTime)
 			{
-				FXHandler::GetSingleton()->PlayMasterstrike(attacker);
-				CauseStagger(target, attacker, 0.25f);
-				return true;
+				// power attack always has priority, you cannot masterstrike a power attack with a regular attack
+				if (!attackerPowerattack || (attackerPowerattack && targetPowerattack))
+				{
+					FXHandler::GetSingleton()->PlayMasterstrike(target);
+					CauseStagger(attacker, target, 0.25f);
+					return true;
+				}
+				
 			}
-
-			FXHandler::GetSingleton()->PlayMasterstrike(target);
-			CauseStagger(attacker, target, 0.25f);
-			// masterstriker gets invulnerability during MS
-			//GiveHyperarmor(target, attacker);
-			return true;
 		}
 	}
 	return false;
@@ -271,8 +357,54 @@ void BlockHandler::RemoveActor(RE::ActorHandle actor)
 
 }
 
+void BlockHandler::AddBrace(RE::Actor* actor)
+{
+	std::unique_lock lock(BraceTimerMtx);
+	BraceTimer[actor->GetHandle()] = 0.f;
+}
+
+void BlockHandler::ResetBrace(RE::Actor* actor)
+{
+	std::unique_lock lock(BraceTimerMtx);
+	auto Iter = BraceTimer.find(actor->GetHandle());
+	if (Iter != BraceTimer.end())
+	{
+		Iter->second = 0.f;
+	}
+}
+
+float BlockHandler::GetBraceRatio(RE::Actor* actor) const
+{
+	std::shared_lock lock(BraceTimerMtx);
+	auto Iter = BraceTimer.find(actor->GetHandle());
+	return Iter == BraceTimer.end() ? 0.f : BraceRatioFromSeconds(Iter->second);
+}
+
 void BlockHandler::Update(float delta)
 {
+	{
+		// Only actors that actually raised a block are in here, so this is
+		// cheap; entries drop out as soon as the block does.
+		std::unique_lock lock(BraceTimerMtx);
+		// Stop counting once the window has closed — everything past it reads
+		// as zero anyway, and letting it climb forever would overflow on a
+		// long hold.
+		const float Cap = DifficultySettings::TimedBlockStartup +
+			DifficultySettings::TimedBlockActiveTime;
+		auto Iter = BraceTimer.begin();
+		while (Iter != BraceTimer.end())
+		{
+			RE::Actor* actor = Iter->first ? Iter->first.get().get() : nullptr;
+			if (!actor || !actor->IsBlocking())
+			{
+				Iter = BraceTimer.erase(Iter);
+				continue;
+			}
+			Iter->second = std::min(Iter->second + delta, Cap);
+			Iter++;
+		}
+	}
+
 	{
 		StaggerTimerMtx.lock();
 		auto Iter = StaggerTimer.begin();
@@ -292,6 +424,13 @@ void BlockHandler::Update(float delta)
 			Iter->second -= delta;
 			if (Iter->second <= 0)
 			{
+				// Recovering from a stagger drops the graph back to a default
+				// idle rather than the directional one, so re-assert it.
+				// Skipped mid-attack: a ForceIdle there cancels the swing.
+				if (!actor->IsAttacking())
+				{
+					DirectionHandler::GetSingleton()->QueueAnimationEvent(actor);
+				}
 				Iter = StaggerTimer.erase(Iter);
 				continue;
 

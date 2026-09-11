@@ -11,9 +11,12 @@ public:
 	void Initialize();
 	void PlayMasterstrike(RE::Actor* actor);
 	void PlayBlock(RE::Actor* actor);
+	void PlayTimedBlock(RE::Actor* actor);
 private:
 	void PlaySound(RE::Actor* actor, RE::BGSSoundDescriptorForm* sound);
 	RE::BGSSoundDescriptorForm* MasterstrikeSound;
 	RE::BGSSoundDescriptorForm* MasterstrikeSound2;
 	RE::BGSSoundDescriptorForm* BlockSound;
+	RE::BGSSoundDescriptorForm* TimedBlockSound;
+	RE::BGSSoundDescriptorForm* TimedBlockSound2;
 };

@@ -355,17 +355,34 @@ static void ImGui_ImplDX11_CreateFontsTexture()
 
     // Create texture sampler
     // (Bilinear sampling is required by default. Set 'io.Fonts->Flags |= ImFontAtlasFlags_NoBakedLines' or 'style.AntiAliasedLinesUseTex = false' to allow point/nearest sampling)
+    //
+    // PATCHED FROM UPSTREAM:
+    //   - AddressU/V/W: WRAP -> CLAMP. Upstream WRAP causes opposite edges of
+    //     a sprite to bleed into each other under bilinear/anisotropic
+    //     sampling at UVs near 0 or 1. Invisible on the padded font atlas
+    //     but very visible on rotated HUD icons.
+    //   - MaxLOD: 0.f -> FLT_MAX. Upstream clamps every sample to mip 0,
+    //     which neuters mipmapping AND ANISOTROPIC filtering (anisotropic
+    //     relies on mip selection to do its job). With a real MaxLOD the
+    //     sampler can use the full mip chain for minified/rotated textures.
+    //   - MaxAnisotropy: 0 -> 16. Upstream leaves this zeroed (effectively
+    //     1), which collapses anisotropic into bilinear. 16 is the max
+    //     supported tap count and the standard "high quality" pick.
+    // Combined effect: rotated/minified custom textures (HUD sprites) get
+    // smooth, properly-filtered sampling. Font atlas is unaffected because
+    // it has no mips and renders at 1:1.
     {
         D3D11_SAMPLER_DESC desc;
         ZeroMemory(&desc, sizeof(desc));
         desc.Filter = D3D11_FILTER_ANISOTROPIC;
-        desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-        desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-        desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.MaxAnisotropy = 16;
         desc.MipLODBias = 0.f;
         desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
         desc.MinLOD = 0.f;
-        desc.MaxLOD = 0.f;
+        desc.MaxLOD = D3D11_FLOAT32_MAX;
         bd->pd3dDevice->CreateSamplerState(&desc, &bd->pFontSampler);
     }
 }

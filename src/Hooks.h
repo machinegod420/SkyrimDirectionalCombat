@@ -3,6 +3,7 @@
 #include "AIHandler.h"
 #include "BlockHandler.h"
 #include "AttackHandler.h"
+#include "DodgeHandler.h"
 #include "FXHandler.h"
 #include "Utils.h"
 #include "InputHandler.h"
@@ -88,6 +89,8 @@ namespace Hooks
 
 		static inline REL::Relocation<decltype(Update)> _Update;
 	};
+
+
 
 	class HookCharacter
 	{
@@ -197,8 +200,8 @@ namespace Hooks
 			logger::info("WARNING: THIS MOD MAY NOT RETURN ON VTABLE_AttackBlockHandler. THIS MAY RESULT IN COMPATIBILITY ISSUES WITH OTHER SKSE PLUGINS");
 		}
 
+		static bool CanPlayerAttack();
 	private:
-
 		static bool	ProcessAttackHook(RE::AttackBlockHandler* handler, RE::ButtonEvent* a_event, RE::PlayerControlsData* a_data);
 
 		static inline REL::Relocation<decltype(ProcessAttackHook)> _ProcessAttackHook;
@@ -221,18 +224,47 @@ namespace Hooks
 		static inline REL::Relocation<decltype(NotifyAnimationGraph_NPC)> _NotifyAnimationGraph_NPC;
 	};
 
-	class HookAIMaxRange
+
+
+	// Dynamic spacing: rewrites Skyrim's combat engagement band per actor, so
+	// NPCs give ground when winded or locked out and press when they hold the
+	// advantage.
+	class HookCombatAdvanceRadius
+	{
+	public:
+		static void Install();
+		static void ComputeAdvanceRadii(RE::Actor* a_actor, RE::Actor* a_target, float* a_outInner, float* a_outOuter);
+		static inline decltype(&ComputeAdvanceRadii) _ComputeAdvanceRadii = nullptr;
+	};
+
+	// hooks bhkCharacterStateOnGround::SimulateStatePhysics (vfunc 8) so we can write
+	// velocityMod inside the physics tick — writing it from a game-logic update doesn't
+	// stick because the controller's solver consumes/decays it on the same tick.
+	class HookCharacterStateOnGround
 	{
 	public:
 		static void Install()
 		{
-			REL::Relocation<std::uintptr_t> hook1{ RELOCATION_ID(43656, 44889) };  // 778290, 7A64E0
-
-			auto& trampoline = SKSE::GetTrampoline();
-			_GetMaxRange = trampoline.write_call<5>(hook1.address() + REL::Relocate(0x147, 0x128), GetMaxRange);  // 7783D7, 7A6608
+			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_bhkCharacterStateOnGround[0] };
+			_SimulateStatePhysics = vtbl.write_vfunc(8, SimulateStatePhysics);
+			logger::info("Hook bhkCharacterStateOnGround::SimulateStatePhysics");
 		}
-		static float GetMaxRange(RE::Actor* a_actor, RE::TESBoundObject* a_object, int64_t a3);
-		static inline REL::Relocation<decltype(GetMaxRange)> _GetMaxRange;
+		static void SimulateStatePhysics(RE::bhkCharacterStateOnGround* a_this, RE::bhkCharacterController* a_controller);
+		static inline REL::Relocation<decltype(SimulateStatePhysics)> _SimulateStatePhysics;
+	};
+
+	// cancels an active dodge as soon as the actor leaves the ground (stairs, ledges, etc.)
+	class HookCharacterStateInAir
+	{
+	public:
+		static void Install()
+		{
+			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_bhkCharacterStateInAir[0] };
+			_SimulateStatePhysics = vtbl.write_vfunc(8, SimulateStatePhysics);
+			logger::info("Hook bhkCharacterStateInAir::SimulateStatePhysics");
+		}
+		static void SimulateStatePhysics(RE::bhkCharacterStateInAir* a_this, RE::bhkCharacterController* a_controller);
+		static inline REL::Relocation<decltype(SimulateStatePhysics)> _SimulateStatePhysics;
 	};
 
 	class HookAnimEvent

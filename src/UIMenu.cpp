@@ -1,6 +1,7 @@
 #include "UIMenu.h"
 #include "SettingsLoader.h"
 #include <shared_mutex>
+#include <cmath>
 #include "imgui.h"
 #include <d3d11.h>
 
@@ -28,20 +29,49 @@ struct TextAlert_Internal
 // ui is drawn on a seperate thread but accesses these static variables so
 // we need to wrap them in mutexes
 static std::vector<DrawCommand> DrawCommands;
+// Debug panel state. Own mutex rather than sharing the draw-command one: it's
+// written once per AI decision and read once per frame, so it should never
+// contend with the per-marker traffic.
+static DebugSnapshot DebugState;
+static std::shared_mutex DebugMtx;
 static std::mutex mtx;
 static std::vector<TextAlert_Internal> TextAlerts_Internal;
 static std::mutex mtx2;
 
+// Per-actor display smoothing for the conditioning arcs. The AI updates its
+// values in chunky integer steps at ~200ms ticks; the render loop eases a
+// displayed float toward them every frame so the arc animates instead of
+// stepping. Render-thread only (touched exclusively inside draw()), so no
+// mutex. Entries for actors not drawn this frame are pruned each pass.
+struct SmoothedConditioning
+{
+	std::array<float, 4> values{};
+	float confidence = 0.f;
+	double lastSeen = 0.0;
+};
+static std::unordered_map<uint32_t, SmoothedConditioning> SmoothedCond;
+// Seconds of command-bearing frames (frozen while menus/loads present empty
+// frames). Double: accumulates for the whole session, and float precision
+// dies within hours at per-frame increments.
+static double CondClock = 0.0;
+
 namespace UI
 {
-	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer)
+	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer, const std::array<int, 4>& conditioning, uint32_t actorId, float confidence)
 	{
 		// surprised this hasnt crashed from all the race conditions
 		// this is populated on the game thread and emptied on the UI thread
 		mtx.lock();
 		//logger::info("Attempting to add new draw command");
-		DrawCommands.push_back({ position, dir, mirror, state, hostileState, firstperson, lockout, isplayer });
+		DrawCommands.push_back({ position, dir, mirror, state, hostileState, firstperson, lockout, isplayer, conditioning, actorId, confidence });
 		mtx.unlock();
+	}
+
+	void SetDebugSnapshot(const DebugSnapshot& snapshot)
+	{
+		DebugMtx.lock();
+		DebugState = snapshot;
+		DebugMtx.unlock();
 	}
 
 	void AddTextAlert(RE::NiPoint2 position, const std::string& text)
@@ -140,7 +170,7 @@ LRESULT RenderManager::WndProcHook::thunk(HWND hWnd, UINT uMsg, WPARAM wParam, L
 {
 	auto& io = ImGui::GetIO();
 	if (uMsg == WM_KILLFOCUS) {
-		io.ClearInputCharacters();
+		//io.ClearInputCharacters();
 		io.ClearInputKeys();
 	}
 
@@ -158,7 +188,7 @@ void RenderManager::D3DInitHook::thunk()
 		return;
 	}
 
-	auto render_data = render_manager->data;
+	auto render_data = render_manager->GetRuntimeData();
 
 	logger::info("Getting swapchain...");
 	auto swapchain = render_data.renderWindows[0].swapChain;
@@ -169,13 +199,13 @@ void RenderManager::D3DInitHook::thunk()
 
 	logger::info("Getting swapchain desc...");
 	DXGI_SWAP_CHAIN_DESC sd{};
-	if (swapchain->GetDesc(std::addressof(sd)) < 0) {
+	if (swapchain->GetDesc(reinterpret_cast<REX::W32::DXGI_SWAP_CHAIN_DESC*>(std::addressof(sd))) < 0) {
 		logger::error("IDXGISwapChain::GetDesc failed.");
 		return;
 	}
 
-	device = render_data.forwarder;
-	context = render_data.context;
+	device = reinterpret_cast<ID3D11Device*>(render_data.forwarder);
+	context = reinterpret_cast<ID3D11DeviceContext*>(render_data.context);
 
 	logger::info("Initializing ImGui...");
 	ImGui::CreateContext();
@@ -281,6 +311,21 @@ void RenderManager::draw()
 
 	mtx.lock();
 	//logger::info("DrawCommands size {}", DrawCommands.size());
+	// Present keeps firing while game logic is paused (menus, load screens)
+	// but the game thread produces no draw commands then. Freeze the
+	// smoothing clock on commandless frames so pausing doesn't age out (and
+	// wipe) every actor's arc state.
+	const bool HasDrawCommands = !DrawCommands.empty();
+	if (HasDrawCommands)
+	{
+		CondClock += ImGui::GetIO().DeltaTime;
+	}
+	// True exponential ease (1 - e^-kt): identical convergence per second at
+	// any framerate, unlike the linear-alpha lerp (dt*k) which converges
+	// faster at low fps and snaps outright below 1/k seconds per frame.
+	// k=10 → ~90% settled in ~230ms, one AI tick's worth of change animating
+	// over roughly one tick interval.
+	const float condEase = 1.f - std::exp(-ImGui::GetIO().DeltaTime * 10.f);
 	for (uint32_t i = 0; i < DrawCommands.size(); ++i)
 	{
 		RE::NiPoint3 Position = DrawCommands[i].position;
@@ -360,6 +405,30 @@ void RenderManager::draw()
 			StartPos = WorldToScreen(Position, depth, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y);
 		}
 
+		// Ease displayed arc values toward the AI's chunky tick values.
+		// Runs regardless of screen visibility so arcs don't re-animate from
+		// zero when an actor pops back on screen.
+		std::array<float, 4> ArcVals{};
+		float ArcConfidence = DrawCommands[i].confidence;
+		if (DrawCommands[i].actorId != 0)
+		{
+			auto& smooth = SmoothedCond[DrawCommands[i].actorId];
+			smooth.lastSeen = CondClock;
+			for (int c = 0; c < 4; ++c)
+			{
+				smooth.values[c] += (static_cast<float>(DrawCommands[i].conditioning[c]) - smooth.values[c]) * condEase;
+			}
+			smooth.confidence += (DrawCommands[i].confidence - smooth.confidence) * condEase;
+			ArcVals = smooth.values;
+			ArcConfidence = smooth.confidence;
+		}
+		else
+		{
+			for (int c = 0; c < 4; ++c)
+			{
+				ArcVals[c] = static_cast<float>(DrawCommands[i].conditioning[c]);
+			}
+		}
 
 		if (depth >= 0 && IsOnScreen(StartPos, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y))
 		{
@@ -379,6 +448,13 @@ void RenderManager::draw()
 				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
 				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
 				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
+				// conditioning meter arcs — dedicated element outside the
+				// markers; sweep length carries the value so it stays
+				// readable without touching marker color/alpha semantics
+				DrawConditioningArc(StartPos, depth, scale, Directions::TR, ArcVals[(int)Directions::TR], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::TL, ArcVals[(int)Directions::TL], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::BR, ArcVals[(int)Directions::BR], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::BL, ArcVals[(int)Directions::BL], ArcConfidence);
 			}
 			else
 			{
@@ -386,10 +462,34 @@ void RenderManager::draw()
 				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
 				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
 				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
+				// mirror mapping matches the marker draw above
+				DrawConditioningArc(StartPos, depth, scale, Directions::TR, ArcVals[(int)Directions::TL], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::TL, ArcVals[(int)Directions::TR], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::BR, ArcVals[(int)Directions::BL], ArcConfidence);
+				DrawConditioningArc(StartPos, depth, scale, Directions::BL, ArcVals[(int)Directions::BR], ArcConfidence);
 			}
 		}
 		//logger::info("Direction pos {} {}", StartPos.x, StartPos.y);
 
+	}
+	// prune smoothing entries by age (seconds of command-bearing time, so
+	// framerate-independent and frozen through pauses) — per-actor display
+	// gates (OnlyShowTargetted, DisplayDistance) can drop an actor's command
+	// for a frame or two, and exact-match pruning would replay their arc
+	// from zero on return.
+	if (HasDrawCommands)
+	{
+		for (auto it = SmoothedCond.begin(); it != SmoothedCond.end();)
+		{
+			if (CondClock - it->second.lastSeen > 1.5)
+			{
+				it = SmoothedCond.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
 	}
 	DrawCommands.clear();
 	mtx.unlock();
@@ -413,6 +513,55 @@ void RenderManager::draw()
 	mtx2.unlock();
 
 	ImGui::End();
+
+	if (UISettings::ShowDebugOverlay)
+	{
+		DebugSnapshot Snapshot;
+		{
+			std::shared_lock lock(DebugMtx);
+			Snapshot = DebugState;
+		}
+		if (Snapshot.valid)
+		{
+			// Its own window, decorated and positioned — the marker window
+			// above is fullscreen, borderless and input-transparent, which is
+			// wrong for something you read rather than glance at.
+			ImGui::SetNextWindowPos(ImVec2(20.f, 20.f), ImGuiCond_FirstUseEver);
+			ImGui::SetNextWindowBgAlpha(0.65f);
+			ImGui::Begin("Dirmod AI", nullptr,
+				ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
+
+			ImGui::Text("%s  (%s, tier %d)", Snapshot.name.c_str(), Snapshot.archetype, Snapshot.difficulty);
+			ImGui::Separator();
+			ImGui::Text("decision   %s", Snapshot.decisionKind);
+			ImGui::Text("state      %s", Snapshot.defending ? "defending" : "offense");
+			ImGui::Text("guard      %d   target %d", (int)Snapshot.guard, (int)Snapshot.targetGuard);
+			ImGui::Separator();
+			ImGui::Text("belief     TR %3d  TL %3d  BL %3d  BR %3d",
+				Snapshot.beliefs[(int)Directions::TR], Snapshot.beliefs[(int)Directions::TL],
+				Snapshot.beliefs[(int)Directions::BL], Snapshot.beliefs[(int)Directions::BR]);
+			ImGui::Text("streaks    cond %d  switch %d  same %d",
+				Snapshot.conditioningStreak, Snapshot.switchStreak, Snapshot.sameStreak);
+			ImGui::Text("spacing    %4.2f", Snapshot.spacingMult);
+			// Unsquared alongside the squared pair the AI actually compares, so
+			// the two reach sources can be read against a real distance.
+			ImGui::Text("range      dist %6.1f   attackReach %6.1f (+lunge)",
+				std::sqrt(Snapshot.targetDistSQ),
+				std::sqrt(Snapshot.weaponLengthSQ));
+			ImGui::Text("           Actor::GetReach  self %6.1f   target %6.1f",
+				Snapshot.actorReach, Snapshot.targetActorReach);
+			if (Snapshot.powerWindup > 0.f)
+			{
+				ImGui::Text("pwr windup %4.0fms  (timing blocks)", Snapshot.powerWindup * 1000.f);
+			}
+			else
+			{
+				ImGui::Text("pwr windup   --     (blocking on reflex)");
+			}
+
+			ImGui::End();
+		}
+	}
 }
 
 void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency)
@@ -552,6 +701,98 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 	//ImGui::GetWindowDrawList()->AddText(ImVec2(CenterPos.x, CenterPos.y), 0xFFFFFFFF, "test");
 }
 
+void RenderManager::DrawConditioningArc(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, float value, float confidence)
+{
+	// Sweep carries the value: the arc grows symmetrically outward from the
+	// direction's center angle as belief builds, reaching ~48 degrees at the
+	// display max. Constant color and opacity — length is readable at a
+	// glance in a way brightness deltas on faint markers are not.
+	//
+	// Display normalization: under the belief-budget model a single line can
+	// theoretically hold up to 100, but committed play mostly lives below
+	// ~50 — full sweep at 50 keeps the arc expressive in the range that
+	// actually occurs; deeper values just hold max sweep.
+	if (value <= 2.f)
+	{
+		return;
+	}
+	if (value > 50.f)
+	{
+		value = 50.f;
+	}
+	depth = std::clamp(depth, 300.f, 1000.f);
+	float scale = UISettings::Size / depth;
+	scale *= uiscale;
+	const float dist = UISettings::Length * scale;
+	const float size = UISettings::Length * scale;
+	const float pad = size * 0.35f;
+
+	constexpr float pi = 3.14159265359f;
+	// screen space, y down: 0 = right, -pi/2 = up
+	float centerAngle = 0.f;
+	float radius = 0.f;
+	if (Settings::MNBMode)
+	{
+		// cardinal layout: markers offset by dist along the axes
+		switch (dir)
+		{
+		case Directions::TR: centerAngle = -0.5f * pi; break;
+		case Directions::TL: centerAngle = pi; break;
+		case Directions::BL: centerAngle = 0.5f * pi; break;
+		case Directions::BR: centerAngle = 0.f; break;
+		}
+		radius = dist + size + pad;
+	}
+	else if (Settings::ForHonorMode)
+	{
+		// top marker sits at 2*dist, side markers at 1.5*dist
+		switch (dir)
+		{
+		case Directions::TR:
+		case Directions::TL:
+			centerAngle = -0.5f * pi;
+			radius = 2.f * dist + size + pad;
+			break;
+		case Directions::BL:
+			centerAngle = pi;
+			radius = 1.5f * dist + size + pad;
+			break;
+		case Directions::BR:
+			centerAngle = 0.f;
+			radius = 1.5f * dist + size + pad;
+			break;
+		}
+	}
+	else
+	{
+		// default diagonal layout: markers at (+-dist, +-dist)
+		switch (dir)
+		{
+		case Directions::TR: centerAngle = -0.25f * pi; break;
+		case Directions::TL: centerAngle = -0.75f * pi; break;
+		case Directions::BL: centerAngle = 0.75f * pi; break;
+		case Directions::BR: centerAngle = 0.25f * pi; break;
+		}
+		radius = 1.414f * dist + size + pad;
+	}
+
+	const float t = value / 50.f;
+	const float halfSweep = (24.f * pi / 180.f) * t;
+	const float thickness = std::max(1.2f, size * 0.12f);
+
+	// confidence tint: the whole arc set warms from yellow toward red as
+	// this enemy's recent exchange record improves — same "how is this
+	// fight going" family as the sweep, different axis (them vs you).
+	if (confidence < 0.f) { confidence = 0.f; }
+	if (confidence > 1.f) { confidence = 1.f; }
+	const int g = 0xE0 + (int)(confidence * (float)(0x58 - 0xE0));
+	const int b = 0x40 + (int)(confidence * (float)(0x2E - 0x40));
+
+	auto* drawList = ImGui::GetWindowDrawList();
+	drawList->PathArcTo(ImVec2(StartPos.x, StartPos.y), radius, centerAngle - halfSweep, centerAngle + halfSweep, 20);
+	drawList->PathStroke(IM_COL32(0xFF, g, b, 210), ImDrawFlags_None, thickness);
+}
+
 void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes index)
 {
 	Icon NewIcon;
@@ -563,7 +804,7 @@ void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes ind
 		logger::error("Cannot find render manager. Initialization failed.");
 	}
 
-	auto RuntimeData = RenderManager->data;
+	auto RuntimeData = RenderManager->GetRuntimeData();
 
 	unsigned char* ImageData = nullptr;
 	// Load from disk into a raw RGBA buffer
@@ -595,44 +836,67 @@ void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes ind
 		nsvgDeleteRasterizer(rast);
 	}
 	// Create Texture
+	//
+	// Mipmap generation requires three things in concert:
+	//   1. MipLevels = 0           -> runtime auto-computes the full chain
+	//                                 (floor(log2(max(W,H))) + 1 levels).
+	//   2. BIND_RENDER_TARGET      -> GenerateMips writes to lower mips
+	//                                 internally by rendering into them.
+	//   3. MISC_GENERATE_MIPS      -> explicitly opts the texture into the
+	//                                 generation path.
+	// Without all three, the GenerateMips() call below silently no-ops on a
+	// single-level texture and the sampler only ever reads mip 0 — which is
+	// where the "rotated icons look jaggy when minified" problem comes from.
 	D3D11_TEXTURE2D_DESC Desc;
 	ZeroMemory(&Desc, sizeof(Desc));
 	Desc.Width = ImageWidth;
 	Desc.Height = ImageHeight;
-	Desc.MipLevels = 1;
+	Desc.MipLevels = 0;
 	Desc.ArraySize = 1;
 	Desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	Desc.SampleDesc.Count = 1;
 	Desc.Usage = D3D11_USAGE_DEFAULT;
-	Desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	Desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 	Desc.CPUAccessFlags = 0;
-	Desc.MiscFlags = 0;
+	Desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
+	// MISC_GENERATE_MIPS is incompatible with passing pInitialData to
+	// CreateTexture2D — the texture has to be created empty and then
+	// populated via UpdateSubresource below.
 	ID3D11Texture2D* PTexture = nullptr;
-	D3D11_SUBRESOURCE_DATA SubResource;
-	ZeroMemory(&SubResource, sizeof(SubResource));
-	SubResource.pSysMem = ImageData;
-	SubResource.SysMemPitch = Desc.Width * 4;
-	SubResource.SysMemSlicePitch = 0;
-
-	HRESULT Hr = device->CreateTexture2D(&Desc, &SubResource, &PTexture);
+	HRESULT Hr = device->CreateTexture2D(&Desc, nullptr, &PTexture);
 	if (FAILED(Hr))
 	{
 		logger::error("Failed texture creation");
-		// Handle texture creation error
 		return;
 	}
+
+	// Upload pixel data into mip 0. GenerateMips() further down will
+	// derive mips 1..N from this.
+	RuntimeData.context->UpdateSubresource(
+		reinterpret_cast<REX::W32::ID3D11Resource*>(PTexture),
+		0,        // mip 0
+		nullptr,  // full subresource
+		ImageData,
+		ImageWidth * 4,
+		0);
 
 	// Create Texture View
 	D3D11_SHADER_RESOURCE_VIEW_DESC SrvDesc;
 	ZeroMemory(&SrvDesc, sizeof(SrvDesc));
 	SrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	SrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	SrvDesc.Texture2D.MipLevels = Desc.MipLevels;
+	// -1 = "use all mips starting from MostDetailedMip." Required so the
+	// sampler can actually select lower mips at minification — paired with
+	// the auto-generated chain above.
+	SrvDesc.Texture2D.MipLevels = static_cast<UINT>(-1);
 	SrvDesc.Texture2D.MostDetailedMip = 0;
 
 	ID3D11ShaderResourceView* PTextureView = nullptr;
-	Hr = RuntimeData.forwarder->CreateShaderResourceView(PTexture, &SrvDesc, &NewIcon.Texture);
+	Hr = RuntimeData.forwarder->CreateShaderResourceView(
+		reinterpret_cast<REX::W32::ID3D11Resource*>(PTexture),
+		reinterpret_cast<const REX::W32::D3D11_SHADER_RESOURCE_VIEW_DESC*>(&SrvDesc),
+		reinterpret_cast<REX::W32::ID3D11ShaderResourceView**>(&NewIcon.Texture));
 	if (FAILED(Hr))
 	{
 		// Handle shader resource view creation error
@@ -642,7 +906,7 @@ void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes ind
 	}
 
 	// Generate Mipmaps
-	RuntimeData.context->GenerateMips(NewIcon.Texture);
+	RuntimeData.context->GenerateMips(reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(NewIcon.Texture));
 
 	// Free memory
 	PTexture->Release();

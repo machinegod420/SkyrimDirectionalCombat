@@ -18,7 +18,11 @@ public:
 	void Update(float delta);
 
 	void ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::HitData &hitData);
+	void AddBrace(RE::Actor* actor);
+	void ResetBrace(RE::Actor* actor);
+	float GetBraceRatio(RE::Actor* actor) const;
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
+	void CauseKnockdown(RE::Actor* target, RE::Actor* attacker, float magnitude = 1.f);
 	void CauseRecoil(RE::Actor* actor) const;
 	void GiveHyperarmor(RE::Actor* actor, RE::Actor* attacker);
 	inline bool HasHyperarmor(RE::Actor* actor) const
@@ -60,6 +64,10 @@ private:
 
 	phmap::flat_hash_map<RE::ActorHandle, float> StaggerTimer;
 	mutable std::shared_mutex StaggerTimerMtx;
+
+	// seconds the block has been held
+	phmap::flat_hash_map<RE::ActorHandle, float> BraceTimer;
+	mutable std::shared_mutex BraceTimerMtx;
 	
 	phmap::flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
 	mutable std::shared_mutex HyperArmorTimerMtx;
