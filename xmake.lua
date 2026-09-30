@@ -1,55 +1,58 @@
-set_xmakever("2.7.2")
+-- include subprojects
+includes("lib/commonlibsse-ng")
 
--- project
-set_project("template-commonlibsse-ng")
+-- set project constants
+set_project("direction-plugin")
 set_version("0.0.0")
-set_license("MIT")
-set_languages("c++20")
+set_license("GPL-3.0")
+set_languages("c++23")
+set_warnings("allextra")
 set_optimize("faster")
-set_warnings("allextra", "error")
 
--- allowed
-set_allowedarchs("x64")
-set_allowedmodes("debug", "releasedbg")
-
--- default
-set_defaultarchs("x64")
-set_defaultmode("releasedbg")
-
--- rules
+-- add common rules
 add_rules("mode.debug", "mode.releasedbg")
 add_rules("plugin.vsxmake.autoupdate")
 
--- policies
-set_policy("package.requires_lock", true)
+-- imgui static library (vendored via submodule at lib/imgui)
+target("imgui")
+    set_kind("static")
+    add_files(
+        "lib/imgui/imgui.cpp",
+        "lib/imgui/imgui_demo.cpp",
+        "lib/imgui/imgui_draw.cpp",
+        "lib/imgui/imgui_tables.cpp",
+        "lib/imgui/imgui_widgets.cpp"
+    )
+    add_includedirs("lib/imgui", { public = true })
 
--- packages
-add_requires("fmt", "spdlog")
-add_requires("commonlibsse-ng", { configs = { skyrim_vr = false }})
+-- minhook static library (vendored via submodule at lib/minhook)
+-- Provides function-entry detours with proper prologue analysis (HDE64).
+-- Used for hooks where SKSE's write_call/write_branch isn't enough — e.g.
+-- intercepting every call to a non-virtual engine function.
+target("minhook")
+    set_kind("static")
+    add_files(
+        "lib/minhook/src/buffer.c",
+        "lib/minhook/src/hook.c",
+        "lib/minhook/src/trampoline.c",
+        "lib/minhook/src/hde/hde64.c"
+    )
+    add_includedirs("lib/minhook/include", { public = true })
 
--- includes
-includes("res/package.lua")
-
--- targets
+-- define plugin target
 target("direction-plugin")
-    add_packages("fmt", "spdlog", "commonlibsse-ng")
+    add_deps("imgui", "minhook")
 
-    add_rules("@commonlibsse-ng/plugin", {
+    add_rules("commonlibsse-ng.plugin", {
         name = "direction-plugin",
-        author = "Qudix",
-        description = "SKSE64 plugin template using CommonLibSSE-NG"
+        author = "ben",
+        description = "Skyrim combat mod"
     })
 
-    add_files("src/plugin/**.cpp")
-    add_headerfiles("src/plugin/**.h")
-    add_includedirs("src/plugin")
-    set_pcxxheader("src/plugin/pch.h")
+    add_defines("NOMINMAX", "WIN32_LEAN_AND_MEAN")
 
-    add_rules("mod.package", {
-        ["@{target}-@{target_ver}.zip"] = {
-            { "@{target_dir}", "@{target}.dll", "Data/SKSE/Plugins/" },
-        },
-        ["@{target}-@{target_ver}_pdb.zip"] = {
-            { "@{target_dir}", "@{target}.pdb" },
-        }
-    })
+    -- add src files
+    add_files("src/**.cpp")
+    add_headerfiles("src/**.h")
+    add_includedirs("src")
+    set_pcxxheader("src/pch.h")

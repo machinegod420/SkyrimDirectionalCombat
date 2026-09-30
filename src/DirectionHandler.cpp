@@ -1,5 +1,6 @@
 #include "DirectionHandler.h"
 #include "AIHandler.h"
+#include "InputHandler.h"
 #include "SettingsLoader.h"
 #include "AttackHandler.h"
 #include "BlockHandler.h"
@@ -17,22 +18,7 @@ constexpr float SlowTimeBetweenChanges = BehaviorDefinedTime + BufferTime;
 constexpr float SlowTimeBetweenChanges2 = BehaviorDefinedTimeSlow + BufferTime;
 
 // Guard charge: seconds of holding one guard line to reach a full charge, and
-// the WeaponSpeedMult bonus granted at full. Patience buys attack speed; every
-// mix-up switch spends it. Deliberately a carrot rather than a decay timer —
-// penalizing a held guard reads as a jitter tax, rewarding it does not. The
-// natural brakes are already in the system: a held line is exactly what arms
-// the AI's neutral pre-block (strongRead keys on the target's held line), and
-// repeat-combo stamina escalation punishes camping one line to swing from.
-// Guard charge curve: startup dead zone then a linear ramp, mirroring the timed
-// parry's shape (TimedBlockStartup then an active window) so both halves of
-// "commitment earns readiness" read as one idea. Nothing accrues during startup
-// — a brief pause between mix-ups must not quietly pay, or every attack carries
-// a little charge and the mechanic stops being a choice. Tunable via the INI
-// [Difficulty] section; the speed payoff itself lives with its consumer in
-// AttackHandler.cpp.
-//
-// Single definition of the seconds -> 0-1 payoff curve; both the getter and the
-// consume path go through it so the two can't drift apart.
+// the WeaponSpeedMult bonus granted at full
 static float ChargeRatioFromSeconds(float seconds)
 {
 	// guard against a misconfigured INI where Full <= Startup (would divide by
@@ -46,6 +32,47 @@ static float ChargeRatioFromSeconds(float seconds)
 }
 
 
+Directions DirectionHandler::FoldDirection(Directions dir)
+{
+	if (Settings::IsForHonor() && dir == Directions::TL)
+	{
+		return Directions::TR;
+	}
+	if (Settings::IsKCD() && dir == Directions::BR)
+	{
+		return Directions::BL;
+	}
+	return dir;
+}
+
+uint8_t DirectionHandler::EnabledDirections()
+{
+	uint8_t Mask = 0;
+	for (Directions Dir : { Directions::TR, Directions::TL, Directions::BL, Directions::BR })
+	{
+		if (DirectionEnabled(Dir))
+		{
+			Mask |= static_cast<uint8_t>(1u << static_cast<int>(Dir));
+		}
+	}
+	return Mask;
+}
+
+// The line that answers an attack: its mirror, folded into the mode. In a mode
+// where the mirror has been folded away the attack blocks on its own line, which
+// is what the top guard does in For Honor and the low guard does in KCD.
+static Directions MirrorDirection(Directions dir)
+{
+	switch (dir)
+	{
+	case Directions::TR: return Directions::TL;
+	case Directions::TL: return Directions::TR;
+	case Directions::BL: return Directions::BR;
+	case Directions::BR: return Directions::BL;
+	}
+	return dir;
+}
+
 void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 {
 	TDM = tdm;
@@ -56,6 +83,18 @@ void DirectionHandler::Initialize(TDM_API::IVTDM2* tdm)
 	BR = DataHandler->LookupForm<RE::SpellItem>(0x5373, PluginName);
 	Debuff = DataHandler->LookupForm<RE::BGSPerk>(0x810, PluginName);
 	Unblockable = DataHandler->LookupForm<RE::SpellItem>(0x5374, PluginName);
+	ComboChain1 = DataHandler->LookupForm<RE::SpellItem>(0x8953, PluginName);
+	ComboChain2 = DataHandler->LookupForm<RE::SpellItem>(0x8954, PluginName);
+	if (!ComboChain1 || !ComboChain2)
+	{
+		logger::error("DirectionHandler: combo chain spells 0x8953/0x8954 not found in {}", PluginName);
+	}
+	ForHonorMarker = DataHandler->LookupForm<RE::SpellItem>(0x8EBA, PluginName);
+	KCDMarker = DataHandler->LookupForm<RE::SpellItem>(0x8EBB, PluginName);
+	if (!ForHonorMarker || !KCDMarker)
+	{
+		logger::error("DirectionHandler: mode marker spells 0x8EBA/0x8EBB not found in {}", PluginName);
+	}
 	NPCKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x13794, "Skyrim.esm");
 	BattleaxeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x6D932, "Skyrim.esm");
 	PikeKeyword = DataHandler->LookupForm<RE::BGSKeyword>(0x0E457E, "NewArmoury.esp");
@@ -72,6 +111,11 @@ bool DirectionHandler::HasDirectionalPerks(RE::Actor* actor) const
 	return ret;
 }
 
+bool DirectionHandler::IsDirectionalOpponent(RE::Actor* actor) const
+{
+	return HasDirectionalPerks(actor) || CreatureHandler::GetSingleton()->IsCreatureOpponent(actor);
+}
+
 bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) const
 {
 	// never can block this
@@ -84,44 +128,55 @@ bool DirectionHandler::HasBlockAngle(RE::Actor* attacker, RE::Actor* target) con
 	{
 		return true;
 	}
+	// Creature lookup before the lock below: it takes its own and must not nest.
+	Directions creatureDir = Directions::TR;
+	const bool creature = CreatureHandler::GetSingleton()->GetAttackLine(attacker, creatureDir);
 	std::shared_lock lock(ActiveDirectionsMtx);
 	// find() gives existence and the iterator in one lookup; each side is
 	// dereferenced at most once rather than re-queried per direction branch.
 	auto attackerIt = ActiveDirections.find(attacker->GetHandle());
 	auto targetIt = ActiveDirections.find(target->GetHandle());
-	if (attackerIt == ActiveDirections.end() || targetIt == ActiveDirections.end())
+	if (targetIt == ActiveDirections.end() || (attackerIt == ActiveDirections.end() && !creature))
 	{
 		return false;
 	}
-	const Directions attackDir = attackerIt->second;
+	const Directions attackDir = attackerIt != ActiveDirections.end() ? attackerIt->second : creatureDir;
 	const Directions targetDir = targetIt->second;
-	// opposite side angle
+	// The mirrored line, folded into the mode.
+	return targetDir == FoldDirection(MirrorDirection(attackDir));
+}
 
-	if (Settings::ForHonorMode)
+bool DirectionHandler::ShouldShowMarker(RE::Actor* actor) const
+{
+	// ignore ui past setting distance
+	float TargetDist = RE::PlayerCamera::GetSingleton()->GetRuntimeData2().pos.GetSquaredDistance(actor->GetPosition());
+	if (TargetDist > (UISettings::DisplayDistance * UISettings::DisplayDistance))
 	{
-		if (attackDir == Directions::TR)
+		return false;
+	}
+
+	if (Settings::HasTDM && TDM)
+	{
+		if (UISettings::OnlyShowTargetted)
 		{
-			return targetDir == Directions::TR;
+			if (actor->GetHandle() != TDM->GetCurrentTarget())
+			{
+				return false;
+			}
 		}
 	}
-
-	if (attackDir == Directions::TR)
+	else if (UISettings::OnlyShowTargetted)
 	{
-		return targetDir == Directions::TL;
+		auto player = RE::PlayerCharacter::GetSingleton();
+		if (!actor->IsHostileToActor(player))
+		{
+			return false;
+		}
+		if (actor->GetActorRuntimeData().currentCombatTarget != player->GetHandle())
+		{
+			return false;
+		}
 	}
-	if (attackDir == Directions::TL)
-	{
-		return targetDir == Directions::TR;
-	}
-	if (attackDir == Directions::BL)
-	{
-		return targetDir == Directions::BR;
-	}
-	if (attackDir == Directions::BR)
-	{
-		return targetDir == Directions::BL;
-	}
-	// if no Spell then any angle blocks
 	return true;
 }
 
@@ -132,48 +187,18 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 	{
 		return;
 	}
-	if (!actor->IsPlayerRef())
+	if (!actor->IsPlayerRef() && !ShouldShowMarker(actor))
 	{
-		// ignore ui past setting distance
-		float TargetDist = RE::PlayerCamera::GetSingleton()->GetRuntimeData2().pos.GetSquaredDistance(actor->GetPosition());
-		if (TargetDist > (UISettings::DisplayDistance * UISettings::DisplayDistance))
-		{
-			return;
-		}
-
-		if(Settings::HasTDM && TDM)
-		{
-			if (UISettings::OnlyShowTargetted)
-			{
-				if (actor->GetHandle() != TDM->GetCurrentTarget())
-				{
-					return;
-				}
-
-			}
-		}
-		else if (UISettings::OnlyShowTargetted)
-		{
-			auto player = RE::PlayerCharacter::GetSingleton();
-			if (!actor->IsHostileToActor(player))
-			{
-				return;
-
-			}
-			if (actor->GetActorRuntimeData().currentCombatTarget != player->GetHandle())
-			{
-				return;
-			}
-		}
+		return;
 	}
 
 	// Query before taking ActiveDirectionsMtx: the AI handler takes its own
 	// lock and is itself a caller of DirectionHandler while holding it, so
-	// nesting the two here would invert that order. Gating here (not in the
-	// render loop) means the disabled path also skips the per-frame
-	// DifficultyMap lock — zeroed values suppress the arcs downstream.
+	// nesting the two here would invert that order
 	std::array<int, 4> Conditioning{};
 	float Confidence = 0.f;
+	const float ComboFlash = GetComboFlash(actor);
+	const float ComboProgress = GetComboProgress(actor);
 	if (UISettings::ShowConditioningArcs)
 	{
 		AIHandler::GetSingleton()->GetGuardConditioningExternalCalled(actor, Conditioning, Confidence);
@@ -267,7 +292,8 @@ void DirectionHandler::UIDrawAngles(RE::Actor* actor)
 		});	
 		*/
 
-		UI::AddDrawCommand(Position, ActiveDirections.at(actor->GetHandle()), Mirror, state, hostileState, FirstPerson, Lockout, actor->IsPlayerRef(), Conditioning, actor->GetHandle().native_handle(), Confidence);
+		const Directions Drawn = ActiveDirections.at(actor->GetHandle());
+		UI::AddDrawCommand(Position, Drawn, Mirror, state, ComboFlash, ComboProgress, hostileState, FirstPerson, Lockout, actor->IsPlayerRef(), Conditioning, actor->GetHandle().native_handle(), Confidence, EnabledDirections());
 	}
 	ActiveDirectionsMtx.unlock_shared();
 }
@@ -463,10 +489,55 @@ void DirectionHandler::ApplyDirectionSpells(RE::Actor* actor, Directions dir)
 	}
 }
 
+uint32_t DirectionHandler::GetLockedTargetFormID() const
+{
+	RE::Actor* Locked = GetLockedTarget();
+	return Locked ? Locked->GetFormID() : 0;
+}
+
+RE::Actor* DirectionHandler::GetLockedTarget() const
+{
+	if (!Settings::HasTDM || !TDM)
+	{
+		return nullptr;
+	}
+	auto Handle = TDM->GetCurrentTarget();
+	return Handle ? Handle.get().get() : nullptr;
+}
+
+RE::Actor* DirectionHandler::GetSwingTarget(RE::Actor* actor) const
+{
+	RE::Actor* Target = actor->IsPlayerRef() ? GetLockedTarget() : nullptr;
+	return Target ? Target : GetCombatTarget(actor);
+}
+
+Directions DirectionHandler::GetPreviousDirection(RE::Actor* actor, float& outAgo) const
+{
+	std::shared_lock lock(SwitchHistoryMtx);
+	auto Iter = SwitchHistory.find(actor->GetHandle());
+	if (Iter == SwitchHistory.end())
+	{
+		outAgo = -1.f;
+		return GetCurrentDirection(actor);
+	}
+	outAgo = std::chrono::duration<float>(std::chrono::steady_clock::now() - Iter->second.at).count();
+	return Iter->second.previous;
+}
+
 void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions dir, bool wasBlocking)
 {
+	// The map only ever holds a live line. Feint events arrive unfolded.
+	dir = FoldDirection(dir);
 	// there is some funkiness with spells not applying at the same time as directions is being read so hide them under the same mutex
 	ActiveDirectionsMtx.lock();
+	// Diagnostic history: what the line was before this switch, and when.
+	{
+		auto Prev = ActiveDirections.find(actor->GetHandle());
+		std::unique_lock HistLock(SwitchHistoryMtx);
+		auto& Hist = SwitchHistory[actor->GetHandle()];
+		Hist.previous = Prev != ActiveDirections.end() ? Prev->second : dir;
+		Hist.at = std::chrono::steady_clock::now();
+	}
 	ApplyDirectionSpells(actor, dir);
 	ActiveDirections[actor->GetHandle()] = dir;
 	ActiveDirectionsMtx.unlock();
@@ -524,12 +595,18 @@ void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor, bool ChangeQueued)
 {
 	
 
-	if (Settings::ForHonorMode)
+	// A folded mode has one line on the far side, so the side inputs address it
+	// directly instead of flipping — otherwise the merged line is a dead end.
+	if (Settings::IsForHonor())
 	{
 		WantToSwitchTo(actor, Directions::BL);
 	}
+	else if (Settings::IsKCD())
+	{
+		WantToSwitchTo(actor, Directions::TL);
+	}
 	else
-	{ 
+	{
 		Directions WantDirection;
 		bool IsQueued = HasQueuedDirection(actor, WantDirection);
 		if (ChangeQueued && IsQueued)
@@ -562,9 +639,13 @@ void DirectionHandler::SwitchDirectionLeft(RE::Actor* actor, bool ChangeQueued)
 }
 void DirectionHandler::SwitchDirectionRight(RE::Actor* actor, bool ChangeQueued)
 {
-	if (Settings::ForHonorMode)
+	if (Settings::IsForHonor())
 	{
 		WantToSwitchTo(actor, Directions::BR);
+	}
+	else if (Settings::IsKCD())
+	{
+		WantToSwitchTo(actor, Directions::TR);
 	}
 	else
 	{
@@ -601,7 +682,7 @@ void DirectionHandler::SwitchDirectionRight(RE::Actor* actor, bool ChangeQueued)
 }
 void DirectionHandler::SwitchDirectionUp(RE::Actor* actor, bool ChangeQueued)
 {
-	if (Settings::ForHonorMode)
+	if (Settings::IsForHonor())
 	{
 		WantToSwitchTo(actor, Directions::TR);
 	}
@@ -671,13 +752,7 @@ void DirectionHandler::SwitchDirectionDown(RE::Actor* actor, bool ChangeQueued)
 
 void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool force, bool overwrite, bool lock)
 {
-	if (Settings::ForHonorMode)
-	{
-		if (dir == Directions::TL)
-		{
-			dir = Directions::TR;
-		}
-	}
+	dir = FoldDirection(dir);
 	// Timer lock first. The update loop commits under it and takes
 	// ActiveDirectionsMtx inside, so taking these in the other order here is
 	// the one cycle between the two.
@@ -725,37 +800,61 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 {
 	// initialize for correctness
 	actor->SetGraphVariableInt("DirModBodyBlendSelect", 0);
-	// top right by default
-	// battleaxes are thrusting polearms so they get BR
+	// top right by default; the polearm set is thrusting so it starts low
+	Directions Initial = AnimationSet(actor) == WeaponSet::Battleaxe ? Directions::BR : Directions::TR;
+	// Direct map write, so it folds here like every other one.
+	Initial = FoldDirection(Initial);
 	ActiveDirectionsMtx.lock();
-	if (!weapon)
-	{
-		ActiveDirections[actor->GetHandle()] = Directions::TR;
-		actor->AddSpell(TR);
-	}
-	else if (weapon->HasKeyword(BattleaxeKeyword))
-	{
-		ActiveDirections[actor->GetHandle()] = Directions::BR;
-		actor->AddSpell(BR);
-	}
-	else if (PikeKeyword && weapon->HasKeyword(PikeKeyword))
-	{
-		ActiveDirections[actor->GetHandle()] = Directions::BR;
-		actor->AddSpell(BR);
-	}
-	else if (PikeKeyword2 && weapon->HasKeyword(PikeKeyword2))
-	{
-		ActiveDirections[actor->GetHandle()] = Directions::BR;
-		actor->AddSpell(BR);
-	}
-	else
-	{
-		ActiveDirections[actor->GetHandle()] = Directions::TR;
-		actor->AddSpell(TR);
-	}
+	ActiveDirections[actor->GetHandle()] = Initial;
+	actor->AddSpell(DirectionToPerk(Initial));
 	ActiveDirectionsMtx.unlock();
+	ApplyModeMarker(actor);
 	// hack to fix unblockable issues
 	actor->RemoveSpell(Unblockable);
+}
+
+WeaponSet DirectionHandler::AnimationSet(RE::Actor* actor) const
+{
+	auto* Equipped = actor->GetEquippedObject(false);
+	auto* Weapon = Equipped ? Equipped->As<RE::TESObjectWEAP>() : nullptr;
+	if (!Weapon)
+	{
+		return WeaponSet::OneHand;
+	}
+	if (Weapon->IsTwoHandedSword())
+	{
+		return WeaponSet::TwoHandSword;
+	}
+	if (Weapon->HasKeyword(BattleaxeKeyword) ||
+		(PikeKeyword && Weapon->HasKeyword(PikeKeyword)) ||
+		(PikeKeyword2 && Weapon->HasKeyword(PikeKeyword2)))
+	{
+		return WeaponSet::Battleaxe;
+	}
+	if (Weapon->IsTwoHandedAxe())
+	{
+		// The battleaxe is the odd one out; every other two-handed axe is a hammer.
+		return WeaponSet::Warhammer;
+	}
+	return HasShield(actor) ? WeaponSet::OneHandShield : WeaponSet::OneHand;
+}
+
+// One marker at a time, matching the active mode. Normal mode carries neither.
+void DirectionHandler::ApplyModeMarker(RE::Actor* actor)
+{
+	RE::SpellItem* Wanted = Settings::IsForHonor() ? ForHonorMarker :
+		Settings::IsKCD() ? KCDMarker : nullptr;
+	for (RE::SpellItem* Marker : { ForHonorMarker, KCDMarker })
+	{
+		if (Marker && Marker != Wanted && actor->HasSpell(Marker))
+		{
+			actor->RemoveSpell(Marker);
+		}
+	}
+	if (Wanted && !actor->HasSpell(Wanted))
+	{
+		actor->AddSpell(Wanted);
+	}
 }
 
 void DirectionHandler::AdjustActorScale(RE::Actor* actor)
@@ -797,10 +896,18 @@ void DirectionHandler::RemoveDirectionalPerks(RE::ActorHandle handle)
 		actor->RemoveSpell(BR);
 	}
 	
+	for (RE::SpellItem* Marker : { ForHonorMarker, KCDMarker })
+	{
+		if (Marker && actor->HasSpell(Marker))
+		{
+			actor->RemoveSpell(Marker);
+		}
+	}
 	if (actor->HasPerk(Debuff))
 	{
 		actor->RemovePerk(Debuff);
 	}
+	ApplyComboChain(actor, 0);
 	// do some cleanup here
 	//AIHandler::GetSingleton()->RemoveActor(actor);
 }
@@ -810,24 +917,22 @@ bool DirectionHandler::CanHaveDirectionalPerks(RE::Actor* actor, RE::TESObjectWE
 	outWeapon = nullptr;
 	if (!actor) return false;
 	if (actor->IsDead() || actor->IsMarkedForDeletion()) return false;
+	// The guard animations only exist on the humanoid graph. Anything else is
+	// a creature, weapon or not — a giant's club must not make it a fencer.
+	if (CreatureHandler::GetSingleton()->IsCreatureGraph(actor->GetRace())) return false;
 
 	auto Equipped = actor->GetEquippedObject(false);
 	auto EquippedLeft = actor->GetEquippedObject(true);
-	// Only weapons (no H2H) — if race can attack we force it anyway
-	const bool RaceCanFight = AIHandler::GetSingleton()->RaceForcedDirectionalCombat(actor);
-
-	if (!RaceCanFight)
+	// Only weapons (no H2H)
+	if ((!Equipped || !Equipped->IsWeapon()) &&
+		(!EquippedLeft || !EquippedLeft->IsWeapon()))
 	{
-		if ((!Equipped || !Equipped->IsWeapon()) &&
-			(!EquippedLeft || !EquippedLeft->IsWeapon()))
-		{
-			return false;
-		}
+		return false;
 	}
 
 	// check if non melee weapon
 	RE::TESObjectWEAP* Weapon = nullptr;
-	bool HasWeapon = RaceCanFight;
+	bool HasWeapon = false;
 	if (Equipped)
 	{
 		Weapon = Equipped->As<RE::TESObjectWEAP>();
@@ -994,7 +1099,9 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		return;
 	}
 
-	// Accrue guard charge: holding a line while not swinging builds toward a
+	SettingsLoader::GetSingleton()->RetargetStaticBones(actor);
+
+	// Accrue guard charge: holding a line while neither swinging nor blocking
 	// faster next attack. 
 	if (DifficultySettings::EnableGuardCharge)
 	{
@@ -1002,7 +1109,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		{
 			std::unique_lock ChargeLock(GuardChargeMtx);
 			float& Charge = GuardCharge[actor->GetHandle()];
-			if (actor->IsAttacking())
+			if (actor->IsAttacking() || actor->IsBlocking())
 			{
 				Charge = 0.f;
 			}
@@ -1154,11 +1261,13 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		{
 			actor->RemoveSpell(Unblockable);
 		}
+		ApplyComboChain(actor, 0);
 	}
 
 	RE::TESObjectWEAP* Weapon = nullptr;
 	if (!ShouldHaveDirectionalPerks(actor, Weapon))
 	{
+		CreatureHandler::GetSingleton()->UpdateActor(actor);
 		return;
 	}
 
@@ -1212,10 +1321,18 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		}
 	}
 
-	// AI stuff
+	// AI stuff. A held-off actor decides nothing: switching and dodging drain the
+	// bar it needs when it rotates back in.
 	if (!actor->IsPlayerRef() && HasDirectionalPerks(actor))
 	{
-		AIHandler::GetSingleton()->RunActor(actor, delta);
+		if (IsAttackingDisabled(actor))
+		{
+			AIHandler::GetSingleton()->NotifyHeldOff(actor);
+		}
+		else
+		{
+			AIHandler::GetSingleton()->RunActor(actor, delta);
+		}
 	}
 }
 
@@ -1320,22 +1437,36 @@ void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 	}
 	else
 	{
-		SendAnimationEvent(actor, false);
-		AnimationTimer[actor->GetHandle()].resize(MaxSize);
-		AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
+		// A forced idle under a pending swing orphans it (accepted as kDraw, never played): defer.
+		const bool SwingPending = actor->IsAttacking() ||
+			(actor->IsPlayerRef() ? InputEventHandler::GetSingleton()->HasBufferedAttack() :
+				AIHandler::GetSingleton()->HasSwingQueued(actor));
+		if (SwingPending)
+		{
+			AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
+		}
+		else
+		{
+			SendAnimationEvent(actor, false);
+			// reserve, not resize: resize made four zero-timer entries, each a ForceIdle on the next frame.
+			AnimationTimer[actor->GetHandle()].reserve(MaxSize);
+			AnimationTimer[actor->GetHandle()].push_back({ SlowTimeBetweenChanges, false });
+		}
 	}
 	AnimationTimerMtx.unlock();
 }
 
-void DirectionHandler::ClearAnimationQueue(RE::Actor* actor)
+bool DirectionHandler::ClearAnimationQueue(RE::Actor* actor)
 {
 	AnimationTimerMtx.lock();
 	auto Iter = AnimationTimer.find(actor->GetHandle());
-	if (Iter != AnimationTimer.end())
+	const bool Cleared = Iter != AnimationTimer.end();
+	if (Cleared)
 	{
 		AnimationTimer.erase(Iter);
 	}
 	AnimationTimerMtx.unlock();
+	return Cleared;
 }
 
 void DirectionHandler::Update(float delta)
@@ -1442,6 +1573,7 @@ void DirectionHandler::Update(float delta)
 				continue;
 			}
 
+			ComboIter->second.flashLeft = std::max(0.f, ComboIter->second.flashLeft - delta);
 			ComboIter->second.timeLeft -= delta;
 			if (ComboIter->second.timeLeft <= 0)
 			{
@@ -1450,6 +1582,7 @@ void DirectionHandler::Update(float delta)
 				{
 					actor->RemoveSpell(Unblockable);
 				}
+				ApplyComboChain(actor, 0);
 				ComboIter = ComboDatas.erase(ComboIter);
 				continue;
 			}
@@ -1572,7 +1705,7 @@ void DirectionHandler::DebuffActor(RE::Actor* actor)
 	}
 }
 
-void DirectionHandler::AddCombo(RE::Actor* actor, bool ForceComplete)
+void DirectionHandler::AddCombo(RE::Actor* actor, bool ForceComplete, int ExtraSteps)
 {
 	if (!ForceComplete)
 	{
@@ -1597,10 +1730,8 @@ void DirectionHandler::AddCombo(RE::Actor* actor, bool ForceComplete)
 		CurrentDir = DirIter->second;
 	}
 
-	// Every direction in the window must be distinct. ForHonorMode stays at 2 —
-	// with only three directions, a 3-length distinct rule would just mean "use
-	// all of them" every time.
-	const int comboSize = Settings::ForHonorMode ? 2 : 3;
+	// Three in every mode; RunAdvances decides what counts.
+	constexpr int comboSize = 3;
 	{
 		std::unique_lock ComboLock(ComboDatasMtx);
 		auto Result = ComboDatas.try_emplace(actor->GetHandle());
@@ -1611,6 +1742,8 @@ void DirectionHandler::AddCombo(RE::Actor* actor, bool ForceComplete)
 		ComboData& data = Result.first->second;
 		if (!ForceComplete)
 		{
+			const int RunBefore = ComboRun(data);
+			const int StepsBefore = RunBefore + data.bonus;
 			data.lastAttackDirs[data.currentIdx] = CurrentDir;
 			if (data.size > 0)
 			{
@@ -1637,21 +1770,74 @@ void DirectionHandler::AddCombo(RE::Actor* actor, bool ForceComplete)
 			{
 				data.currentIdx = 0;
 			}
+			// Credited steps only survive while the run keeps growing.
+			if (ComboRun(data) <= RunBefore)
+			{
+				data.bonus = 0;
+			}
+			data.bonus = std::min(data.bonus + ExtraSteps, comboSize);
+			if (ComboRun(data) + data.bonus > StepsBefore)
+			{
+				data.flashLeft = ComboFlashTime;
+			}
 		}
 
 		// apply perk
 		// clean up all combo stuff if we can apply it
-		if (ForceComplete || (data.size >= comboSize && AllDirectionsDistinct(data.lastAttackDirs.data(), comboSize)))
+		if (ForceComplete || ComboRun(data) + data.bonus >= comboSize)
 		{
 			std::unique_lock UnblockableLock(UnblockableActorsMtx);
 			if (UnblockableActors.insert(actor->GetHandle()).second)
 			{
 				actor->AddSpell(Unblockable);
 			}
+			data.flashLeft = ComboFlashTime;
 			data.currentIdx = 0;
 			data.size = 0;
 			data.repeatCount = 0;
+			data.bonus = 0;
 		}
 		data.timeLeft = DifficultySettings::ComboResetTimer;
+		ApplyComboChain(actor, ComboRun(data) + data.bonus);
+	}
+}
+
+void DirectionHandler::ResetCombo(RE::Actor* actor)
+{
+	std::unique_lock ComboLock(ComboDatasMtx);
+	// make sure we remove unblockable spell
+	{
+		std::unique_lock UnblockableLock(UnblockableActorsMtx);
+		if (UnblockableActors.erase(actor->GetHandle()) > 0)
+		{
+			actor->RemoveSpell(Unblockable);
+		}
+	}
+	auto Iter = ComboDatas.find(actor->GetHandle());
+	if (Iter != ComboDatas.end())
+	{
+		ApplyComboChain(actor, 0);
+		ComboDatas.erase(Iter);
+	}
+}
+
+void DirectionHandler::ApplyComboChain(RE::Actor* actor, int run)
+{
+	if (!ComboChain1 || !ComboChain2)
+	{
+		return;
+	}
+	RE::SpellItem* Stages[2] = { ComboChain1, ComboChain2 };
+	for (int i = 0; i < 2; ++i)
+	{
+		const bool Want = run == i + 1;
+		if (Want && !actor->HasSpell(Stages[i]))
+		{
+			actor->AddSpell(Stages[i]);
+		}
+		else if (!Want && actor->HasSpell(Stages[i]))
+		{
+			actor->RemoveSpell(Stages[i]);
+		}
 	}
 }

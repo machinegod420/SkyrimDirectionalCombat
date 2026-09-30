@@ -4,6 +4,12 @@
 #include "3rdparty/TrueDirectionalMovementAPI.h"
 #include "3rdparty/PrecisionAPI.h"
 
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+#include <vector>
+
 struct DifficultySettings
 {
 	static float ComboResetTimer;
@@ -16,17 +22,32 @@ struct DifficultySettings
 	// lower frequency instead of being removed. For scale,
 	// GuardChargeMaxSpeedBonus is 0.20 in the other direction.
 	static float SameSideSpeedPenalty;
+	// Attack-speed penalty on a light poke thrown mid-combo, in any mode. The
+	// thrust is active from its first frame, so it needs more than the same-side
+	// cost to become reactable. The larger of the two applies, never both.
+	static float ChainPokeSpeedPenalty;
 	static float UnblockableDamageMult;
+	// An unblockable deals at least this share of the target's max health: NPC targets,
+	// then the player as the target.
+	static float UnblockableHealthFloor;
+	static float PlayerUnblockableHealthFloor;
 	static float ProjectileDamageMult;
 	static float StaggerResetTimer;
 	static float ChamberWindowTime;
 	static float FeintWindowTime;
+	// Share of max stamina a feint costs; the swing it cancels is never charged.
+	static float FeintStaminaCost;
 	static float StaminaRegenMult;
+	// Regen for creature-graph actors. Humans refill between exchanges; a
+	// creature carries one pool for the fight and can be outlasted.
+	static float CreatureStaminaRegenMult;
 	// Ceiling on how much stacked Fortify Stamina Regeneration can raise the
 	// regen rate, as a fraction (0.5 = at most +50%). Applied as a saturating
 	// curve so buffs always do something and nothing reads as broken. Debuffs
-	// (cold, disease) are not compressed and apply in full.
+	// (cold, disease) get the same treatment through MaxRegenPenalty.
 	static float MaxRegenBonus;
+	// Worst case regen loss from a debuff, at a mult of 0. 0.5 = half regen.
+	static float MaxRegenPenalty;
 	static float AttackTimeoutTime;
 	static bool AttacksCostStamina;
 	static float NonNPCStaggerMult;
@@ -60,6 +81,15 @@ struct DifficultySettings
 	static bool KCDStyleCombos;
 };
 
+// Which direction set the mod runs. Mutually exclusive: each drives its own
+// animations through a marker spell the behavior conditions read.
+enum class DirectionMode
+{
+	Normal = 0,    // four directions
+	ForHonor = 1,  // top folded into TR
+	KCD = 2,       // as normal, different animations
+};
+
 enum class DodgeSystem
 {
 	None = 0,    // no dodge support
@@ -74,14 +104,21 @@ struct Settings
 	static bool HasTDM;
 	static bool EnableForH2H;
 	static bool MNBMode;
-	static bool ForHonorMode;
+	static DirectionMode ActiveDirectionMode;
+	static bool IsForHonor() { return ActiveDirectionMode == DirectionMode::ForHonor; }
+	static bool IsKCD() { return ActiveDirectionMode == DirectionMode::KCD; }
 	static bool ExperimentalMode;
 	static DodgeSystem ActiveDodgeSystem;
-	static bool BufferInput;
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;
 	static bool VerboseLogging;
 	static bool TDMOnlyLockedHumanoids;
+	static bool CreatureDirectionalAttacks;
+	// Creature height / player height at which a creature swings high.
+	static float CreatureLargeHeightRatio;
+	// Weapon-weight equivalent of a player-sized creature, for block cost.
+	// Scales with the creature's height relative to the player.
+	static float CreatureSizeWeight;
 
 };
 
@@ -161,12 +198,23 @@ struct AISettings
 	// actor's patience (Aggressor ~0.3x, Turtle ~2x). Raise to make NPCs turtle
 	// longer.
 	static float DefendPatienceSeconds;
+	// Mental fatigue: seconds in measure before it starts, seconds at which it is full, and
+	// what full adds to the update and action timers. 0 horizon disables it.
+	static float FatigueOnsetSeconds;
+	static float FatigueHorizonSeconds;
+	static float FatigueUpdateSeconds;
+	static float FatigueActionSeconds;
 	// Pull toward the line the target's combo makes likely. 0 = pure learned
 	// belief, 1 = always the structurally predicted line.
 	static float ComboReadStrength;
 	// What fraction of the combo read a VeryEasy actor gets. Legendary gets all
 	// of it; the tiers between interpolate.
 	static float ComboReadLowTierScale;
+	// Off: your follow-up habits stop feeding the saved profile and NPCs meet
+	// you cold. The saved profile is kept; in-fight reads are unaffected.
+	static bool LearnAcrossFights;
+	// Off: opponent reach from the model alone.
+	static bool LearnReach;
 	// Belief decay. Disconfirm fires when a guard is caught on the wrong line,
 	// CascadeDrain on every conditioned pick, and the spread modifiers divide
 	// an investment to decide how much it pulls off the other three lines.
@@ -229,9 +277,27 @@ public:
 
 	void RebalanceWeapons();
 	void RemovePowerAttacks();
+	// Puts draugr and skeleton races on the humanoid skeleton and behavior
+	// graph, so they get guards. Must run at data load, before any 3D loads.
+	void HumanoidUndeadRaces();
+	// Points a patched actor's skin bones that sit outside the animated
+	// skeleton at the bone sharing their name before the bracket, so their
+	// verts follow the body. Once per loaded 3D; armor attached later is not
+	// rescanned.
+	void RetargetStaticBones(RE::Actor* actor);
 
 private:
-	float CalcDamage(float diff);
+	std::unordered_set<RE::TESRace*> HumanoidUndeadPatched;
+	// The race and NPC attack data maps the patch replaced, kept alive so
+	// nothing that cached a raw pointer during load is left dangling.
+	std::vector<RE::NiPointer<RE::BGSAttackDataMap>> RetiredAttackMaps;
+	// The 3D root each patched actor was last scanned with.
+	std::unordered_map<RE::FormID, RE::NiAVObject*> RetargetScannedRoot;
+	std::mutex RetargetMtx;
+	// Damage multiplier that keeps a weapon's damage per second where vanilla
+	// had it once its speed is pinned to the class rate. Both arguments are
+	// effective speeds, so two-handers compare like for like.
+	float CalcDamage(float oldEffective, float newEffective);
 	RE::BGSKeyword* IsWarhammer;
 	RE::BGSKeyword* IsBaxe;
 

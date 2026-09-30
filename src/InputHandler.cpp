@@ -25,6 +25,94 @@ static DodgeDirection GraphDirectionToDodgeDir(float dir)
 	return DodgeDirection::Backward;
 }
 
+// Frames the buffered press waits after the switch commits, so the animation
+// thread has read the new spell before the swing is chosen.
+constexpr int BufferedAttackFramesAfterCommit = 2;
+// A switch that hasn't committed by then was parked; drop the press.
+constexpr float BufferedAttackMaxSeconds = 0.5f;
+// A press during your own swing is held this long for it to land; earlier is on you.
+constexpr float BufferedMidSwingMaxSeconds = 0.2f;
+
+void InputEventHandler::BufferAttack(bool power)
+{
+	PendingAttack = true;
+	PendingPower = PendingPower || power;
+}
+
+bool InputEventHandler::ShouldHoldPress() const
+{
+	auto* Player = RE::PlayerCharacter::GetSingleton();
+	Directions Queued;
+	bool GraphBash = false;
+	return PendingAttack || DirectionHandler::GetSingleton()->HasQueuedDirection(Player, Queued) ||
+		(Player->GetGraphVariableBool("IsBashing", GraphBash) && GraphBash) || IsInWindup(Player);
+}
+
+void InputEventHandler::OnBlockPressed()
+{
+	PendingAttack = false;
+	PendingPower = false;
+	PendingAge = 0.f;
+	PendingFrames = 0;
+}
+
+void InputEventHandler::Update(float delta)
+{
+	auto* Player = RE::PlayerCharacter::GetSingleton();
+	AttackHandler::GetSingleton()->ClearStuckAttack(Player, GraphIdleAttacking, delta);
+	if (!PendingAttack)
+	{
+		return;
+	}
+	Directions Queued;
+	// Hold through a bash too: the engine drops kBash before the graph finishes the bash, and
+	// an attack fired into that tail is accepted as kDraw but never played, orphaning it.
+	bool GraphBash = false;
+	const bool BashPlaying = Player->GetGraphVariableBool("IsBashing", GraphBash) && GraphBash;
+	const bool MidSwing = IsInWindup(Player);
+	if (DirectionHandler::GetSingleton()->HasQueuedDirection(Player, Queued) || BashPlaying || MidSwing)
+	{
+		PendingAge += delta;
+		if (PendingAge <= (MidSwing ? BufferedMidSwingMaxSeconds : BufferedAttackMaxSeconds))
+		{
+			return;
+		}
+	}
+	// Past your hit, wait for the chain window: fired before it, the attack is refused.
+	else if (Player->IsAttacking() && !DirectionHandler::GetSingleton()->InAttackWindow(Player))
+	{
+		return;
+	}
+	else if (++PendingFrames < BufferedAttackFramesAfterCommit)
+	{
+		return;
+	}
+	// Backstop for a guard raised some other way than the block press: blocking wins.
+	else if (IsGuardUp(Player))
+	{
+	}
+	else if (Hooks::HookAttackHandler::CanPlayerAttack())
+	{
+		// same rule as the power attack key: an unblockable never powers
+		if (PendingPower && !DirectionHandler::GetSingleton()->IsUnblockable(Player))
+		{
+			AttackHandler::GetSingleton()->DoPowerAttack(Player);
+		}
+		else
+		{
+			AttackHandler::GetSingleton()->DoAttack(Player);
+		}
+	}
+	else
+	{
+		Hooks::HookAttackHandler::OnPlayerAttackRefused();
+	}
+	PendingAttack = false;
+	PendingPower = false;
+	PendingAge = 0.f;
+	PendingFrames = 0;
+}
+
 RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>* a_eventSource)
 {
 	UNUSED(a_eventSource);
@@ -42,7 +130,6 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 		// speculative fix for specific edge case
 		if (Settings::ExperimentalMode && Player->AsActorState()->actorState2.wantBlocking && !Player->IsBlocking())
 		{
-			//logger::info("speculative player block fix");
 			Player->NotifyAnimationGraph("blockStart");
 		}
 		if (event->AsButtonEvent()->IsDown())
@@ -65,7 +152,6 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			if (ui->GameIsPaused()) {
 				continue;
 			}
-
 
 			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(Player))
 			{
@@ -95,7 +181,17 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 
 				else if (key == InputSettings::KeyCodeFeint)
 				{
-					AttackHandler::GetSingleton()->HandleFeint(Player);
+					// Read before the feint cancels the swing.
+					const bool FeintedPower = IsPowerAttacking(Player);
+					const int FeintedStep = DirectionHandler::GetSingleton()->GetComboStep(Player);
+					// Counted like swings: only with someone to swing at.
+					if (AttackHandler::GetSingleton()->HandleFeint(Player) &&
+						DirectionHandler::GetSingleton()->GetSwingTarget(Player))
+					{
+						AIHandler::GetSingleton()->RecordPlayerFeint(
+							DirectionHandler::GetSingleton()->AnimationSet(Player), FeintedStep, FeintedPower);
+						AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Feinted);
+					}
 				}
 
 				else if (key == InputSettings::KeyCodeSwitchHud)
@@ -106,16 +202,21 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			}
 			if (key == InputSettings::KeyCodeBash)
 			{
-				if (AttackHandler::GetSingleton()->CanAttack(Player))
+				// drawn weapon only
+				if (Player->AsActorState()->GetWeaponState() == RE::WEAPON_STATE::kDrawn &&
+					AttackHandler::GetSingleton()->CanAttack(Player))
 				{
-					Player->NotifyAnimationGraph("bashStart");
-					Player->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kBash;
+					AttackHandler::GetSingleton()->DoBash(Player);
 				}
 
 			}
 			else if (key == InputSettings::KeyCodePowerAttack)
 			{
-				if (Hooks::HookAttackHandler::CanPlayerAttack())
+				if (ShouldHoldPress())
+				{
+					BufferAttack(true);
+				}
+				else if (Hooks::HookAttackHandler::CanPlayerAttack())
 				{
 					// prevent unblockable attacks being power attacks because it causes a lot of balance issues
 					if (!DirectionHandler::GetSingleton()->IsUnblockable(Player))
@@ -126,6 +227,10 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 					{
 						AttackHandler::GetSingleton()->DoAttack(Player);
 					}
+				}
+				else
+				{
+					Hooks::HookAttackHandler::OnPlayerAttackRefused();
 				}
 
 			}
@@ -146,10 +251,6 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 						float currentDir = 0.0f;
 						Player->GetGraphVariableFloat("Direction", currentDir);
 						dir = GraphDirectionToDodgeDir(currentDir);
-						if (Settings::VerboseLogging)
-						{
-							logger::info("Dodge: Direction={:.3f} -> dir={}", currentDir, static_cast<int>(dir));
-						}
 						DodgeHandler::GetSingleton()->ApplyImpulse(Player, dir);
 					}
 				}

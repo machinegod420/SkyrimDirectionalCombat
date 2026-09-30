@@ -1,5 +1,8 @@
 #include "SettingsLoader.h"
 
+#include <cstring>
+#include <new>
+
 #define SETTING_MACRO(sectionName, settingsClass, settingName, newval) \
     do { \
         settingsClass::settingName = newval; \
@@ -10,13 +13,19 @@
 float DifficultySettings::ComboResetTimer = 3.f;
 float DifficultySettings::MeleeDamageMult = 2.f;
 float DifficultySettings::SameSideSpeedPenalty = 0.15f;
+float DifficultySettings::ChainPokeSpeedPenalty = 0.33f;
 float DifficultySettings::UnblockableDamageMult = 2.5f;
+float DifficultySettings::UnblockableHealthFloor = 0.1f;
+float DifficultySettings::PlayerUnblockableHealthFloor = 0.1f;
 float DifficultySettings::ProjectileDamageMult = 0.25f;
 float DifficultySettings::StaggerResetTimer = 1.5f;
 float DifficultySettings::ChamberWindowTime = 0.2f;
 float DifficultySettings::FeintWindowTime = 0.4f;
+float DifficultySettings::FeintStaminaCost = 0.05f;
 float DifficultySettings::StaminaRegenMult = 39.f;
+float DifficultySettings::CreatureStaminaRegenMult = 5.f;
 float DifficultySettings::MaxRegenBonus = 0.5f;
+float DifficultySettings::MaxRegenPenalty = 0.5f;
 float DifficultySettings::AttackTimeoutTime = 1.0f;
 bool DifficultySettings::AttacksCostStamina = true;
 float DifficultySettings::NonNPCStaggerMult = 2.f;
@@ -44,14 +53,16 @@ bool Settings::HasPrecision = false;
 bool Settings::HasTDM = false;
 bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
-bool Settings::ForHonorMode = false;
+DirectionMode Settings::ActiveDirectionMode = DirectionMode::Normal;
 bool Settings::ExperimentalMode = false;
 DodgeSystem Settings::ActiveDodgeSystem = DodgeSystem::None;
-bool Settings::BufferInput = true;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
 bool Settings::VerboseLogging = false;
 bool Settings::TDMOnlyLockedHumanoids = false;
+bool Settings::CreatureDirectionalAttacks = true;
+float Settings::CreatureLargeHeightRatio = 1.f;
+float Settings::CreatureSizeWeight = 15.f;
 
 InputSettings::InputTypes InputSettings::InputType = InputSettings::InputTypes::MouseOnly;
 int InputSettings::MouseSens = 5;
@@ -69,13 +80,13 @@ unsigned InputSettings::KeyCodeDodge = 56;
 bool InputSettings::InvertY = false;
 
 bool WeaponSettings::RebalanceWeapons = true;
-float WeaponSettings::WarhammerSpeed = 0.72f;
-float WeaponSettings::BattleaxeSpeed = 0.74f;
-float WeaponSettings::GreatSwordSpeed = 0.77f;
-float WeaponSettings::SwordSpeed = 0.8f;
-float WeaponSettings::AxeSpeed = 0.8f;
-float WeaponSettings::WeaponSpeedMult = 0.9f;
-float WeaponSettings::BowSpeedMult = 0.6f;
+float WeaponSettings::WarhammerSpeed = 1.f;
+float WeaponSettings::BattleaxeSpeed = 1.f;
+float WeaponSettings::GreatSwordSpeed = 1.f;
+float WeaponSettings::SwordSpeed = 1.f;
+float WeaponSettings::AxeSpeed = 1.f;
+float WeaponSettings::WeaponSpeedMult = 1.f;
+float WeaponSettings::BowSpeedMult = 1.f;
 
 float AISettings::AIWaitTimer = 1.f;
 int AISettings::LegendaryLvl = 11;
@@ -97,8 +108,14 @@ float AISettings::PreBlockMaxChance = 75.f;
 float AISettings::ConditionedFixationSeconds = 0.5f;
 float AISettings::CommitWindowTicks = 1.0f;
 float AISettings::DefendPatienceSeconds = 2.0f;
+float AISettings::FatigueOnsetSeconds = 30.f;
+float AISettings::FatigueHorizonSeconds = 90.f;
+float AISettings::FatigueUpdateSeconds = 0.08f;
+float AISettings::FatigueActionSeconds = 0.05f;
 float AISettings::ComboReadStrength = 0.5f;
 float AISettings::ComboReadLowTierScale = 0.2f;
+bool AISettings::LearnAcrossFights = true;
+bool AISettings::LearnReach = true;
 float AISettings::BeliefDisconfirmFraction = 0.5f;
 int AISettings::BeliefDisconfirmFloor = 5;
 int AISettings::BeliefCascadeDrain = 5;
@@ -249,12 +266,33 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::SameSideSpeedPenalty);
 				}
+				else if (fieldName == "ChainPokeSpeedPenalty")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::ChainPokeSpeedPenalty = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::ChainPokeSpeedPenalty);
+				}
 				else if (fieldName == "UnblockableDamageMult")
 				{
 					float newval = field.as<float>();
 					DifficultySettings::UnblockableDamageMult = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::UnblockableDamageMult);
+				}
+				else if (fieldName == "UnblockableHealthFloor")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::UnblockableHealthFloor = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::UnblockableHealthFloor);
+				}
+				else if (fieldName == "PlayerUnblockableHealthFloor")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::PlayerUnblockableHealthFloor = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::PlayerUnblockableHealthFloor);
 				}
 				else if (fieldName == "ProjectileDamageMult")
 				{
@@ -283,6 +321,13 @@ void SettingsLoader::Load(const std::string& path)
 					DifficultySettings::FeintWindowTime = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::FeintWindowTime);
+				}
+				else if (fieldName == "FeintStaminaCost")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::FeintStaminaCost = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::FeintStaminaCost);
 				}
 
 				else if (fieldName == "AttacksCostStamina")
@@ -313,10 +358,22 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::StaminaRegenMult);
 				}
+				else if (fieldName == "CreatureStaminaRegenMult")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::CreatureStaminaRegenMult = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::CreatureStaminaRegenMult);
+				}
 				else if (fieldName == "MaxRegenBonus")
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, DifficultySettings, MaxRegenBonus, newval);
+				}
+				else if (fieldName == "MaxRegenPenalty")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, MaxRegenPenalty, newval);
 				}
 				else if (fieldName == "StaminaCost")
 				{
@@ -478,6 +535,26 @@ void SettingsLoader::Load(const std::string& path)
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, AISettings, DefendPatienceSeconds, newval);
 				}
+				else if (fieldName == "FatigueOnsetSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, FatigueOnsetSeconds, newval);
+				}
+				else if (fieldName == "FatigueHorizonSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, FatigueHorizonSeconds, newval);
+				}
+				else if (fieldName == "FatigueUpdateSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, FatigueUpdateSeconds, newval);
+				}
+				else if (fieldName == "FatigueActionSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, FatigueActionSeconds, newval);
+				}
 				else if (fieldName == "ComboReadStrength")
 				{
 					float newval = field.as<float>();
@@ -487,6 +564,16 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, AISettings, ComboReadLowTierScale, newval);
+				}
+				else if (fieldName == "LearnAcrossFights")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, AISettings, LearnAcrossFights, newval);
+				}
+				else if (fieldName == "LearnReach")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, AISettings, LearnReach, newval);
 				}
 				else if (fieldName == "BeliefDisconfirmFraction")
 				{
@@ -733,12 +820,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::MNBMode);
 				}
-				else if (fieldName == "ForHonorMode")
+				else if (fieldName == "DirectionMode")
 				{
-					bool newval = field.as<bool>();
-					Settings::ForHonorMode = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, Settings::ForHonorMode);
+					int newval = field.as<int>();
+					Settings::ActiveDirectionMode = static_cast<DirectionMode>(newval);
+					logger::info("Loaded section {} setting {} with new value {} ({})",
+						sectionName, fieldName, newval,
+						newval == 1 ? "ForHonor" : (newval == 2 ? "KCD" : "Normal"));
 				}
 				else if (fieldName == "ExperimentalMode")
 				{
@@ -789,6 +877,27 @@ void SettingsLoader::Load(const std::string& path)
 					Settings::TDMOnlyLockedHumanoids = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::VerboseLogging);
+				}
+				else if (fieldName == "CreatureDirectionalAttacks")
+				{
+					bool newval = field.as<bool>();
+					Settings::CreatureDirectionalAttacks = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::CreatureDirectionalAttacks);
+				}
+				else if (fieldName == "CreatureLargeHeightRatio")
+				{
+					float newval = field.as<float>();
+					Settings::CreatureLargeHeightRatio = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::CreatureLargeHeightRatio);
+				}
+				else if (fieldName == "CreatureSizeWeight")
+				{
+					float newval = field.as<float>();
+					Settings::CreatureSizeWeight = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, Settings::CreatureSizeWeight);
 				}
 			}
 			else if (sectionName == "Weapons")
@@ -872,13 +981,17 @@ void SettingsLoader::Load(const std::string& path)
 	}
 }
 
-float SettingsLoader::CalcDamage(float diff)
+// The behavior graph runs two-handed swings this much faster than the weapon's
+// speed value says, so the class speeds are divided by it before being written.
+constexpr float TwoHandSpeedFactor = 1.5f;
+
+float SettingsLoader::CalcDamage(float oldEffective, float newEffective)
 {
-	float ret = 1.0;
-	ret += diff;
-	ret = std::min(ret, 1.5f);
-	ret = std::max(ret, 0.5f);
-	return ret;
+	if (oldEffective <= 0.f || newEffective <= 0.f)
+	{
+		return 1.f;
+	}
+	return std::clamp(oldEffective / newEffective, 0.5f, 1.5f);
 }
 
 void SettingsLoader::RebalanceWeapons()
@@ -887,7 +1000,6 @@ void SettingsLoader::RebalanceWeapons()
 
 	for (RE::TESCombatStyle* combatStyle : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESCombatStyle>())
 	{
-		//logger::info("parsed {}", combatStyle->GetFormEditorID());
 		// these have caps
 		float meleeScoreMult = combatStyle->generalData.meleeScoreMult * 1.2f;
 		//meleeScoreMult = std::min(0.99f, meleeScoreMult);
@@ -926,55 +1038,237 @@ void SettingsLoader::RebalanceWeapons()
 		{
 			float speed = weap->weaponData.speed;
 			float damage = (float)weap->attackDamage;
-			uint16_t newdamage = weap->attackDamage;
-			float newspeed = weap->weaponData.speed;
+			// The rate we want the weapon to swing at, before the graph's
+			// two-handed multiplier is taken back out.
+			float classSpeed = 0.f;
+			bool twoHand = false;
 			switch (weap->GetWeaponType())
 			{
 			case RE::WEAPON_TYPE::kOneHandDagger:
 			case RE::WEAPON_TYPE::kOneHandSword:
 			{
-				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::SwordSpeed));
-				newspeed = WeaponSettings::SwordSpeed;
+				classSpeed = WeaponSettings::SwordSpeed;
 				break;
 			}
 			case RE::WEAPON_TYPE::kOneHandMace:
 			case RE::WEAPON_TYPE::kOneHandAxe:
 			{
-				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::AxeSpeed));
-				newspeed = WeaponSettings::AxeSpeed;
+				classSpeed = WeaponSettings::AxeSpeed;
 				break;
 			}
 
 			case RE::WEAPON_TYPE::kTwoHandSword:
 			{
-				newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::GreatSwordSpeed));
-				newspeed = WeaponSettings::GreatSwordSpeed;
+				classSpeed = WeaponSettings::GreatSwordSpeed;
+				twoHand = true;
 				break;
 			}
 
 			case RE::WEAPON_TYPE::kTwoHandAxe:
 			{
 				//special case here due to having to use keywords
-				if (weap->HasKeyword(IsWarhammer))
-				{
-					newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::WarhammerSpeed));
-					newspeed = WeaponSettings::WarhammerSpeed;
-				}
-				else
-				{
-					newdamage = uint16_t(damage * CalcDamage(speed - WeaponSettings::BattleaxeSpeed));
-					newspeed = WeaponSettings::BattleaxeSpeed;
-				}
+				classSpeed = weap->HasKeyword(IsWarhammer) ?
+					WeaponSettings::WarhammerSpeed : WeaponSettings::BattleaxeSpeed;
+				twoHand = true;
 				break;
 			}
 			}
-			//logger::info("{} got its damaged changed from {} to {} and speed from {} to {}", weap->GetName(), weap->attackDamage, newdamage, speed, weap->weaponData.speed);
+			if (classSpeed <= 0.f)
+			{
+				continue;
+			}
+			const float factor = twoHand ? TwoHandSpeedFactor : 1.f;
+			const uint16_t newdamage = uint16_t(damage * CalcDamage(speed * factor, classSpeed));
+			const float newspeed = classSpeed / factor;
+			//logger::info("{} got its damaged changed from {} to {} and speed from {} to {}", weap->GetName(), weap->attackDamage, newdamage, speed, newspeed);
 			weap->attackDamage = newdamage;
 			weap->weaponData.speed = newspeed;
 		}
 
 		
 	}
+}
+
+void SettingsLoader::HumanoidUndeadRaces()
+{
+	const auto* Nord = RE::TESDataHandler::GetSingleton()->LookupForm<RE::TESRace>(0x13746, "Skyrim.esm");
+	if (!Nord)
+	{
+		logger::error("HumanoidUndeadRaces: NordRace not found");
+		return;
+	}
+	for (auto* race : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESRace>())
+	{
+		if (!race || race == Nord)
+		{
+			continue;
+		}
+		// Every vanilla draugr and skeleton race runs a project under Actors\Draugr.
+		std::string Path = race->behaviorGraphs[RE::SEXES::kMale].model.c_str();
+		std::transform(Path.begin(), Path.end(), Path.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (Path.find("actors\\draugr\\") == std::string::npos)
+		{
+			continue;
+		}
+		for (std::uint32_t i = 0; i < RE::SEXES::kTotal; ++i)
+		{
+			race->skeletonModels[i].SetModel(Nord->skeletonModels[i].model.c_str());
+			race->behaviorGraphs[i].SetModel(Nord->behaviorGraphs[i].model.c_str());
+			race->rootBehaviorGraphNames[i] = Nord->rootBehaviorGraphNames[i];
+			race->behaviorGraphProjectNames[i] = Nord->behaviorGraphProjectNames[i];
+			// Vanilla only picks attacks whose event is in this table, and it was
+			// built from the draugr project at load.
+			if (Nord->attackAnimationArrayMap[i] && race->attackAnimationArrayMap[i] != Nord->attackAnimationArrayMap[i])
+			{
+				Nord->attackAnimationArrayMap[i]->IncRefCount();
+				race->attackAnimationArrayMap[i] = Nord->attackAnimationArrayMap[i];
+			}
+		}
+
+		if (Nord->attackDataMap && race->attackDataMap != Nord->attackDataMap)
+		{
+			RetiredAttackMaps.push_back(race->attackDataMap);
+			race->attackDataMap = Nord->attackDataMap;
+		}
+		// Body part data names a skeleton and its nodes, so it follows the
+		// skeleton. Precision also keys its attack collisions on it.
+		race->bodyPartData = Nord->bodyPartData;
+		HumanoidUndeadPatched.insert(race);
+	}
+	// NPC records build their own attack data map from the race's entries while
+	// records load, before this runs, so theirs still hold the draugr entries.
+	// Point them at the race's map, as they would have been had the race been
+	// edited before load.
+	int Repointed = 0;
+	for (auto* npc : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESNPC>())
+	{
+		RE::TESRace* Race = npc ? npc->GetRace() : nullptr;
+		if (!Race || !HumanoidUndeadPatched.contains(Race) || !Race->attackDataMap)
+		{
+			continue;
+		}
+		if (npc->attackDataMap != Race->attackDataMap)
+		{
+			if (npc->attackDataMap)
+			{
+				RetiredAttackMaps.push_back(npc->attackDataMap);
+			}
+			npc->attackDataMap = Race->attackDataMap;
+			++Repointed;
+		}
+	}
+	logger::info("HumanoidUndeadRaces: {} races on the humanoid skeleton and graph, {} NPC records pointed at their race's attack data",
+		HumanoidUndeadPatched.size(), Repointed);
+}
+
+// "NPC L Foot [LLft ]" -> "NPC L Foot"
+static std::string_view BaseName(std::string_view Name)
+{
+	const auto Bracket = Name.find(" [");
+	return Bracket == std::string_view::npos ? Name : Name.substr(0, Bracket);
+}
+
+// SMP renames a bone it inserts as "hdtSSEPhysics_AutoRename_<tag> <original name>".
+static std::string_view StripSmpPrefix(std::string_view Name)
+{
+	if (Name.starts_with("hdtSSEPhysics_AutoRename"))
+	{
+		const auto Space = Name.find(' ');
+		if (Space != std::string_view::npos)
+		{
+			return Name.substr(Space + 1);
+		}
+	}
+	return Name;
+}
+
+// this is a hack to force all draugr and skeletons to participate in the directional combat system correctly
+void SettingsLoader::RetargetStaticBones(RE::Actor* actor)
+{
+	if (!HumanoidUndeadPatched.contains(actor->GetRace()))
+	{
+		return;
+	}
+	// Once per loaded 3D: a reload builds new meshes with fresh bindings.
+	RE::NiAVObject* Root = actor->Get3D();
+	if (!Root)
+	{
+		return;
+	}
+	{
+		std::lock_guard Lock(RetargetMtx);
+		RE::NiAVObject*& Scanned = RetargetScannedRoot[actor->GetFormID()];
+		if (Scanned == Root)
+		{
+			return;
+		}
+		Scanned = Root;
+	}
+	// Recorded above before this lookup: a root without COM is scanned once,
+	// not walked every frame.
+	RE::NiAVObject* Com = Root->GetObjectByName("NPC COM [COM ]");
+	if (!Com)
+	{
+		return;
+	}
+	// Every animated bone hangs under COM. Index them by the text before the
+	// bracket; null where two share it.
+	std::unordered_map<std::string, RE::NiAVObject*> ByBase;
+	RE::BSVisit::TraverseScenegraphObjects(Com, [&](RE::NiAVObject* Node) -> RE::BSVisit::BSVisitControl {
+		const std::string_view Name = Node->name.c_str();
+		if (!Name.empty())
+		{
+			auto [It, Inserted] = ByBase.try_emplace(std::string(BaseName(Name)), Node);
+			if (!Inserted)
+			{
+				It->second = nullptr;
+			}
+		}
+		return RE::BSVisit::BSVisitControl::kContinue;
+	});
+	const char* RaceName = actor->GetRace()->GetFormEditorID();
+	// now actually assign orphaned verts to the closest bone
+	RE::BSVisit::TraverseScenegraphGeometries(Root, [&](RE::BSGeometry* Geometry) -> RE::BSVisit::BSVisitControl {
+		auto* Skin = Geometry->GetGeometryRuntimeData().skinInstance.get();
+		if (!Skin || !Skin->skinData || !Skin->bones || !Skin->boneWorldTransforms)
+		{
+			return RE::BSVisit::BSVisitControl::kContinue;
+		}
+		for (std::uint32_t i = 0; i < Skin->skinData->GetBoneCount(); ++i)
+		{
+			RE::NiAVObject* Bone = Skin->bones[i];
+			if (!Bone)
+			{
+				continue;
+			}
+			// A bone outside COM never animates: SMP parks bones the skeleton
+			// lacks under the root.
+			bool UnderCom = false;
+			for (RE::NiAVObject* Node = Bone; Node && !UnderCom; Node = Node->parent)
+			{
+				UnderCom = Node == Com;
+			}
+			if (UnderCom)
+			{
+				continue;
+			}
+			const std::string_view Name = StripSmpPrefix(Bone->name.c_str());
+			auto It = ByBase.find(std::string(BaseName(Name)));
+			if (It == ByBase.end() || !It->second)
+			{
+				continue;
+			}
+			// Pointer-sized writes, and the old node stays alive, so a render in
+			// between reads the old bone or the new one, never garbage.
+			Skin->boneWorldTransforms[i] = &It->second->world;
+			Skin->bones[i] = It->second;
+			if (Settings::VerboseLogging)
+			{
+				logger::info("[skin] {} mesh {} bone {} -> {}", RaceName, Geometry->name.c_str(), Name, It->second->name.c_str());
+			}
+		}
+		return RE::BSVisit::BSVisitControl::kContinue;
+	});
 }
 
 void SettingsLoader::RemovePowerAttacks()
@@ -1001,16 +1295,13 @@ void SettingsLoader::RemovePowerAttacks()
 			{
 				for (auto& iter : race->attackDataMap->attackDataMap)
 				{
-					//logger::info("got {}", iter.first.c_str());
 					if (iter.first.contains("attack") && iter.first.contains("Power") && !iter.first.contains("InPlace"))
 					{
 						race->attackDataMap->attackDataMap.erase(iter.first);
-						//logger::info("erasing {} with result {}", iter.first.c_str(), result);
 					}
 					if (iter.first.contains("attack") && iter.first.contains("Sprint"))
 					{
 						race->attackDataMap->attackDataMap.erase(iter.first);
-						//logger::info("erasing {} with result {}", iter.first.c_str(), result);
 					}
 					if (iter.first.contains("attack") && iter.first.contains("DualWield"))
 					{
@@ -1028,7 +1319,6 @@ void SettingsLoader::RemovePowerAttacks()
 						while (j < newevents->size())
 						{
 
-							//logger::info("{}", (*newevents)[j].eventName);
 							if ((*newevents)[j].eventName.contains("attack") && (*newevents)[j].eventName.contains("Power") && !(*newevents)[j].eventName.contains("InPlace"))
 							{
 								//newevents->erase(&(*newevents)[i]);

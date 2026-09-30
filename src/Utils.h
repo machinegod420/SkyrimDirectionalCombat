@@ -35,10 +35,59 @@ namespace std
 	};
 }
 
-// Debug snapshot of an actor's engine-side state, for diffing what an event
-// leaves behind on them. Declared here but defined in Utils.cpp — AttackHandler.h
-// includes this header, so it can't pull in the handlers the body needs.
+
 void DumpActorState(RE::Actor* a_actor, const char* a_tag);
+
+// The engine's own "this actor may not attack" switch
+inline bool IsAttackingDisabled(RE::Actor* a_actor)
+{
+	return a_actor &&
+		a_actor->GetActorRuntimeData().boolFlags.any(RE::Actor::BOOL_FLAGS::kAttackingDisabled);
+}
+
+// The combat controller's target is what the engine moves and faces the actor at;
+// currentCombatTarget can disagree with it for seconds.
+inline RE::Actor* GetCombatTarget(RE::Actor* a_actor)
+{
+	auto& Data = a_actor->GetActorRuntimeData();
+	if (Data.combatController)
+	{
+		if (RE::Actor* Target = Data.combatController->targetHandle.get().get())
+		{
+			return Target;
+		}
+	}
+	return Data.currentCombatTarget.get().get();
+}
+
+// guesstimate of how high an attack is
+constexpr float TorsoHeightRatio = 0.7f;
+
+// Torso to the nearest point of the target's body, not foot to foot. Root-to-root
+// overstates the gap on a slope, and badly for creatures.
+inline float TorsoDistanceSq(RE::Actor* a_actor, RE::Actor* a_target)
+{
+	const RE::NiPoint3 From = a_actor->GetPosition();
+	const RE::NiPoint3 To = a_target->GetPosition();
+	const float TorsoZ = From.z + a_actor->GetHeight() * TorsoHeightRatio;
+	// The target is a column from its feet to the top of its head; the swing
+	// only has to reach whichever part of it is nearest.
+	const float NearestZ = std::clamp(TorsoZ, To.z, To.z + a_target->GetHeight());
+	const float dx = To.x - From.x;
+	const float dy = To.y - From.y;
+	const float dz = NearestZ - TorsoZ;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+// IsBlocking() is a graph read; wantBlocking covers the frame before it catches up.
+inline bool IsGuardUp(RE::Actor* a_actor)
+{
+	if (!a_actor)
+	{
+		return false;
+	}
+	return a_actor->IsBlocking() || a_actor->AsActorState()->actorState2.wantBlocking;
+}
 
 inline bool IsPowerAttacking(RE::Actor* a_actor)
 {
@@ -59,6 +108,13 @@ inline bool IsPowerAttacking(RE::Actor* a_actor)
 inline bool IsBashing(RE::Actor* a_actor)
 {
 	return a_actor->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kBash;
+}
+
+// Before the hit. A press here never started the next swing: refused, or taken and dropped.
+inline bool IsInWindup(RE::Actor* a_actor)
+{
+	const auto State = a_actor->AsActorState()->GetAttackState();
+	return State == RE::ATTACK_STATE_ENUM::kDraw || State == RE::ATTACK_STATE_ENUM::kSwing;
 }
 
 inline bool IsLockedInAnimation(RE::Actor* a_actor)

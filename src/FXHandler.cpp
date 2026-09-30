@@ -1,4 +1,8 @@
 #include "FXHandler.h"
+#include "SettingsLoader.h"
+
+constexpr float ComboPowerStepSeconds = 3.0f;
+constexpr float WarpSeconds = 1.0f;
 
 void FXHandler::Initialize()
 {
@@ -7,8 +11,17 @@ void FXHandler::Initialize()
 	MasterstrikeSound2 = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3F37C, "Skyrim.esm");
 	BlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x4D2DE, "Skyrim.esm");
 	//TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xF69C2, "Skyrim.esm");
-	TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x10F804, "Skyrim.esm");
+	//TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x10F804, "Skyrim.esm");
+	TimedBlockSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xB6343, "Skyrim.esm");
 	TimedBlockSound2 = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3EDD8, "Skyrim.esm");
+	// DLC1GargoyleBruteMeleeFX
+	ComboPowerStepArt = DataHandler->LookupForm<RE::BGSArtObject>(0x005132, "Dawnguard.esm");
+	// MAGRestorationFirePotion
+	ComboPowerStepSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0xCD671, "Skyrim.esm");
+	// InvisFXBody01
+	WarpArt = DataHandler->LookupForm<RE::BGSArtObject>(0x339C8, "Skyrim.esm");
+	// MAGFailSD
+	RefusedSound = DataHandler->LookupForm<RE::BGSSoundDescriptorForm>(0x3D0D3, "Skyrim.esm");
 	logger::info("FXHandler Initialized");
 }
 
@@ -53,6 +66,32 @@ void FXHandler::PlayTimedBlock(RE::Actor* actor)
 	PlaySound(actor, TimedBlockSound2);
 }
 
+void FXHandler::PlayComboPowerStep(RE::Actor* actor)
+{
+	if (!actor || !ComboPowerStepArt)
+	{
+		return;
+	}
+	// 0x3c73c
+	actor->ApplyArtObject (ComboPowerStepArt, ComboPowerStepSeconds);
+	PlaySound(actor, ComboPowerStepSound);
+}
+
+void FXHandler::PlayWarp(RE::Actor* actor)
+{
+	if (!actor || !WarpArt)
+	{
+		return;
+	}
+	actor->ApplyArtObject(WarpArt, WarpSeconds);
+}
+
+void FXHandler::PlayAttackRefused()
+{
+	// At the camera rather than on the body, so the camera angle can't bury it.
+	PlaySoundAt(RefusedSound, RE::PlayerCamera::GetSingleton()->GetRuntimeData2().pos, nullptr);
+}
+
 void FXHandler::PlayMasterstrike(RE::Actor* actor)
 {
 	PlaySound(actor, MasterstrikeSound);
@@ -61,6 +100,16 @@ void FXHandler::PlayMasterstrike(RE::Actor* actor)
 
 void FXHandler::PlaySound(RE::Actor* actor, RE::BGSSoundDescriptorForm* sound)
 {
+	PlaySoundAt(sound, actor->data.location, actor->Get3D());
+}
+
+void FXHandler::PlaySoundAt(RE::BGSSoundDescriptorForm* sound, const RE::NiPoint3& position, RE::NiAVObject* follow)
+{
+	if (!sound)
+	{
+		logger::error("FXHandler: null sound descriptor");
+		return;
+	}
 	RE::BSSoundHandle handle;
 	handle.soundID = static_cast<uint32_t>(-1);
 	handle.assumeSuccess = false;
@@ -68,8 +117,11 @@ void FXHandler::PlaySound(RE::Actor* actor, RE::BGSSoundDescriptorForm* sound)
 
 
 	soundHelper_a(RE::BSAudioManager::GetSingleton(), &handle, sound->GetFormID(), 16);
-	if (set_sound_position(&handle, actor->data.location.x, actor->data.location.y, actor->data.location.z)) {
-		soundHelper_b(&handle, actor->Get3D());
+	if (set_sound_position(&handle, position.x, position.y, position.z)) {
+		if (follow)
+		{
+			soundHelper_b(&handle, follow);
+		}
 		soundHelper_c(&handle);
 	}
 }

@@ -27,7 +27,7 @@ namespace Hooks
 			REL::Relocation<uintptr_t> hook{ RELOCATION_ID(37673, 38627) };
 			
 			SKSE::Trampoline& Trampoline = SKSE::GetTrampoline();
-
+			// for 1.7 looks like its the same hook location as 1.6
 			_OnMeleeHit = Trampoline.write_call<5>(hook.address() + REL::VariantOffset(0x3C0, 0x4A8, 0).offset(), OnMeleeHit);
 			logger::info("Hook OnMeleeHit");
 		}
@@ -81,7 +81,7 @@ namespace Hooks
 		{
 			REL::Relocation<std::uintptr_t> UpdateBase{ RELOCATION_ID(35565, 36564) };
 			auto& trampoline = SKSE::GetTrampoline();
-			_Update = trampoline.write_call<5>(UpdateBase.address() + REL::Relocate(0x748, 0xC26), Update);
+			_Update = trampoline.write_call<5>(UpdateBase.address() + REL::Relocate(0x748, 0xC38), Update);
 			logger::info("Hook Update");
 
 		}
@@ -135,6 +135,7 @@ namespace Hooks
 		// shared implementation
 		static void SharedInputMNB(int x, int y);
 		static void SharedInputForHonor(int x, int y);
+		static void SharedInputKCD(int x, int y);
 		static void SharedInputMouse(int x, int y);
 		static void SharedInput(int x, int y);
 		static void ProcessThumbstick(RE::LookHandler* a_this, RE::ThumbstickEvent* a_event, RE::PlayerControlsData* a_data);
@@ -201,6 +202,8 @@ namespace Hooks
 		}
 
 		static bool CanPlayerAttack();
+		// Feedback for a press CanPlayerAttack turned down, whatever the reason.
+		static void OnPlayerAttackRefused();
 	private:
 		static bool	ProcessAttackHook(RE::AttackBlockHandler* handler, RE::ButtonEvent* a_event, RE::PlayerControlsData* a_data);
 
@@ -235,6 +238,16 @@ namespace Hooks
 		static void Install();
 		static void ComputeAdvanceRadii(RE::Actor* a_actor, RE::Actor* a_target, float* a_outInner, float* a_outOuter);
 		static inline decltype(&ComputeAdvanceRadii) _ComputeAdvanceRadii = nullptr;
+	};
+
+	// Character::ProcessMotionData: this frame's root-motion translation, actor-local, y the
+	// animmotion forward axis. AMR patches calls inside it, so the entry detour sees its curves too.
+	class HookProcessMotionData
+	{
+	public:
+		static void Install();
+		static bool ProcessMotionData(RE::Character* a_this, float a_dt, RE::NiPoint3* a_translation, RE::NiPoint3* a_rotation, bool* a_flag);
+		static inline decltype(&ProcessMotionData) _ProcessMotionData = nullptr;
 	};
 
 	// hooks bhkCharacterStateOnGround::SimulateStatePhysics (vfunc 8) so we can write

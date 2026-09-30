@@ -5,14 +5,7 @@
 #include "BlockHandler.h"
 #include "SettingsLoader.h"
 
-// Raw dwords on purpose. The question this answers is "which field changed",
-// not "what does this bit mean" — diff a bash that leaves the target unhittable
-// against one that doesn't and the offending field falls out of the comparison.
-//
-// The non-obvious three: cached bit 20 is CachedValues::kActorIsGhost, which is
-// the first gate in the engine's hit-application function and drops a hit with
-// no art and no sound; noDmg is a one-shot that zeroes damage and stagger;
-// pHit is Precision's own verdict on whether the actor can be hit at all.
+
 void DumpActorState(RE::Actor* a_actor, const char* a_tag)
 {
 	if (!a_actor || !Settings::VerboseLogging)

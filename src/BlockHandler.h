@@ -21,6 +21,9 @@ public:
 	void AddBrace(RE::Actor* actor);
 	void ResetBrace(RE::Actor* actor);
 	float GetBraceRatio(RE::Actor* actor) const;
+	float GetBraceSeconds(RE::Actor* actor) const;
+	// True while a guard caught on the wrong line is still being punished.
+	bool HasMissedParry(RE::Actor* actor) const;
 	void CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude = 0.f, bool force = false);
 	void CauseKnockdown(RE::Actor* target, RE::Actor* attacker, float magnitude = 1.f);
 	void CauseRecoil(RE::Actor* actor) const;
@@ -68,6 +71,10 @@ private:
 	// seconds the block has been held
 	phmap::flat_hash_map<RE::ActorHandle, float> BraceTimer;
 	mutable std::shared_mutex BraceTimerMtx;
+
+	// Seconds a caught-out guard stays caught; the engine's flag lingers after the strip.
+	phmap::flat_hash_map<RE::ActorHandle, float> MissedParry;
+	mutable std::shared_mutex MissedParryMtx;
 	
 	phmap::flat_hash_map<RE::ActorHandle, float> HyperArmorTimer;
 	mutable std::shared_mutex HyperArmorTimerMtx;

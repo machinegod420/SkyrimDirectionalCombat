@@ -18,6 +18,11 @@ namespace
 	// after a dodge ends. 1.0 = no slow, 0.5 = half speed, etc.
 	constexpr float kPostDodgeSlowMult     = 0.5f;
 	constexpr float kPostDodgeSlowDuration = 0.2f;
+	// Seconds after a player dodge ends before the next one. AI dodges use the
+	// cooldown in AIHandler instead.
+	constexpr float kPlayerDodgeCooldown = 1.0f;
+	// Shortest a slowed dodge gets, as a share of full distance.
+	constexpr float kDodgeSlowFloor = 0.6f;
 	// Trapezoid shape for SpeedSampled over the dodge:
 	//   [0, rampEnd]                ramp from startSpeedSampled to peak (ease-out)
 	//   [rampEnd, kDecayStart]      hold at peak
@@ -44,13 +49,13 @@ namespace
 	// Indexed by DodgeDirection enum value — keep ordering in sync.
 	constexpr DodgeDirectionTuning kDodgeTuning[] = {
 		/* Forward */         { 6, 600.0f },
-		/* Backward */        { 6, 800.0f },
+		/* Backward */        { 5, 600.0f },
 		/* Left */            { 6,  350.0f },
 		/* Right */           { 6,  350.0f },
 		/* ForwardLeft */     { 6,  500.0f },
 		/* ForwardRight */    { 6,  500.0f },
-		/* BackwardLeft */    { 6,  500.0f },
-		/* BackwardRight */   { 6,  500.0f },
+		/* BackwardLeft */    { 5,  500.0f },
+		/* BackwardRight */   { 5,  500.0f },
 	};
 
 	// Direction graph variable mapping (standard Skyrim convention): 8-way
@@ -105,11 +110,17 @@ void DodgeHandler::Cleanup()
 		}
 		m_slowActive = false;
 		m_slowRemaining = 0.0f;
+		m_playerCooldown = 0.0f;
 	}
 }
 
+// Player only, at dodge end: starts the dodge cooldown and the post-dodge slow.
 void DodgeHandler::StartPostDodgeSlow()
 {
+	{
+		std::lock_guard lock(m_slowMtx);
+		m_playerCooldown = kPlayerDodgeCooldown;
+	}
 	if (kPostDodgeSlowMult >= 1.0f || kPostDodgeSlowDuration <= 0.0f)
 	{
 		return;  // feature disabled
@@ -148,6 +159,10 @@ void DodgeHandler::StartPostDodgeSlow()
 void DodgeHandler::TickPostDodgeSlow(float dt)
 {
 	std::lock_guard lock(m_slowMtx);
+	if (dt > 0.0f && m_playerCooldown > 0.0f)
+	{
+		m_playerCooldown = std::max(0.0f, m_playerCooldown - dt);
+	}
 	if (!m_slowActive || dt <= 0.0f)
 	{
 		return;
@@ -210,7 +225,7 @@ bool DodgeHandler::CanDodge(RE::Actor* actor)
 	// AIHandler's DifficultyMap.DodgeCooldown.
 	if (actor->IsPlayerRef()) {
 		std::lock_guard slowLock(m_slowMtx);
-		if (m_slowActive) {
+		if (m_slowActive || m_playerCooldown > 0.0f) {
 			return false;
 		}
 	}
@@ -254,6 +269,17 @@ bool DodgeHandler::IsDodging(RE::Actor* actor)
 {
 	std::shared_lock lock(DodgeMtx);
 	return ActiveDodges.contains(actor->GetHandle()) && ActiveDodges.at(actor->GetHandle()).active;
+}
+
+float DodgeHandler::SecondsSinceDodge(RE::Actor* actor)
+{
+	std::shared_lock lock(DodgeMtx);
+	auto Iter = DodgeStarts.find(actor->GetHandle());
+	if (Iter == DodgeStarts.end())
+	{
+		return -1.f;
+	}
+	return std::chrono::duration<float>(std::chrono::steady_clock::now() - Iter->second).count();
 }
 
 float DodgeHandler::GetDodgeCost(RE::Actor* actor)
@@ -309,11 +335,14 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	actor->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina, staminaCost);
 
 	const auto& tuning = kDodgeTuning[static_cast<size_t>(direction)];
+	// A slowed actor dodges shorter, floored; buffs never lengthen it.
+	const float SpeedScale = std::clamp(
+		actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kSpeedMult) / 100.0f, kDodgeSlowFloor, 1.0f);
 
 	DodgeState state;
 	state.direction = direction;
-	state.speed = tuning.speed;
-	state.animSpeedPeak = tuning.animSpeedPeak;
+	state.speed = tuning.speed * SpeedScale;
+	state.animSpeedPeak = tuning.animSpeedPeak * SpeedScale;
 	state.elapsed = 0.0f;
 	state.active = true;
 	state.startPos = actor->GetPosition();
@@ -328,6 +357,7 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	state.timeTotal = startedFromIdle ? kDodgeDurationIdle : kDodgeDuration;
 	state.rampEnd   = startedFromIdle ? kRampEndIdle       : kRampEnd;
 	ActiveDodges[actor->GetHandle()] = state;
+	DodgeStarts[actor->GetHandle()] = std::chrono::steady_clock::now();
 	// Write graph variables for the dodge state machine. Direction is the
 	// vanilla locomotion variable (may get rewritten by the engine each frame
 	// from movement intent); DirDodge is our custom variable for the alt-blend
@@ -345,12 +375,6 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	if (!actor->IsPlayer())
 	{
 		actor->SetGraphVariableInt("iUseDirDodge", 1);
-	}
-	
-	if (Settings::VerboseLogging)
-	{
-		logger::info("ApplyImpulse: dir={} speed={} animPeak={} time={} startPos=({:.1f},{:.1f},{:.1f}) startSampled={:.1f}",
-			static_cast<int>(direction), tuning.speed, tuning.animSpeedPeak, kDodgeDuration, state.startPos.x, state.startPos.y, state.startPos.z, state.startSpeedSampled);
 	}
 }
 

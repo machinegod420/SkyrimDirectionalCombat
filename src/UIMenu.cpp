@@ -1,6 +1,7 @@
 #include "UIMenu.h"
 #include "SettingsLoader.h"
 #include <shared_mutex>
+#include <algorithm>
 #include <cmath>
 #include "imgui.h"
 #include <d3d11.h>
@@ -48,6 +49,8 @@ struct SmoothedConditioning
 	std::array<float, 4> values{};
 	float confidence = 0.f;
 	double lastSeen = 0.0;
+	// Combo halo breath, radians. Zero while no combo, so a new halo starts at the trough.
+	float haloPhase = 0.f;
 };
 static std::unordered_map<uint32_t, SmoothedConditioning> SmoothedCond;
 // Seconds of command-bearing frames (frozen while menus/loads present empty
@@ -57,13 +60,25 @@ static double CondClock = 0.0;
 
 namespace UI
 {
-	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer, const std::array<int, 4>& conditioning, uint32_t actorId, float confidence)
+	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, float comboFlash, float comboProgress, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer, const std::array<int, 4>& conditioning, uint32_t actorId, float confidence, uint8_t shownDirs)
 	{
 		// surprised this hasnt crashed from all the race conditions
 		// this is populated on the game thread and emptied on the UI thread
 		mtx.lock();
-		//logger::info("Attempting to add new draw command");
-		DrawCommands.push_back({ position, dir, mirror, state, hostileState, firstperson, lockout, isplayer, conditioning, actorId, confidence });
+		const DrawCommand Cmd{ position, dir, mirror, state, comboFlash, comboProgress, shownDirs, hostileState, firstperson, lockout, isplayer, conditioning, actorId, confidence };
+		// One command per actor, or a game thread running ahead stacks stale markers.
+		auto Existing = actorId != 0 ?
+			std::find_if(DrawCommands.begin(), DrawCommands.end(),
+				[actorId](const DrawCommand& c) { return c.actorId == actorId; }) :
+			DrawCommands.end();
+		if (Existing != DrawCommands.end())
+		{
+			*Existing = Cmd;
+		}
+		else
+		{
+			DrawCommands.push_back(Cmd);
+		}
 		mtx.unlock();
 	}
 
@@ -234,6 +249,11 @@ void RenderManager::D3DInitHook::thunk()
 	LoadTexture("./Data/SKSE/Plugins/resources/markeroutline.png", true, IconTypes::MarkerOutline);
 	LoadTexture("./Data/SKSE/Plugins/resources/forhonormarker.png", true, IconTypes::ForHonorMarker);
 	LoadTexture("./Data/SKSE/Plugins/resources/forhonormarkeroutline.png", true, IconTypes::ForHonorMarkerOutline);
+	LoadTexture("./Data/SKSE/Plugins/resources/markeroutline2.png", true, IconTypes::MarkerOutline2);
+	LoadTexture("./Data/SKSE/Plugins/resources/forhonormarkeroutline2.png", true, IconTypes::ForHonorMarkerOutline2);
+	LoadTexture("./Data/SKSE/Plugins/resources/kcdmarker.png", true, IconTypes::KCDMarker);
+	LoadTexture("./Data/SKSE/Plugins/resources/kcdmarkeroutline.png", true, IconTypes::KCDMarkerOutline);
+	LoadTexture("./Data/SKSE/Plugins/resources/kcdmarkeroutline2.png", true, IconTypes::KCDMarkerOutline2);
 }
 
 void RenderManager::DXGIPresentHook::thunk(std::uint32_t a_p1)
@@ -247,7 +267,6 @@ void RenderManager::DXGIPresentHook::thunk(std::uint32_t a_p1)
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	//logger::info("DXGIPresentHook::thunk()");
 	// do stuff
 	RenderManager::draw();
 
@@ -280,8 +299,6 @@ bool RenderManager::Install()
 
 	g_message->RegisterListener(MessageCallback);
 
-	SKSE::AllocTrampoline(14 * 2);
-
 	stl::write_thunk_call<D3DInitHook>();
 	stl::write_thunk_call<DXGIPresentHook>();
 	logger::info("Rendermanager install");
@@ -310,7 +327,6 @@ void RenderManager::draw()
 	//float deltaTime = ImGui::GetIO().DeltaTime;
 
 	mtx.lock();
-	//logger::info("DrawCommands size {}", DrawCommands.size());
 	// Present keeps firing while game logic is paused (menus, load screens)
 	// but the game thread produces no draw commands then. Freeze the
 	// smoothing clock on commandless frames so pausing doesn't age out (and
@@ -382,15 +398,38 @@ void RenderManager::draw()
 			active = { 0x80, 0xDA, 0xEA, 0x00 };
 			break;
 		case UIDirectionState::Unblockable:
-			white = { 0xFF, 0x66, 0x00, 0x00 };
+			white = { 0xFF, 0x77, 0x22, 0x00 };
 			active = white;
 			transparency2 = transparency;
 			break;
 		}
 
+		const float Flash = DrawCommands[i].comboFlash;
+		if (Flash > 0.f)
+		{
+			auto Pop = [Flash](ColorRGBA c) {
+				auto ch = [Flash](uint32_t v) {
+					return static_cast<uint32_t>(v + (0xFFu - v) * Flash);
+				};
+				return ColorRGBA{ ch(c.r), ch(c.g), ch(c.b), c.a };
+			};
+			active = Pop(active);
+			white = Pop(white);
+		}
+
 		if (DrawCommands[i].lockout)
 		{
 			background = {0xFF, 0x40, 0x40, 0x00};
+			// The other lines dim, "can't act" in no colour a state uses; red would read as an
+			// attack. The guard line keeps its state colour, and so do lines a state has painted.
+			const UIDirectionState State = DrawCommands[i].state;
+			if (State != UIDirectionState::FullBlock && State != UIDirectionState::FullBlockAndTimedBlock &&
+				State != UIDirectionState::Unblockable)
+			{
+				constexpr float LockoutDim = 0.5f;
+				white = ColorRGBA{ static_cast<uint32_t>(white.r * LockoutDim), static_cast<uint32_t>(white.g * LockoutDim),
+					static_cast<uint32_t>(white.b * LockoutDim), white.a };
+			}
 		}
 
 		if (DrawCommands[i].firstperson)
@@ -404,6 +443,15 @@ void RenderManager::draw()
 		{
 			StartPos = WorldToScreen(Position, depth, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y);
 		}
+
+		// Combo charge halo: stronger and faster as the combo fills.
+		constexpr float HaloAlpha = 0.9f;    // peak strength at full charge
+		constexpr float HaloFloor = 0.1f;    // trough of the breath
+		constexpr float HaloRateMin = 0.8f;  // breaths/sec when barely charged
+		constexpr float HaloRateMax = 2.4f;  // breaths/sec at full charge
+		const float HaloProgress = (DrawCommands[i].state == UIDirectionState::Unblockable) ? 1.f : DrawCommands[i].comboProgress;  // held token stays lit
+		const float HaloRate = HaloRateMin + (HaloRateMax - HaloRateMin) * HaloProgress;
+		float HaloWave = 0.f;
 
 		// Ease displayed arc values toward the AI's chunky tick values.
 		// Runs regardless of screen visibility so arcs don't re-animate from
@@ -421,6 +469,9 @@ void RenderManager::draw()
 			smooth.confidence += (DrawCommands[i].confidence - smooth.confidence) * condEase;
 			ArcVals = smooth.values;
 			ArcConfidence = smooth.confidence;
+			smooth.haloPhase = HaloProgress > 0.f ?
+				smooth.haloPhase + ImGui::GetIO().DeltaTime * HaloRate * 6.283185307f : 0.f;
+			HaloWave = 0.5f - 0.5f * std::cos(smooth.haloPhase);
 		}
 		else
 		{
@@ -428,6 +479,7 @@ void RenderManager::draw()
 			{
 				ArcVals[c] = static_cast<float>(DrawCommands[i].conditioning[c]);
 			}
+			HaloWave = 0.5f + 0.5f * static_cast<float>(std::sin(CondClock * HaloRate * 6.283185307));
 		}
 
 		if (depth >= 0 && IsOnScreen(StartPos, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y))
@@ -441,35 +493,58 @@ void RenderManager::draw()
 			{
 				scale = UISettings::NPCUIScale;
 			}
-			// only flip horizontal axes
-			if (!DrawCommands[i].mirror)
+			// Combo charge: the outer ring sprite breathing behind the marker,
+			// stronger and faster as the combo fills. Its own art at the marker's
+			// scale, so nothing is stretched or offset.
+			auto DrawHalo = [&](Directions slot, Directions src) {
+				if (HaloProgress <= 0.f)
+				{
+					return;
+				}
+				const ColorRGBA Col = (Dir == src) ? active : white;
+				const uint32_t Base = (Dir == src) ? transparency : transparency2;
+				const float Breath = HaloFloor + (1.f - HaloFloor) * HaloWave;
+				const uint32_t Alpha = static_cast<uint32_t>(
+					Base * HaloProgress * HaloAlpha * Breath);
+				if (Alpha == 0)
+				{
+					return;
+				}
+				DrawDirection(StartPos, depth, scale*1.01, slot, DrawCommands[i].mirror, Col, background, Alpha, true);
+			};
+
+			// Screen slot -> actor direction. Mirroring only flips the
+			// horizontal axis, so left and right swap and top/bottom stay.
+			const bool M = DrawCommands[i].mirror;
+			const Directions Slots[4] = { Directions::TR, Directions::TL, Directions::BR, Directions::BL };
+			const Directions Srcs[4] = {
+				M ? Directions::TL : Directions::TR, M ? Directions::TR : Directions::TL,
+				M ? Directions::BL : Directions::BR, M ? Directions::BR : Directions::BL };
+			auto Shown = [&](Directions src) {
+				return (DrawCommands[i].shownDirs & (1 << static_cast<int>(src))) != 0;
+			};
+			for (int s = 0; s < 4; ++s)
 			{
-				DrawDirection(StartPos, depth, scale, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
-				// conditioning meter arcs — dedicated element outside the
-				// markers; sweep length carries the value so it stays
-				// readable without touching marker color/alpha semantics
-				DrawConditioningArc(StartPos, depth, scale, Directions::TR, ArcVals[(int)Directions::TR], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::TL, ArcVals[(int)Directions::TL], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::BR, ArcVals[(int)Directions::BR], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::BL, ArcVals[(int)Directions::BL], ArcConfidence);
+				if (Shown(Srcs[s]))
+				{
+					DrawHalo(Slots[s], Srcs[s]);
+				}
 			}
-			else
+			for (int s = 0; s < 4; ++s)
 			{
-				DrawDirection(StartPos, depth, scale, Directions::TR, DrawCommands[i].mirror, Dir == Directions::TL ? active : white, background, Dir == Directions::TL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::TL, DrawCommands[i].mirror, Dir == Directions::TR ? active : white, background, Dir == Directions::TR ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::BR, DrawCommands[i].mirror, Dir == Directions::BL ? active : white, background, Dir == Directions::BL ? transparency : transparency2);
-				DrawDirection(StartPos, depth, scale, Directions::BL, DrawCommands[i].mirror, Dir == Directions::BR ? active : white, background, Dir == Directions::BR ? transparency : transparency2);
-				// mirror mapping matches the marker draw above
-				DrawConditioningArc(StartPos, depth, scale, Directions::TR, ArcVals[(int)Directions::TL], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::TL, ArcVals[(int)Directions::TR], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::BR, ArcVals[(int)Directions::BL], ArcConfidence);
-				DrawConditioningArc(StartPos, depth, scale, Directions::BL, ArcVals[(int)Directions::BR], ArcConfidence);
+				if (Shown(Srcs[s]))
+				{
+					DrawDirection(StartPos, depth, scale, Slots[s], M, Dir == Srcs[s] ? active : white, background, Dir == Srcs[s] ? transparency : transparency2);
+				}
+			}
+			// conditioning meter arcs — dedicated element outside the
+			// markers; sweep length carries the value so it stays
+			// readable without touching marker color/alpha semantics
+			for (int s = 0; s < 4; ++s)
+			{
+				DrawConditioningArc(StartPos, depth, scale, Slots[s], ArcVals[(int)Srcs[s]], ArcConfidence);
 			}
 		}
-		//logger::info("Direction pos {} {}", StartPos.x, StartPos.y);
 
 	}
 	// prune smoothing entries by age (seconds of command-bearing time, so
@@ -564,7 +639,7 @@ void RenderManager::draw()
 	}
 }
 
-void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency)
+void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency, bool glowPass)
 {
 	/*
 	logger::info("Drawing quad at pos {} {} with colors {} {} transparency {}", StartPos.x, StartPos.x,
@@ -585,6 +660,7 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 
 	IconTypes ForegroundTexIdx = IconTypes::Marker;
 	IconTypes BackgroundTexIdx = IconTypes::MarkerOutline;
+	IconTypes GlowTexIdx = IconTypes::MarkerOutline2;
 	if (Settings::MNBMode)
 	{
 		switch (dir)
@@ -607,10 +683,11 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 			break;
 		}
 	}
-	else if (Settings::ForHonorMode)
+	else if (Settings::IsForHonor())
 	{
 		ForegroundTexIdx = IconTypes::ForHonorMarker;
 		BackgroundTexIdx = IconTypes::ForHonorMarkerOutline;
+		GlowTexIdx = IconTypes::ForHonorMarkerOutline2;
 		
 		switch (dir)
 		{
@@ -629,6 +706,28 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 			dist *= 1.5;
 			StartPos.x += dist;
 			rotationAngle = 115.0f * 3.14159265359f / 180.0f;
+			break;
+		}
+	}
+	else if (Settings::IsKCD())
+	{
+		ForegroundTexIdx = IconTypes::KCDMarker;
+		BackgroundTexIdx = IconTypes::KCDMarkerOutline;
+		GlowTexIdx = IconTypes::KCDMarkerOutline2;
+		switch (dir)
+		{
+		case Directions::TL:
+			StartPos.x -= dist * 0.75;
+			rotationAngle = 270.0f * 3.14159265359f / 180.0f;
+			break;
+		case Directions::TR:
+			StartPos.x += dist * 0.75;
+			rotationAngle = 90.0f * 3.14159265359f / 180.0f;
+			break;
+		case Directions::BL:
+		case Directions::BR:
+			StartPos.y += dist * 0.5;
+			rotationAngle = 0;
 			break;
 		}
 	}
@@ -680,7 +779,6 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 		// Apply the rotation transformation
 		RotatedPos[i].x = translatedX * cosAngle - translatedY * sinAngle + StartPos.x;
 		RotatedPos[i].y = translatedX * sinAngle + translatedY * cosAngle + StartPos.y;
-		//logger::info("Direction translated pos {} {}", RotatedPos[i].x, RotatedPos[i].y);
 	}
 	if (!IconMap.contains(ForegroundTexIdx))
 	{
@@ -689,6 +787,18 @@ void RenderManager::DrawDirection(RE::NiPoint2 StartPos, float depth, float uisc
 	if (!IconMap.contains(BackgroundTexIdx))
 	{
 		logger::info("Icon map contains null texture! 2");
+	}
+
+	if (glowPass)
+	{
+		if (!IconMap.contains(GlowTexIdx))
+		{
+			return;
+		}
+		ImGui::GetWindowDrawList()->AddImageQuad(IconMap[GlowTexIdx].Texture,
+			RotatedPos[0], RotatedPos[1], RotatedPos[2], RotatedPos[3], uvs[0], uvs[1], uvs[2], uvs[3],
+			IM_COL32(color.r, color.g, color.b, transparency));
+		return;
 	}
 	ImGui::GetWindowDrawList()->AddImageQuad(IconMap[BackgroundTexIdx].Texture,
 		RotatedPos[0], RotatedPos[1], RotatedPos[2], RotatedPos[3], uvs[0], uvs[1], uvs[2], uvs[3], 
@@ -743,7 +853,7 @@ void RenderManager::DrawConditioningArc(RE::NiPoint2 StartPos, float depth, floa
 		}
 		radius = dist + size + pad;
 	}
-	else if (Settings::ForHonorMode)
+	else if (Settings::IsForHonor())
 	{
 		// top marker sits at 2*dist, side markers at 1.5*dist
 		switch (dir)
@@ -760,6 +870,26 @@ void RenderManager::DrawConditioningArc(RE::NiPoint2 StartPos, float depth, floa
 		case Directions::BR:
 			centerAngle = 0.f;
 			radius = 1.5f * dist + size + pad;
+			break;
+		}
+	}
+	else if (Settings::IsKCD())
+	{
+		// highs at the sides, the low line at the bottom apex
+		switch (dir)
+		{
+		case Directions::TL:
+			centerAngle = pi;
+			radius = dist + size + pad;
+			break;
+		case Directions::TR:
+			centerAngle = 0.f;
+			radius = dist + size + pad;
+			break;
+		case Directions::BL:
+		case Directions::BR:
+			centerAngle = 0.5f * pi;
+			radius = dist + size + pad;
 			break;
 		}
 	}
@@ -815,7 +945,8 @@ void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes ind
 		ImageData = stbi_load(path.c_str(), &ImageWidth, &ImageHeight, nullptr, 4);
 		if (!ImageData)
 		{
-			logger::error("Could not open file");
+			logger::error("Could not open {}", path);
+			return;
 		}
 	}
 	else
@@ -823,7 +954,8 @@ void RenderManager::LoadTexture(const std::string& path, bool png, IconTypes ind
 		auto* svg = nsvgParseFromFile(path.c_str(), "px", 96.0f);
 		if (!svg)
 		{
-			logger::error("Could not open file");
+			logger::error("Could not open {}", path);
+			return;
 		}
 		auto* rast = nsvgCreateRasterizer();
 

@@ -3,6 +3,7 @@
 #include "Utils.h"
 #include "SettingsLoader.h"
 #include "InputHandler.h"
+#include "CreatureHandler.h"
 #include "3rdparty/PrecisionAPI.h"
 #include "3rdparty/TrueDirectionalMovementAPI.h"
 
@@ -66,6 +67,8 @@ void OnDataLoad()
 	AttackHandler::GetSingleton()->Initialize();
 	DodgeHandler::GetSingleton()->Initialize();
 	InputEventHandler::Register();
+	SettingsLoader::GetSingleton()->HumanoidUndeadRaces();
+	CreatureHandler::GetSingleton()->Initialize();
 	SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	//SettingsLoader::GetSingleton()->RemovePowerAttacks();
 	AIHandler::GetSingleton()->InitializeValues(precision);
@@ -80,6 +83,53 @@ void OnPostLoad()
 	DodgeHandler::GetSingleton()->Cleanup();
 }
 
+
+void OnGameSaved(SKSE::SerializationInterface* a_intfc)
+{
+	AIHandler::GetSingleton()->SavePlayerHabit(a_intfc);
+	AIHandler::GetSingleton()->SavePlayerStats(a_intfc);
+	AIHandler::GetSingleton()->LogPlayerStats("at save");
+}
+
+// New data goes in its own record type. Types this build doesn't know are skipped,
+// and a record missing from an older save keeps the revert defaults.
+void OnGameLoaded(SKSE::SerializationInterface* a_intfc)
+{
+	std::uint32_t Type = 0;
+	std::uint32_t Version = 0;
+	std::uint32_t Length = 0;
+	while (a_intfc->GetNextRecordInfo(Type, Version, Length))
+	{
+		if (Type == AIHandler::PlayerHabitRecord)
+		{
+			AIHandler::GetSingleton()->LoadPlayerHabit(a_intfc, Version, Length);
+		}
+		else if (Type == AIHandler::PlayerStatsRecord)
+		{
+			AIHandler::GetSingleton()->LoadPlayerStats(a_intfc, Version, Length);
+		}
+		else if (Type == AIHandler::PlayerStaminaRecord)
+		{
+			AIHandler::GetSingleton()->LoadPlayerStaminaStats(a_intfc, Version, Length);
+		}
+		else if (Type == AIHandler::PlayerFeintRecord)
+		{
+			AIHandler::GetSingleton()->LoadPlayerFeintStats(a_intfc, Version, Length);
+		}
+		else if (Type == AIHandler::PlayerOutcomeRecord)
+		{
+			AIHandler::GetSingleton()->LoadPlayerOutcomeStats(a_intfc, Version, Length);
+		}
+	}
+	AIHandler::GetSingleton()->LogPlayerStats("at load");
+}
+
+// New game, or a load: runs before OnGameLoaded. Resets everything the co-save holds.
+void OnGameReverted(SKSE::SerializationInterface*)
+{
+	AIHandler::GetSingleton()->ResetPlayerHabit();
+	AIHandler::GetSingleton()->ResetPlayerStats();
+}
 
 void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 {
@@ -103,7 +153,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	auto plugin = SKSE::PluginDeclaration::GetSingleton();
 	logger::info("{} v{}"sv, plugin->GetName(), plugin->GetVersion().string());
 
-	SKSE::Init(a_skse);
+	// One trampoline for every hook: CommonLib only honours the first request.
+	SKSE::Init(a_skse, { .trampoline = true, .trampolineSize = 256 });
 
 	logger::info("{} loaded"sv, plugin->GetName());
 
@@ -111,6 +162,11 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	if (!messaging->RegisterListener("SKSE", MessageHandler)) {
 		return false;
 	}
+	auto* serialization = SKSE::GetSerializationInterface();
+	serialization->SetUniqueID('DIRP');
+	serialization->SetSaveCallback(OnGameSaved);
+	serialization->SetLoadCallback(OnGameLoaded);
+	serialization->SetRevertCallback(OnGameReverted);
 	// as early as possible
 	RenderManager::Install();
 	return true;

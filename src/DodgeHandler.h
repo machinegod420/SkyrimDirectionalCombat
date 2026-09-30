@@ -34,6 +34,8 @@ public:
 
 	bool CanDodge(RE::Actor* actor);
 	bool IsDodging(RE::Actor* actor);
+	// Since this actor's last custom dodge began, -1 if none.
+	float SecondsSinceDodge(RE::Actor* actor);
 	float GetDodgeCost(RE::Actor* actor);
 
 
@@ -66,6 +68,7 @@ private:
 	};
 
 	phmap::flat_hash_map<RE::ActorHandle, DodgeState> ActiveDodges;
+	phmap::flat_hash_map<RE::ActorHandle, std::chrono::steady_clock::time_point> DodgeStarts;
 	std::shared_mutex DodgeMtx;
 
 	// Post-dodge slow: writes a temporary-slot delta to SpeedMult AV during the
@@ -75,6 +78,8 @@ private:
 	bool m_slowActive = false;
 	float m_slowRemaining = 0.0f;
 	float m_appliedSlowDelta = 0.0f;
+	// Seconds until the player may dodge again; ticked with the slow.
+	float m_playerCooldown = 0.0f;
 	std::mutex m_slowMtx;
 
 	void StartPostDodgeSlow();

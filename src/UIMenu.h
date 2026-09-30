@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <d3d11.h>
 #include <queue>
 #include <array>
 #include "Utils.h"
@@ -34,6 +35,12 @@ struct DrawCommand
 	Directions dir;
 	bool mirror;
 	UIDirectionState state;
+	// 0-1, pops when this actor's combo advances. Blended toward white.
+	float comboFlash = 0.f;
+	// 0-1 combo fill, 1 when one more landed hit finishes it. Drives the halo.
+	float comboProgress = 0.f;
+	// Bitmask over Directions of the slots to draw. Creatures show only their pair.
+	uint8_t shownDirs = 0xF;
 	UIHostileState hostileState;
 	bool firstperson;
 	bool lockout;
@@ -57,9 +64,6 @@ struct TextAlert
 	float timeout;
 };
 
-// One NPC's decision state, for the ShowDebugOverlay panel. Published by the
-// AI for whichever actor is currently fighting the player, so the panel shows
-// the opponent in front of you rather than a scrolling log to correlate.
 struct DebugSnapshot
 {
 	std::string name;
@@ -71,13 +75,8 @@ struct DebugSnapshot
 	int sameStreak = 0;
 	bool defending = false;
 	float spacingMult = 1.f;
-	// Squared, as the AI compares them — the gates that read these never take a
-	// square root, so showing the raw values is what makes the comparison legible.
 	float targetDistSQ = 0.f;
 	float weaponLengthSQ = 0.f;
-	// Actor::GetReach() — the engine's own per-actor reach, as opposed to
-	// TESObjectWEAP::GetReach (a record multiplier) or Precision's capsule
-	// length (no actor radius). Unsquared, units unknown until observed.
 	float actorReach = 0.f;
 	float targetActorReach = 0.f;
 	// Learned power-attack windup for the current target, seconds. 0 = not yet
@@ -92,7 +91,7 @@ struct DebugSnapshot
 
 namespace UI
 {
-	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer, const std::array<int, 4>& conditioning = {}, uint32_t actorId = 0, float confidence = 0.f);
+	void AddDrawCommand(RE::NiPoint3 position, Directions dir, bool mirror, UIDirectionState state, float comboFlash, float comboProgress, UIHostileState hostileState, bool firstperson, bool lockout, bool isplayer, const std::array<int, 4>& conditioning = {}, uint32_t actorId = 0, float confidence = 0.f, uint8_t shownDirs = 0xF);
 	// Replaces the debug panel's contents. Last writer wins, so with several
 	// NPCs on the player it shows whichever decided most recently — the name
 	// field says which.
@@ -113,7 +112,13 @@ enum class IconTypes
 	Marker,
 	MarkerOutline,
 	ForHonorMarker,
-	ForHonorMarkerOutline
+	ForHonorMarkerOutline,
+	// Outer ring drawn on its own for the combo charge pulse.
+	MarkerOutline2,
+	ForHonorMarkerOutline2,
+	KCDMarker,
+	KCDMarkerOutline,
+	KCDMarkerOutline2
 };
 struct ColorRGBA
 {
@@ -162,7 +167,7 @@ class RenderManager
 	{
 		static void thunk();
 		static inline REL::Relocation<decltype(thunk)> func;
-
+		// https://github.com/D7ry/wheeler/blob/5124a10a24a841886fa3a16510764325f37c69f8/src/bin/Rendering/RenderManager.h#L20
 		static constexpr auto id = REL::RelocationID(75595, 77226);
 		static constexpr auto offset = REL::VariantOffset(0x9, 0x275, 0x00);  // VR unknown
 
@@ -192,13 +197,8 @@ private:
 	static inline bool ShowMeters = false;
 	static inline ID3D11Device* device = nullptr;
 	static inline ID3D11DeviceContext* context = nullptr;
-	static void DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency);
-	// Dedicated conditioning meter: a thin arc drawn outside the marker for
-	// `dir`, whose sweep grows with the AI's belief in that guard line and
-	// whose color warms from yellow toward red with the actor's confidence
-	// (positive mistakeRatio). Separate element so it never competes with
-	// the markers' color/alpha semantics. Takes floats because the draw
-	// loop feeds it display-smoothed values, not the raw tick values.
+	// glowPass draws only the outer ring sprite, for the combo charge pulse.
+	static void DrawDirection(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, bool mirror, ColorRGBA color, ColorRGBA backgroundcolor, uint32_t transparency, bool glowPass = false);
 	static void DrawConditioningArc(RE::NiPoint2 StartPos, float depth, float uiscale, Directions dir, float value, float confidence);
 	static void LoadTexture(const std::string &path, bool png, IconTypes idx);
 

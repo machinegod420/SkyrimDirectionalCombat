@@ -1,5 +1,6 @@
 #include "Hooks.h"
 #include "SettingsLoader.h"
+#include "CreatureHandler.h"
 
 #include <MinHook.h>
 
@@ -9,34 +10,82 @@
 // Attack stamina cost by consecutive same-direction count. Built in
 // Hooks::Install from StaminaCost * RepeatCostMult.
 static float StaminaPowerTable[4] = {};
-constexpr float RepeatCostMult[4] = { 1.f, 1.4f, 2.f, 2.7f };
-
+constexpr float FinisherPushBackMin = 400.f;
+constexpr float FinisherPushBackMax = 600.f;
+constexpr float FinisherPushBackFullWeight = 25.f;  // a steel warhammer
 constexpr float ComboStaggerMagnitude = 0.5f;
+// Share of the target's armor a hit on a staggered target ignores.
+constexpr float StaggerArmorPierce = 0.5f;
+// Mid-chain poke slow per weapon set, scaling ChainPokeSpeedPenalty: the thrust's
+// timing comes from the set's animations. 1h, 1h+shield, 2h, battleaxe, warhammer.
+constexpr float ChainPokePenaltyBySet[5] = { 1.f, 1.f, 1.f, 1.f, 1.f };
 
-// Stamina regen is driven from here rather than left to the engine, and is
-// zeroed outright while committed to an action. Because we write the base rate
-// every frame, the engine's StaminaRateMult multiplies OUR number — stacked
-// Fortify Stamina Regeneration would scale it directly, so divide the
-// multiplier back out and re-add a saturating share of it. The floor keeps the
-// divisor at 100 for debuffs (cold, disease), which stay at full strength.
+// Stamina regen is driven from here. We write it every frame, and we
+// actually nerf the shit out of stamina regen buffs and debuffs because it breaks the combat
+// too much. Sorry
 static void ApplyStaminaRegen(RE::Actor* actor)
 {
 	auto* Values = actor->AsActorValueOwner();
-	if (actor->IsBlocking() || actor->IsAttacking() || DodgeHandler::GetSingleton()->IsDodging(actor))
+	const bool Committed = (actor->IsBlocking() && !IsAttackingDisabled(actor)) ||
+		actor->IsAttacking() || DodgeHandler::GetSingleton()->IsDodging(actor);
+	if (Committed)
 	{
 		Values->SetActorValue(RE::ActorValue::kStaminaRate, 0.f);
 		return;
 	}
-	const float Mult = std::max(100.f, Values->GetActorValue(RE::ActorValue::kStaminaRateMult));
-	const float Raw = (Mult / 100.f) - 1.f;
-	const float Bonus = DifficultySettings::MaxRegenBonus * Raw / (Raw + 1.f);
-	Values->SetActorValue(RE::ActorValue::kStaminaRate,
-		DifficultySettings::StaminaRegenMult * (1.f + Bonus) * 100.f / Mult);
+	// The engine scales the rate we write by StaminaRateMult, so we divide it
+	// back out and apply our own curve. this means that regen buffs are not as strong as you think they are
+	const float Mult = std::max(1.f, Values->GetActorValue(RE::ActorValue::kStaminaRateMult));
+	const float Ratio = Mult / 100.f;
+	float Bonus;
+	if (Ratio >= 1.f)
+	{
+		const float Raw = Ratio - 1.f;
+		Bonus = DifficultySettings::MaxRegenBonus * Raw / (Raw + 1.f);
+	}
+	else
+	{
+		Bonus = -DifficultySettings::MaxRegenPenalty * (1.f - Ratio);
+	}
+	const float Rate = CreatureHandler::GetSingleton()->IsCreatureGraph(actor->GetRace()) ?
+		DifficultySettings::CreatureStaminaRegenMult : DifficultySettings::StaminaRegenMult;
+	Values->SetActorValue(RE::ActorValue::kStaminaRate, Rate * (1.f + Bonus) * 100.f / Mult);
 }
 
-static int BufferedInput[2] = {0, 0};
-static double InputTimer = 0.f;
-static bool BufferedHasInput = false;
+constexpr float BlockFacingCone = 70.f;
+
+static bool CountsAsBlock(RE::Actor* attacker, RE::Actor* target, const RE::HitData& hitData,
+	bool* outRescued = nullptr)
+{
+	// Unblockable means it, whatever the engine flagged.
+	if (DirectionHandler::GetSingleton()->IsUnblockable(attacker))
+	{
+		return false;
+	}
+	if (hitData.flags.any(RE::HitData::Flag::kBlocked))
+	{
+		return true;
+	}
+	if (BlockHandler::GetSingleton()->HasMissedParry(target) || !IsGuardUp(target) ||
+		!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
+	{
+		return false;
+	}
+	const RE::NiPoint3 To = attacker->GetPosition() - target->GetPosition();
+	float Bearing = std::atan2(To.x, To.y) - target->GetAngleZ();
+	while (Bearing > 3.14159265f) Bearing -= 6.28318531f;
+	while (Bearing < -3.14159265f) Bearing += 6.28318531f;
+	if (std::fabs(Bearing) * 57.2957795f > BlockFacingCone)
+	{
+		return false;
+	}
+	// A block the engine never flagged: none of its feedback will fire.
+	if (outRescued)
+	{
+		*outRescued = true;
+	}
+	return true;
+}
 
 namespace Hooks
 {
@@ -49,8 +98,9 @@ namespace Hooks
 			return ret;
 		}
 		RE::Actor* target = a_precisionHitData.target->As<RE::Actor>();
-		if (attacker && target && 
-			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && 
+		if (attacker && target &&
+			(DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) ||
+				CreatureHandler::GetSingleton()->IsDirectionalAttacker(attacker)) &&
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
 			//BlockHandler::GetSingleton()->AddNewAttacker(target, attacker);
@@ -63,16 +113,34 @@ namespace Hooks
 			}	
 			*/
 
-			if (target->IsBlocking())
+			// A hit OnMeleeHit will discard must not strip the guard on the way past.
+			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
+				!AttackHandler::GetSingleton()->CanAttack(attacker))
+			{
+				if (Settings::VerboseLogging)
+				{
+					logger::info("[prehit] {} locked out, hit ignored", attacker->GetName());
+				}
+				ret.bIgnoreHit = true;
+				return ret;
+			}
+			// A hit reaching OnMeleeHit with no prehit above it came from vanilla.
+			const bool GuardUp = IsGuardUp(target);
+			if (Settings::VerboseLogging)
+			{
+				logger::info("[prehit] {} -> {} guard {}", attacker->GetName(), target->GetName(), GuardUp);
+			}
+			if (GuardUp)
 			{
 				BlockHandler::GetSingleton()->HandleBlock(attacker, target);
 			}
 			// make attacks 'safe', a chamber/masterstroke mechanic
 			// you are safe during attack windup
-			else if (target->IsAttacking() && AttackHandler::GetSingleton()->InChamberWindow(target))
+			else if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && target->IsAttacking() && AttackHandler::GetSingleton()->InChamberWindow(target))
 			{
 				// This should always be from the attacker side, not the target side, because the first attacker is the hit we want to ignore
-				if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
+				// A bash into an attack is OnMeleeHit's to fail; a clash here would drop it first.
+				if (!IsBashing(attacker) && BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
 					if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", attacker->GetName());
 					ret.bIgnoreHit = true;
@@ -84,12 +152,8 @@ namespace Hooks
 				{
 					// AI stuff here
 					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
-					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
-					{
-						AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
-						AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
-						AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
-					}
+					AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+					AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 
 				}
 			}
@@ -125,9 +189,12 @@ namespace Hooks
 		if (attacker && target && DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
 		{
 			// something happened and a hit happened from someone who already got flagged as unable to attack so we ignore it
-			if (!AttackHandler::GetSingleton()->CanAttack(attacker))
+			// kNone means the swing already ended: vanilla detection firing after
+			// attackStop dropped Precision's collisions.
+			const bool Outlived =
+				attacker->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kNone;
+			if (!AttackHandler::GetSingleton()->CanAttack(attacker) || Outlived)
 			{
-				if (Settings::VerboseLogging) logger::info("[hit] empty hit {} should not have been able to attack", attacker->GetName());
 				if (attacker->IsAttacking())
 				{
 					attacker->NotifyAnimationGraph("attackStop");
@@ -135,16 +202,22 @@ namespace Hooks
 				}
 				return;
 			}
-			bool AttackerUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(attacker);
+			// Unblockables pay against anything fought on lines, fencer or
+			// creature; never against an archer or mage.
+			bool AttackerUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(attacker) &&
+				DirectionHandler::GetSingleton()->IsDirectionalOpponent(target);
 			bool TargetUnblockable = DirectionHandler::GetSingleton()->IsUnblockable(target);
 			// Armor pierce. physicalDamage is the pre-mitigation value
-			// totalDamage is that same figure after the target's armor. Taking
-			// physicalDamage makes an unblockable land the same regardless of
-			// what the target is wearing. Must precede the MeleeDamageMult
-			// below, which has only ever been applied to totalDamage.
+			// totalDamage is that same figure after the target's armor. 
 			if (AttackerUnblockable)
 			{
 				hitData.totalDamage = hitData.physicalDamage;
+				// Knocks the target out of measure so the exchange resets to neutral
+				// instead of the attacker opening a new chain on a locked-out target.
+				const auto* FinisherWeapon = attacker->GetEquippedObject(false);
+				const float FinisherWeight = FinisherWeapon ? FinisherWeapon->GetWeight() : 0.f;
+				hitData.pushBack = FinisherPushBackMin + (FinisherPushBackMax - FinisherPushBackMin) *
+					std::clamp(FinisherWeight / FinisherPushBackFullWeight, 0.f, 1.f);
 			}
 			hitData.totalDamage *= DifficultySettings::MeleeDamageMult;
 			float CurrentTargetStamina = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
@@ -152,25 +225,16 @@ namespace Hooks
 			{
 				if (AttackerUnblockable)
 				{
+					// No stamina refund: the finisher should end the exchange, not
+					// bankroll the next chain.
 					hitData.totalDamage *= DifficultySettings::UnblockableDamageMult;
-					// restore stamina as well
-					attacker->AsActorValueOwner()->RestoreActorValue(RE::ActorValue::kStamina,
-						attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
-
 				}
-				bool isTargetStaggered = target->AsActorState()->actorState2.staggered;
-
-				if (isTargetStaggered)
+				// A staggered target is an opening: part of its armor doesn't apply. The finisher
+				// already pierces all of it.
+				if (target->AsActorState()->actorState2.staggered && !AttackerUnblockable)
 				{
-					float damage = hitData.weapon->GetAttackDamage() * DifficultySettings::MeleeDamageMult;
-					damage = std::max(damage, hitData.totalDamage) * DifficultySettings::UnblockableDamageMult;
-
-					hitData.totalDamage = damage;
-				}
-				if (CurrentTargetStamina < hitData.weapon->GetAttackDamage())
-				{
-					float damage = hitData.weapon->GetAttackDamage() * DifficultySettings::MeleeDamageMult;
-					damage = std::max(damage, hitData.totalDamage);
+					const float Pierced = hitData.physicalDamage * DifficultySettings::MeleeDamageMult;
+					hitData.totalDamage += std::max(0.f, Pierced - hitData.totalDamage) * StaggerArmorPierce;
 				}
 			}
 
@@ -192,27 +256,52 @@ namespace Hooks
 			{
 				hitData.totalDamage *= 0.5f;
 			}
+			// The finisher scales with the target, not the weapon: at least a share of its
+			// max health, so completing a combo is a real clock against a tanky enemy. Last,
+			// so it's a floor under all the math above.
+			if (AttackerUnblockable)
+			{
+				const float Floor = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kHealth) *
+					(target->IsPlayerRef() ? DifficultySettings::PlayerUnblockableHealthFloor : DifficultySettings::UnblockableHealthFloor);
+				if (hitData.totalDamage < Floor)
+				{
+					hitData.totalDamage = Floor;
+					// The engine can re-derive totalDamage from these after we return, block
+					// share included, and an unblockable into a raised guard may carry one.
+					hitData.physicalDamage = Floor;
+					hitData.resistedPhysicalDamage = 0.f;
+					hitData.resistedTypedDamage = 0.f;
+					hitData.percentBlocked = 0.f;
+				}
+			}
 
 			if (hitData.totalDamage < 0.5 && hitData.attackDataSpell 
 				&& (hitData.attackDataSpell->GetSpellType() == RE::MagicSystem::SpellType::kEnchantment || hitData.attackDataSpell->GetDelivery() == RE::MagicSystem::Delivery::kTouch))
 			{
-				
+				// This returns before the block branch, so without checking here
+				// a proc lands on a guard that answered the line.
+				if (CountsAsBlock(attacker, target, hitData))
+				{
+					if (Settings::VerboseLogging) logger::info("[hit] blocked proc {} from {}",
+						hitData.attackDataSpell->GetName(), attacker->GetName());
+					return;
+				}
 				if (Settings::VerboseLogging) logger::info("[hit] empty hit {}", hitData.attackDataSpell->GetName());
 				_OnMeleeHit(target, hitData);
 				return;
 			}
 
-			//logger::info("attack info {} {} {}", hitData.totalDamage, hitData.attackData->data.damageMult, hitData.resistedTypedDamage);
 			// only do extra stuff if in melee with directional attacker
 			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 			{
+				hitData.stagger = 0.f;
 				// ignore hit if was bash attack against attacking character
 				// bash can be used to open up enemies but will fail if you bash after an attack started
 				if (hitData.flags.any(RE::HitData::Flag::kBash))
 				{
 					if (target->IsAttacking())
 					{
-						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 0.1f);
+						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 0.25f);
 						return;
 					}
 					else
@@ -224,8 +313,6 @@ namespace Hooks
 							float StaminaDamage = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
 							if (target->IsBlocking())
 							{
-								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
-								/*
 															// staggers as well
 								if (CurrentTargetStamina < StaminaDamage * 0.5)
 								{
@@ -233,29 +320,28 @@ namespace Hooks
 								}
 								else
 								{
-									BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
+									BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
 								}
-								*/
-	
+								
+								StaminaDamage *= 0.5f;
 							}
 							else
 							{
-								BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
-								/*
+								
 								if (CurrentTargetStamina < 10)
 								{
 									BlockHandler::GetSingleton()->CauseKnockdown(target, attacker);
 								}
 								else
 								{
-									BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.25f, true);
+									BlockHandler::GetSingleton()->CauseStagger(target, attacker, 0.5f, true);
 								}
-								*/
+								
 
-								StaminaDamage *= 0.05f;
+								StaminaDamage *= 0.25f;
 							}
 							target->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,StaminaDamage);
-							//_OnMeleeHit(target, hitData);
+							_OnMeleeHit(target, hitData);
 							
 							return;
 						}
@@ -268,18 +354,48 @@ namespace Hooks
 			}
 
 
-			// Stops the AI's power-swing stopwatch. Above the blocked/unblocked
-			// split because the measurement is the same either way — it only
-			// cares that the swing connected, blocked or not. 
+			// Stops the AI's power-swing stopwatch.
 			if (!target->IsPlayerRef())
 			{
-				AIHandler::GetSingleton()->NotifyPowerAttackHitExternalCalled(target);
+				AIHandler::GetSingleton()->NotifyPowerAttackHitExternalCalled(target, attacker);
 			}
 
-			// do no health damage if hit was blocked
-			// for some reason this flag is the only flag that gets set
-			if (hitData.flags.any(RE::HitData::Flag::kBlocked))
+			// Only between two guards; an unperked blocker is vanilla's business and
+			// falls to the else. CountsAsBlock also rescues a line-correct guard the
+			// engine never flagged.
+			if (Settings::VerboseLogging && IsGuardUp(target) &&
+				hitData.flags.none(RE::HitData::Flag::kBlocked))
 			{
+				// Vanilla only counts a block inside a frontal arc, so print how
+				// far off the attacker was: a wide bearing means the engine is
+				// right and our line check is what is missing a facing test.
+				const RE::NiPoint3 To = attacker->GetPosition() - target->GetPosition();
+				float Bearing = std::atan2(To.x, To.y) - target->GetAngleZ();
+				while (Bearing > 3.14159265f) Bearing -= 6.28318531f;
+				while (Bearing < -3.14159265f) Bearing += 6.28318531f;
+				logger::info("[block] {} was blocking but the hit from {} carried no blocked flag (bearing {:.0f} deg)",
+					target->GetName(), attacker->GetName(), std::fabs(Bearing) * 57.2957795f);
+			}
+			bool RescuedBlock = false;
+			if (CountsAsBlock(attacker, target, hitData, &RescuedBlock) &&
+				DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+			{
+				if (RescuedBlock && Settings::VerboseLogging)
+				{
+					logger::info("[block] rescued: {} blocked {} on line with no engine flag (no recoil or sound fired)",
+						target->GetName(), attacker->GetName());
+				}
+				// Read-only stats, before AddCombo below moves the attacker's combo on.
+				if (attacker->IsPlayerRef())
+				{
+					AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Blocked);
+				}
+				else if (target->IsPlayerRef())
+				{
+					AIHandler::GetSingleton()->RecordPlayerDefense(DirectionHandler::GetSingleton()->AnimationSet(target),
+						hitData.flags.any(RE::HitData::Flag::kPowerAttack), DirectionHandler::GetSingleton()->GetComboStep(attacker) > 0,
+						DirectionHandler::GetSingleton()->HasTimedParry(target) ? AIHandler::DefenseOutcome::Parried : AIHandler::DefenseOutcome::Blocked);
+				}
 
 				// manual pushback
 				if (Settings::ExperimentalMode)
@@ -300,20 +416,25 @@ namespace Hooks
 				if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
 				{
 					AttackHandler::GetSingleton()->AddLockout(attacker);
+					AttackHandler::GetSingleton()->ClearComboSlow(target);
 				}
 				else
 				{
 					//lockout defender if attacked w/ powerattack
 					AttackHandler::GetSingleton()->AddLockout(target);
-					if (hitData.flags.none(RE::HitData::Flag::kBash))
+					// A timed parry gives the attacker no combo step.
+					if (hitData.flags.none(RE::HitData::Flag::kBash) && !DirectionHandler::GetSingleton()->HasTimedParry(target))
 					{
 						DirectionHandler::GetSingleton()->AddCombo(attacker);
-						// a power attack into a block advances the combo, so it
-						// can complete one — same stagger as the clean-hit path
+						if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
+						{
+							AttackHandler::GetSingleton()->AddComboSlow(target);
+						}
+						AttackHandler::GetSingleton()->ClearComboSlow(attacker);
+						// Unblockable only now if this step completed the combo: stagger so it can land.
 						if (DirectionHandler::GetSingleton()->IsUnblockable(attacker))
 						{
-							BlockHandler::GetSingleton()->CauseStagger(target, attacker,
-								ComboStaggerMagnitude, true);
+							BlockHandler::GetSingleton()->CauseStagger(target, attacker, ComboStaggerMagnitude, true);
 						}
 					}
 				}
@@ -332,30 +453,92 @@ namespace Hooks
 				// make sure we don't count bashes as normal attacks
 				if (hitData.flags.none(RE::HitData::Flag::kBash))
 				{
+					// Read-only stats, before AddCombo below moves the attacker's combo on. A
+					// wrong-line guard was already stripped at prehit; the missed-parry latch keeps it.
+					if (attacker->IsPlayerRef())
+					{
+						// An unperked blocker is left to vanilla and lands here, flagged.
+						AIHandler::GetSingleton()->ResolvePlayerSwing(hitData.flags.any(RE::HitData::Flag::kBlocked) ?
+							AIHandler::SwingOutcome::Blocked : AIHandler::SwingOutcome::Landed);
+					}
+					else if (target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+					{
+						const auto Outcome = AttackerUnblockable ? AIHandler::DefenseOutcome::Unblockable :
+							(BlockHandler::GetSingleton()->HasMissedParry(target) || IsGuardUp(target)) ? AIHandler::DefenseOutcome::GuardMissed :
+							AIHandler::DefenseOutcome::NoGuard;
+						AIHandler::GetSingleton()->RecordPlayerDefense(DirectionHandler::GetSingleton()->AnimationSet(target),
+							hitData.flags.any(RE::HitData::Flag::kPowerAttack), DirectionHandler::GetSingleton()->GetComboStep(attacker) > 0, Outcome);
+					}
 					if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 					{
 						// AI stuff here
 						Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
-						if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+						AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+						AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
+					}
+					// The combo is line variety and runs against anything fought
+					// on lines, creature included. The lockout is initiative and
+					// needs a guard to trade with.
+					if (DirectionHandler::GetSingleton()->IsDirectionalOpponent(target))
+					{
+						DirectionHandler::GetSingleton()->ResetGuardCharge(target);
+						// a landed power attack counts two steps atm
+						const bool Finisher = DirectionHandler::GetSingleton()->IsUnblockable(attacker);
+						const bool PowerStep = hitData.flags.any(RE::HitData::Flag::kPowerAttack) &&
+							!Settings::IsForHonor() && !Finisher;
+						DirectionHandler::GetSingleton()->AddCombo(attacker, false, PowerStep ? 1 : 0);
+						if (PowerStep)
 						{
-							AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
-							AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
-							AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
+							FXHandler::GetSingleton()->PlayComboPowerStep(attacker);
+						}
+						// The finisher spends the vortex; the exchange resets to measure.
+						if (Finisher)
+						{
+							AttackHandler::GetSingleton()->ClearComboSlow(target);
+						}
+						else if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
+						{
+							AttackHandler::GetSingleton()->AddComboSlow(target);
+						}
+						AttackHandler::GetSingleton()->ClearComboSlow(attacker);
+						// Unblockable only now if this hit completed the combo: stagger so it can land.
+						if (DirectionHandler::GetSingleton()->IsUnblockable(attacker))
+						{
+							BlockHandler::GetSingleton()->CauseStagger(target, attacker, ComboStaggerMagnitude, true);
 						}
 					}
-					DirectionHandler::GetSingleton()->ResetGuardCharge(target);
-					DirectionHandler::GetSingleton()->AddCombo(attacker);
-					// The hit that completes a combo staggers: without it the
-					// target simply backpedals out of the unblockable it just
-					// earned, and the combo work is wasted.
-					if (DirectionHandler::GetSingleton()->IsUnblockable(attacker))
-					{
-						BlockHandler::GetSingleton()->CauseStagger(target, attacker,
-							ComboStaggerMagnitude, true);
-					}
 					//apply lockout to the defender to prevent doubles
-					AttackHandler::GetSingleton()->AddLockout(target);
+					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+					{
+						AttackHandler::GetSingleton()->AddLockout(target);
+					}
 				}
+			}
+		}
+		// Creature attacker: block angle and cost only
+		else if (attacker && target &&
+			CreatureHandler::GetSingleton()->IsDirectionalAttacker(attacker) &&
+			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
+		{
+			// Same stopwatch stop as the perked path, so an NPC learns a
+			// creature's power windup too.
+			if (!target->IsPlayerRef())
+			{
+				AIHandler::GetSingleton()->NotifyPowerAttackHitExternalCalled(target, attacker);
+			}
+			bool RescuedBlock = false;
+			if (CountsAsBlock(attacker, target, hitData, &RescuedBlock))
+			{
+				if (RescuedBlock && Settings::VerboseLogging)
+				{
+					logger::info("[block] rescued (creature): {} blocked {} on line with no engine flag",
+						target->GetName(), attacker->GetName());
+				}
+				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
+			}
+			else
+			{
+				DirectionHandler::GetSingleton()->ResetGuardCharge(target);
 			}
 		}
 		_OnMeleeHit(target, hitData);
@@ -388,16 +571,41 @@ namespace Hooks
 	{
 		// if the target was hit and is blocking, check if the block has the correct angles first
 		if (attacker && target &&
-			DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
+			(DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) ||
+				CreatureHandler::GetSingleton()->IsDirectionalAttacker(attacker)) &&
 			DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
 		{
+			// A hit we discard must not strip the defender's guard on the way past.
+			const bool Outlived =
+				attacker->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kNone;
+			if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) &&
+				(!AttackHandler::GetSingleton()->CanAttack(attacker) || Outlived))
+			{
+				if (Settings::VerboseLogging)
+				{
+					logger::info("[hit] {} vanilla-path hit ignored{}", attacker->GetName(),
+						Outlived ? " (attack already ended)" : " (locked out)");
+				}
+				_OnBeginMeleeHit(attacker, target, a_int1, a_bool, a_unkptr);
+				return;
+			}
+			// Precision owns melee hits, so a live swing reaching vanilla detection is
+			// suspect: the ghost hits. Logged whatever the verbosity setting.
+			if (Settings::HasPrecision && DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker))
+			{
+				auto* Process = attacker->GetActorRuntimeData().currentProcess;
+				const auto* AttackData = Process && Process->high ? Process->high->attackData.get() : nullptr;
+				logger::warn("[hit] vanilla-path hit {} -> {}: state {}, attack data {}, bashing {}, guard {}",
+					attacker->GetName(), target->GetName(), static_cast<int>(attacker->AsActorState()->GetAttackState()),
+					AttackData ? AttackData->event.c_str() : "null", IsBashing(attacker), IsGuardUp(target));
+			}
 
-			if (target->IsBlocking())
+			if (IsGuardUp(target))
 			{
 				BlockHandler::GetSingleton()->HandleBlock(attacker, target);
 			}
 			// make attacks 'safe', a chamber/masterstroke mechanic
-			else if (!IsBashing(attacker) && !IsBashing(target) && AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
+			else if (DirectionHandler::GetSingleton()->HasDirectionalPerks(attacker) && !IsBashing(attacker) && !IsBashing(target) && AttackHandler::GetSingleton()->InChamberWindow(target) && target->IsAttacking())
 			{
 				if (AttackHandler::GetSingleton()->InChamberWindow(attacker))
 				{
@@ -414,12 +622,8 @@ namespace Hooks
 				{
 					// AI stuff here
 					Directions dir = DirectionHandler::GetSingleton()->GetCurrentDirection(attacker);
-					if (DirectionHandler::GetSingleton()->HasDirectionalPerks(target))
-					{
-						AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
-						AIHandler::GetSingleton()->SwitchTargetExternalCalled(target, attacker);
-						AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
-					}
+					AIHandler::GetSingleton()->SignalBadThingExternalCalled(target, dir);
+					AIHandler::GetSingleton()->TryBlockExternalCalled(target, attacker);
 
 				}
 			}
@@ -434,8 +638,10 @@ namespace Hooks
 		static float* g_DeltaTime = (float*)RELOCATION_ID(523661, 410200).address();                 // 2F6B94C, 30064CC
 		DirectionHandler::GetSingleton()->Update(*g_DeltaTime);
 		AIHandler::GetSingleton()->Update(*g_DeltaTime);
+		CreatureHandler::GetSingleton()->Update(*g_DeltaTime);
 		BlockHandler::GetSingleton()->Update(*g_DeltaTime);
 		AttackHandler::GetSingleton()->Update(*g_DeltaTime);
+		InputEventHandler::GetSingleton()->Update(*g_DeltaTime);
 		// dodge advances inside HookCharacterStateOnGround per physics tick — not here
 		//TextAlertHandler::GetSingleton()->Update(*g_DeltaTime);
 		_Update();
@@ -478,27 +684,14 @@ namespace Hooks
 		}
 		DirectionHandler::GetSingleton()->UpdateCharacter(a_this, a_delta);
 
-		
-		/*
-			if (Settings::BufferInput)
+		// Swing stats summary at the end of each fight.
+		static bool WasInCombat = false;
+		const bool InCombat = a_this->IsInCombat();
+		if (WasInCombat && !InCombat)
 		{
-			if (InputTimer <= 0.f && BufferedHasInput)
-			{
-				HookMouseMovement::SharedInputMouse(BufferedInput[0], BufferedInput[1]);
-				if (Settings::VerboseLogging) logger::info("[input] sent {} and {}", BufferedInput[0], BufferedInput[1]);
-				BufferedInput[0] = 0;
-				BufferedInput[1] = 0;
-				BufferedHasInput = false;
-			}
-			if (InputTimer > 0.f && BufferedHasInput)
-			{
-				InputTimer -= a_delta;
-				//logger::info("test {}", a_delta);
-			}
-		}	
-		*/
-
-
+			AIHandler::GetSingleton()->LogPlayerStats("combat over");
+		}
+		WasInCombat = InCombat;
 	}
 
 
@@ -544,6 +737,25 @@ namespace Hooks
 		}
 
 
+	}
+
+	void HookMouseMovement::SharedInputKCD(int x, int y)
+	{
+		auto Player = RE::PlayerCharacter::GetSingleton();
+		int32_t diff = InputSettings::MouseSens;
+
+		if (y > diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::BL);
+		}
+		else if (x > diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TR);
+		}
+		else if (x < -diff)
+		{
+			DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Directions::TL);
+		}
 	}
 
 	void HookMouseMovement::SharedInputMouse(int x, int y)
@@ -608,9 +820,15 @@ namespace Hooks
 		{
 			y = -y;
 		}
-		if (Settings::ForHonorMode)
+		if (Settings::IsForHonor())
 		{
 			SharedInputForHonor(x, y);
+			return;
+		}
+
+		if (Settings::IsKCD())
+		{
+			SharedInputKCD(x, y);
 			return;
 		}
 
@@ -706,32 +924,13 @@ namespace Hooks
 
 		if (DirectionHandler::GetSingleton()->HasDirectionalPerks(actor))
 		{
-			return false;
-			//seems slow but also seems to work
-			//one way to do this is to slowly build up a hashmap over the lifetime of the game of if this is a power attack
-			if (DifficultySettings::AttacksCostStamina)
+			RE::Actor* target = GetCombatTarget(actor);
+			if (target && !AIHandler::GetSingleton()->ShouldAttackExternalCalled(actor, target))
 			{
-				if (RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) < 5)
-				{
-					return false;
-				}
-			}
-			RE::Actor* target = actor->GetActorRuntimeData().currentCombatTarget.get().get();
-			if (target)
-			{
-				if (AIHandler::GetSingleton()->ShouldAttackExternalCalled(actor, target))
-				{
-					//logger::info("do attack");
-					return _PerformAttackAction(a_actionData);
-				}
-				else
-				{
-					return false;
-				}
+				return false;
 			}
 		}
-		bool ret = _PerformAttackAction(a_actionData);
-		return ret;
+		return _PerformAttackAction(a_actionData);
 	}
 
 
@@ -754,20 +953,76 @@ namespace Hooks
 		return AttackHandler::GetSingleton()->CanInitiateAttack(RE::PlayerCharacter::GetSingleton());
 	}
 
+	void HookAttackHandler::OnPlayerAttackRefused()
+	{
+		FXHandler::GetSingleton()->PlayAttackRefused();
+		if (Settings::VerboseLogging)
+		{
+			auto* Player = RE::PlayerCharacter::GetSingleton();
+			auto* Attacks = AttackHandler::GetSingleton();
+			// CanInitiateAttack's checks, in its order.
+			const char* Reason = !Attacks->CanAttack(Player) ? "lockout" :
+				Attacks->InFeintWindow(Player) ? "feint window" : "stamina";
+			logger::info("[press] refused ({}): stamina {:.0f}, a light swing needs {:.0f}", Reason,
+				Player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina),
+				Attacks->SwingStaminaCost(Player, false));
+		}
+	}
+
 	bool HookAttackHandler::ProcessAttackHook(RE::AttackBlockHandler* handler, RE::ButtonEvent* a_event, RE::PlayerControlsData* a_data)
 	{
 		
 		auto eventName = a_event->QUserEvent();
-		// logger::info("event{}", a_event->GetIDCode());
 		auto* userEvents = RE::UserEvents::GetSingleton();
+
+		// The block button: pressing it cancels a buffered attack, since defending wins.
+		if (eventName == userEvents->leftAttack)
+		{
+			if (a_event->IsDown())
+			{
+				InputEventHandler::GetSingleton()->OnBlockPressed();
+			}
+			return _ProcessAttackHook(handler, a_event, a_data);
+		}
 
 		bool IsAttackEvent =
 			eventName == userEvents->attackStart ||
 			eventName == userEvents->attackPowerStart ||
 			eventName == userEvents->rightAttack;
-		if (IsAttackEvent && !CanPlayerAttack())
+		// Only the press decides anything; holds and releases always reach vanilla.
+		if (IsAttackEvent && a_event->IsDown())
 		{
-			return false;
+			// One line per click: which attack state a press lands in, and which gate it meets.
+			if (Settings::VerboseLogging)
+			{
+				auto* Player = RE::PlayerCharacter::GetSingleton();
+				bool GraphAttacking = false;
+				bool GraphBashing = false;
+				const bool HasAttacking = Player->GetGraphVariableBool("IsAttacking", GraphAttacking);
+				const bool HasBashing = Player->GetGraphVariableBool("IsBashing", GraphBashing);
+				Directions Pending;
+				// The gate's three parts, so a refusal says which one refused.
+				auto* Attacks = AttackHandler::GetSingleton();
+				logger::info("[press] attack: state={} graph IsAttacking={} IsBashing={} queued={} buffered={} canAttack={} (lockedOut={} feintWindow={} stamina {:.0f}, light swing {:.0f})",
+					(int)Player->AsActorState()->GetAttackState(),
+					HasAttacking ? (GraphAttacking ? "true" : "false") : "n/a",
+					HasBashing ? (GraphBashing ? "true" : "false") : "n/a",
+					DirectionHandler::GetSingleton()->HasQueuedDirection(Player, Pending),
+					InputEventHandler::GetSingleton()->HasBufferedAttack(),
+					CanPlayerAttack(), !Attacks->CanAttack(Player), Attacks->InFeintWindow(Player),
+					Player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina), Attacks->SwingStaminaCost(Player, false));
+			}
+			auto* Input = InputEventHandler::GetSingleton();
+			if (Input->ShouldHoldPress())
+			{
+				Input->BufferAttack(false);
+				return false;
+			}
+			if (!CanPlayerAttack())
+			{
+				OnPlayerAttackRefused();
+				return false;
+			}
 		}
 		return _ProcessAttackHook(handler, a_event, a_data);
 	}
@@ -804,17 +1059,43 @@ namespace Hooks
 			return;
 		}
 
-		const float vanillaInner = *a_outInner;
-		const float vanillaOuter = *a_outOuter;
 		AIHandler::GetSingleton()->ApplySpacingExternalCalled(a_actor, a_outInner, a_outOuter);
+	}
 
-		if (Settings::VerboseLogging)
+	void HookProcessMotionData::Install()
+	{
+		const MH_STATUS init = MH_Initialize();
+		if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED)
 		{
-			logger::info("[spacing] {} -> {} vanilla=[{:.1f},{:.1f}] adjusted=[{:.1f},{:.1f}]",
-				a_actor ? a_actor->GetName() : "<null>",
-				a_target ? a_target->GetName() : "<null>",
-				vanillaInner, vanillaOuter, *a_outInner, *a_outOuter);
+			logger::error("[motion] MH_Initialize failed: {}", static_cast<int>(init));
+			return;
 		}
+
+		REL::Relocation<std::uintptr_t> target{ RELOCATION_ID(31949, 32703) };
+		void* addr = reinterpret_cast<void*>(target.address());
+
+		if (MH_CreateHook(addr, reinterpret_cast<void*>(&ProcessMotionData),
+				reinterpret_cast<void**>(&_ProcessMotionData)) != MH_OK ||
+			MH_EnableHook(addr) != MH_OK)
+		{
+			logger::error("[motion] failed to hook ProcessMotionData at {:#x}", target.address());
+			return;
+		}
+		logger::info("[motion] hooked ProcessMotionData at {:#x}", target.address());
+	}
+
+	bool HookProcessMotionData::ProcessMotionData(RE::Character* a_this, float a_dt, RE::NiPoint3* a_translation, RE::NiPoint3* a_rotation, bool* a_flag)
+	{
+		const bool Moved = _ProcessMotionData(a_this, a_dt, a_translation, a_rotation, a_flag);
+		// Lunges in directional fights: the windup's forward motion, by the swing's table entry.
+		if (Moved && a_translation && IsInWindup(a_this) &&
+			DirectionHandler::GetSingleton()->HasDirectionalPerks(a_this))
+		{
+			auto* Dir = DirectionHandler::GetSingleton();
+			a_translation->y *= AttackHandler::LungeMultFor(Dir->GetCurrentDirection(a_this),
+				Dir->GetComboStep(a_this) > 0, IsPowerAttacking(a_this));
+		}
+		return Moved;
 	}
 
 	void HookAnimEvent::ProcessCharacterEvent(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
@@ -837,7 +1118,7 @@ namespace Hooks
 		if (str == "preHitFrame"_h)
 		{
 			// use this to signal that an attack did happen with the AI
-			if (!actor->IsPlayerRef())
+			if (!actor->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(actor))
 			{
 				AIHandler::GetSingleton()->DidAttackExternalCalled(actor);
 			}
@@ -850,20 +1131,8 @@ namespace Hooks
 				// unblockable attacks are free
 				if (!DirectionHandler::GetSingleton()->IsUnblockable(actor))
 				{
-					unsigned repeatCombos = DirectionHandler::GetSingleton()->GetRepeatCount(actor);
-					repeatCombos = std::min(3u, repeatCombos);
-
-					float staminaCost = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina) * StaminaPowerTable[repeatCombos];
-					auto Equipped = actor->GetEquippedObject(false);
-					if (Equipped)
-					{
-						staminaCost += (Equipped->GetWeight() * DifficultySettings::WeaponWeightStaminaMult);
-					}
-					if (IsPowerAttacking(actor))
-					{
-						staminaCost *= DifficultySettings::PowerAttackStaminaMult;
-					}
-					actor->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,staminaCost);
+					actor->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,
+						AttackHandler::GetSingleton()->SwingStaminaCost(actor, IsPowerAttacking(actor)));
 				}
 				AttackHandler::GetSingleton()->AddAttackChain(actor, IsPowerAttacking(actor));
 			}
@@ -879,8 +1148,6 @@ namespace Hooks
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
 			AttackHandler::GetSingleton()->AddFeintWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
-
-			//logger::info("trychamberbegin {}", actor->GetName());
 
 		}
 		else if (str == "MCO_WinOpen"_h)
@@ -924,7 +1191,6 @@ namespace Hooks
 		}
 		else if (str == "MCO_DodgeClose"_h)
 		{
-			//logger::info("Got MCO dodge event");
 		}
 	}
 	RE::BSEventNotifyControl HookAnimEvent::ProcessEvent_NPC(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
@@ -946,112 +1212,163 @@ namespace Hooks
 			RE::Actor* actor = static_cast<RE::Actor*>(a_graphHolder);
 			if (!actor->IsBlocking())
 			{
-				DirectionHandler::GetSingleton()->AddTimedParry(actor);
+				// A held-off actor's guard isn't its own decision, so it earns no
+				// parry window and burns no cooldown. The brace still counts: the
+				// guard really is set, whoever set it.
+				if (!IsAttackingDisabled(actor))
+				{
+					DirectionHandler::GetSingleton()->AddTimedParry(actor);
+				}
 				BlockHandler::GetSingleton()->AddBrace(actor);
 				// should be called on any event that might interrupt actor changing guards
 				DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
 			}
 
 		}
-		else if (eventName.contains("attack"))
+		// Attack starts are handled after the send, by AfterNotifyAnimationGraph.
+		else if (eventName.contains("attack") && !eventName.contains("Start") && eventName.contains("Release"))
 		{
-			RE::Actor* actor = static_cast<RE::Actor*>(a_graphHolder);
-			if (eventName.contains("Start"))
+			AttackHandler::GetSingleton()->RemoveAttackChain(static_cast<RE::Actor*>(a_graphHolder));
+		}
+	}
+
+	// A swing start the graph accepted.
+	static void OnAttackStarted(RE::Actor* actor, const RE::BSFixedString& eventName)
+	{
+		bool DidPowerAttack = false;
+		// should be called on any event that might interrupt actor changing guards
+		DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
+		// A chained swing has no TryChamberBegin to close the window it started in.
+		DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
+
+		// Cash in the guard charge: time spent set on one line becomes
+		// attack speed.
+		{
+			// Called unconditionally: a ratio of 0 clears any buff still
+			// running, so each swing gets exactly the speed its own
+			// charge bought and a chain follow-up can't ride the first
+			// attack's leftover.
+			const float ChargeRatio = DirectionHandler::GetSingleton()->ConsumeGuardCharge(actor);
+			AttackHandler::GetSingleton()->GiveChargeSpeedBuff(actor, ChargeRatio);
+
+			// Chain speed penalties, set every swing so a crossing one clears them. Relative to the
+			// combo, not the last motion: the previous line only advances on a landed hit.
+			// Same side is four lines only; the poke penalty is lights only.
+			float ChainPenalty = 0.f;
+			Directions PrevDir;
+			const WeaponSet Set = DirectionHandler::GetSingleton()->AnimationSet(actor);
+			const bool Chained = DirectionHandler::GetSingleton()->GetLastAttackDirection(actor, PrevDir);
+			// The event name only: attackData still holds the previous swing's here.
+			const bool PowerSwing = eventName.contains("Power");
+			if (Chained)
 			{
-				bool DidPowerAttack = false;
-				// should be called on any event that might interrupt actor changing guards
-				DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
-
-				// Cash in the guard charge: time spent set on one line becomes
-				// attack speed.
+				// 4 direction mode needed some extra stuff to make it more readable
+				// so attacks comboing on the same side are slower
+				// not documenting this obviously because who plays 4 direction mod
+				const Directions CurDir =
+					DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+				if (DirectionHandler::EnabledDirections() == 0xF &&
+					DirectionHandler::IsLeftSide(PrevDir) == DirectionHandler::IsLeftSide(CurDir))
 				{
-					// Called unconditionally: a ratio of 0 clears any buff still
-					// running, so each swing gets exactly the speed its own
-					// charge bought and a chain follow-up can't ride the first
-					// attack's leftover.
-					const float ChargeRatio = DirectionHandler::GetSingleton()->ConsumeGuardCharge(actor);
-					AttackHandler::GetSingleton()->GiveChargeSpeedBuff(actor, ChargeRatio);
-
-					// Same-side penalty — a soft constraint on COMBOING, not on
-					// swinging. Continuing a combo from the side you're already
-					// on is the weak continuation, so it comes out slower, and
-					// slower means REACTABLE, which is the real consequence.
-					//
-					// Combo-relative on purpose: GetLastAttackDirection reads
-					// the combo ring, which only advances on a landed hit (or a
-					// blocked power), so a whiff or a blocked light between two
-					// swings doesn't count as the previous cut. That matches
-					// repeatCount, which sits in the same ComboData and gates
-					// the same way — both penalties describe the combo you're
-					// building, not the last motion you made.
-					//
-					// Hard rules can't do this job: no 3-cycle over four
-					// directions can alternate sides, so forbidding same-side
-					// would leave every NPC pattern unable to complete a combo.
-					// A cost keeps all eight legal and lets the weak option stay
-					// live, under-guarded in proportion to being weak.
-					//
-					// Set every swing so a crossing one clears it, and kept
-					// independent of guard charge so it still applies when that
-					// mechanic is switched off.
-					bool SameSide = false;
-					Directions PrevDir;
-					if (DirectionHandler::GetSingleton()->GetLastAttackDirection(actor, PrevDir))
-					{
-						const Directions CurDir =
-							DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
-						SameSide = DirectionHandler::IsLeftSide(PrevDir) ==
-							DirectionHandler::IsLeftSide(CurDir);
-					}
-					AttackHandler::GetSingleton()->SetSameSideSpeedPenalty(actor, SameSide);
+					ChainPenalty = DifficultySettings::SameSideSpeedPenalty;
 				}
-
-				if (AttackHandler::GetSingleton()->InAttackChain(actor, DidPowerAttack))
+				if (!PowerSwing && CurDir == AttackHandler::PokeLine(actor))
 				{
-					//hack because power attack property flags are not guaranteed to have power in the event name
-					if (eventName.contains("Power"))
-					{
-						if (!DidPowerAttack)
-						{
-							//logger::info("power attack {}", DidPowerAttack);
-							AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
-						}
-						else
-						{
-							AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
-						}
-					}
-					else
-					{
-						if (DidPowerAttack)
-						{
-							//logger::info("normal attack {}", DidPowerAttack);
-							AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
-						}
-						else
-						{
-							AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
-						}
-					}
+					ChainPenalty = std::max(ChainPenalty,
+						DifficultySettings::ChainPokeSpeedPenalty * ChainPokePenaltyBySet[static_cast<int>(Set)]);
 				}
-
-
+				// Once per player swing, unlike the NPCs watching it. Row 4 is the
+				// opener, so an Unblockable last line mustn't reach it.
+				if (actor->IsPlayerRef() && static_cast<int>(PrevDir) < 4)
+				{
+					AIHandler::GetSingleton()->RecordPlayerChainTransition(Set, static_cast<int>(PrevDir), CurDir);
+				}
 			}
-			else if (eventName.contains("Release"))
+			else if (actor->IsPlayerRef())
 			{
-				AttackHandler::GetSingleton()->RemoveAttackChain(actor);
+				AIHandler::GetSingleton()->RecordPlayerChainTransition(Set, AIHandler::OpenerRow,
+					DirectionHandler::GetSingleton()->GetCurrentDirection(actor));
+			}
+			RE::Actor* SwingTarget = DirectionHandler::GetSingleton()->GetSwingTarget(actor);
+			const int ComboStep = Chained ? DirectionHandler::GetSingleton()->GetComboStep(actor) : 0;
+			// -1 with no target.
+			const float StartDistance = SwingTarget ? std::sqrt(TorsoDistanceSq(actor, SwingTarget)) : -1.f;
+			// Before this swing's own cost, which preHitFrame charges.
+			const float StartStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+			const float MaxStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+			const float StaminaRatio = MaxStamina > 0.f ? StartStamina / MaxStamina : 0.f;
+			const bool PowerAffordable = StartStamina >= AttackHandler::GetSingleton()->SwingStaminaCost(actor, true);
+			// Read-only stats; swings with no one to swing at don't count.
+			if (actor->IsPlayerRef() && SwingTarget)
+			{
+				AIHandler::GetSingleton()->RecordPlayerSwing(Set, ComboStep, PowerSwing, StartDistance, StaminaRatio, PowerAffordable);
+				AIHandler::GetSingleton()->BeginPlayerSwing(Set, ComboStep, DirectionHandler::GetSingleton()->GetCurrentDirection(actor));
+			}
+			AttackHandler::GetSingleton()->SetChainLinePenalty(actor, ChainPenalty);
+			if (Settings::VerboseLogging)
+			{
+				const auto* Equipped = actor->GetEquippedObject(false);
+				const auto* Weapon = Equipped ? Equipped->As<RE::TESObjectWEAP>() : nullptr;
+				logger::info("[swing] {} {:08X} ({} {}) {} {}, chain penalty {:.2f}, speed delta {:.2f}, weapon speed {:.2f}, step {}, power {}, start distance {:.0f}, stamina {:.2f}, power affordable {}",
+					actor->GetName(), actor->GetFormID(), WeaponSetName(Set),
+					static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)),
+					eventName.c_str(), Chained ? "in chain" : "opener", ChainPenalty,
+					AttackHandler::GetSingleton()->GetAttackSpeedDelta(actor), Weapon ? Weapon->weaponData.speed : 0.f,
+					ComboStep, PowerSwing, StartDistance, StaminaRatio, PowerAffordable);
+			}
+		}
+
+		if (AttackHandler::GetSingleton()->InAttackChain(actor, DidPowerAttack))
+		{
+			//hack because power attack property flags are not guaranteed to have power in the event name
+			if (eventName.contains("Power"))
+			{
+				if (!DidPowerAttack)
+				{
+					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+				}
+				else
+				{
+					AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
+				}
+			}
+			else
+			{
+				if (DidPowerAttack)
+				{
+					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+				}
+				else
+				{
+					AttackHandler::GetSingleton()->RemoveSmallAttackSpeedBuff(actor);
+				}
 			}
 		}
 	}
+
+	// The notify's return is whether the graph took the event. A refused attack start (a
+	// press during the windup) must not re-run the swing setup against the swing still playing.
+	static void AfterNotifyAnimationGraph(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName, bool a_accepted)
+	{
+		if (a_accepted && eventName.contains("attack") && eventName.contains("Start"))
+		{
+			OnAttackStarted(static_cast<RE::Actor*>(a_graphHolder), eventName);
+		}
+	}
+
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_PC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
 		SharedNotifyAnimationGraph(a_graphHolder, eventName);
-		return _NotifyAnimationGraph_PC(a_graphHolder, eventName);
+		const bool Accepted = _NotifyAnimationGraph_PC(a_graphHolder, eventName);
+		AfterNotifyAnimationGraph(a_graphHolder, eventName, Accepted);
+		return Accepted;
 	}
 	bool HookNotifyAnimationGraph::NotifyAnimationGraph_NPC(RE::IAnimationGraphManagerHolder* a_graphHolder, const RE::BSFixedString& eventName)
 	{
 		SharedNotifyAnimationGraph(a_graphHolder, eventName);
-		return _NotifyAnimationGraph_NPC(a_graphHolder, eventName);
+		const bool Accepted = _NotifyAnimationGraph_NPC(a_graphHolder, eventName);
+		AfterNotifyAnimationGraph(a_graphHolder, eventName, Accepted);
+		return Accepted;
 	}
 	void HookCharacterStateOnGround::SimulateStatePhysics(RE::bhkCharacterStateOnGround* a_this, RE::bhkCharacterController* a_controller)
 	{
@@ -1074,7 +1391,6 @@ namespace Hooks
 	void Hooks::Install()
 	{
 		logger::info("Installing hooks...");
-		SKSE::AllocTrampoline(128);
 		HookOnMeleeHit::Install();
 		HookProjectileHit::Install();
 		HookBeginMeleeHit::Install();
@@ -1088,6 +1404,7 @@ namespace Hooks
 		HookAnimEvent::Install();
 		HookNotifyAnimationGraph::Install();
 		HookCombatAdvanceRadius::Install();
+		HookProcessMotionData::Install();
 		HookCharacterStateOnGround::Install();
 		HookCharacterStateInAir::Install();
 		logger::info("All hooks installed");

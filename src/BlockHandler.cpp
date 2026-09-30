@@ -4,12 +4,23 @@
 #include "SettingsLoader.h"
 #include "AttackHandler.h"
 #include "FXHandler.h"
+#include "CreatureHandler.h"
 
 constexpr float MultiattackTimer = 2.5f;
+// Stagger on the blocker when a creature's blocked hit isn't parried, at
+// player size; scales with size, and anything too small to move a braced
+// guard does nothing.
+constexpr float CreatureBlockStagger = 0.25f;
+constexpr float CreatureBlockStaggerMin = 0.1f;
+constexpr float CreatureBlockStaggerMaxSize = 2.f;
 // Stamina drain reduction on a blocked hit at peak brace. Deliberately small —
 // a quality gradient under the direction game, not a way to out-block a mixup,
 // and it must not blunt a power attack's guard-breaking role.
 constexpr float BraceMaxReduction = 0.2f;
+// Stamina a blocked hit adds per point the attacker's weapon outweighs the
+// defender's, and the share of the base cost that surcharge may reach.
+constexpr float WeightStamPerUnit = 0.5f;
+constexpr float WeightStamMaxRatio = 0.5f;
 // Ramp over TimedBlockStartup, hold across the parry window, then nothing.
 // The bonus is for committing the guard early enough to be set when the attack
 // lands — once the window has passed you weren't, so it ends rather than
@@ -33,6 +44,8 @@ static float BraceRatioFromSeconds(float seconds)
 	return 0.f;
 }
 constexpr float HyperarmorTimer = 0.1f;
+// How long a wrong-line guard stays caught out, covering the rest of the swing.
+constexpr float MissedParryTime = 0.25f;
 
 BlockHandler::BlockHandler()
 {
@@ -80,14 +93,24 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	// weapon stamina modifiers
 	auto AttackerWeapon = attacker->GetEquippedObject(false);
 	float AttackerWeaponWeight = AttackerWeapon ? AttackerWeapon->GetWeight() : 0.f;
+	// A creature's size stands in only when it carries no weapon; an armed
+	// draugr is costed by its weapon like anyone else.
+	if (AttackerWeaponWeight <= 0.f && CreatureHandler::GetSingleton()->IsCreatureGraph(attacker->GetRace()))
+	{
+		AttackerWeaponWeight = CreatureHandler::SizeWeight(attacker);
+	}
 	auto DefenderWeapon = target->GetEquippedObject(false);
 	float DefenderWeaponWeight = DefenderWeapon ? DefenderWeapon->GetWeight() : 0.f;
 	bool hasShield = HasShield(target);
 
+	// Flat, unlike the rest of the cost, so a deep stamina pool absorbs a heavy
+	// weapon better — the one place the attribute pays off. Capped against the
+	// base so a warhammer can't empty a light fighter's bar in three blocks.
 	float AdditionalStamDamage = 0;
 	if (AttackerWeaponWeight > DefenderWeaponWeight)
 	{
-		AdditionalStamDamage = 0.5f * (AttackerWeaponWeight - DefenderWeaponWeight);
+		AdditionalStamDamage = std::min(WeightStamPerUnit * (AttackerWeaponWeight - DefenderWeaponWeight),
+			Damage * WeightStamMaxRatio);
 	}
 
 	bool Imperfect = DirectionHandler::GetSingleton()->HasImperfectParry(target);
@@ -155,13 +178,44 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 			attacker->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
 		target->AsActorValueOwner()->RestoreActorValue(RE::ActorValue::kStamina,
 			target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina) * 0.15f);
-		if (target->IsPlayerRef())
+	}
+	// A creature has no guard to trade with, so a plain block still gets moved;
+	// only the parry holds. After the break stagger, which takes precedence.
+	if (CreatureHandler::GetSingleton()->IsCreatureGraph(attacker->GetRace()) &&
+		!DirectionHandler::GetSingleton()->HasTimedParry(target))
+	{
+		const float Stagger = CreatureBlockStagger *
+			std::min(CreatureHandler::SizeRatio(attacker), CreatureBlockStaggerMaxSize);
+		// The engine's own stagger, so stagger perks apply to this one; the
+		// rule staggers elsewhere must stay unperkable. Setting hitData.stagger
+		// instead would do nothing: the engine only reads it when damage landed.
+		if (Stagger >= CreatureBlockStaggerMin)
 		{
-
+			using EngineStagger_t = void (*)(RE::Actor* a_target, float a_magnitude, RE::Actor* a_aggressor);
+			static REL::Relocation<EngineStagger_t> EngineStagger{ RELOCATION_ID(36700, 37710) };
+			EngineStagger(target, Stagger, attacker);
 		}
 	}
+	if (Settings::VerboseLogging)
+	{
+		logger::info("[block] {} absorbed from {}: stamina {:.0f} of {:.0f} left, cost {:.0f}, through {:.0f}{} | health {:.1f}, hitData phys {:.1f} total {:.1f} -> {:.1f}, flags {:#x}",
+			target->GetName(), attacker->GetName(), ActorStamina, ActorMaxStamina, Damage, FinalDamage,
+			Imperfect ? " (imperfect)" : "",
+			target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth),
+			hitData.physicalDamage, hitData.totalDamage, FinalDamage,
+			static_cast<uint32_t>(hitData.flags.underlying()));
+	}
 	hitData.totalDamage = FinalDamage;
-
+	// The engine re-derives totalDamage from these after we return; zero them too.
+	hitData.physicalDamage = FinalDamage;
+	hitData.resistedPhysicalDamage = 0.f;
+	hitData.resistedTypedDamage = 0.f;
+	hitData.percentBlocked = FinalDamage > 0.f ? 0.f : 1.f;
+	if (FinalDamage <= 0.f)
+	{
+		// A full absorb eats the proc too; a break lets it through.
+		hitData.attackDataSpell = nullptr;
+	}
 }
 
 void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magnitude, bool force)
@@ -190,8 +244,11 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 			actor->NotifyAnimationGraph("blockStop");
 			actor->AsActorState()->actorState2.wantBlocking = false;
 		}
-		// reset actor attack state because sometimes it can get screwed up staggering mid bash
-		// actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+		// The engine's stagger is zeroed for fencers, so its attack-state cleanup never runs.
+		if (actor->IsAttacking())
+		{
+			AttackHandler::GetSingleton()->ResetAttackState(actor);
+		}
 		float headingAngle = actor->GetHeadingAngle(heading->GetPosition(), false);
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
 		actor->SetGraphVariableFloat("staggerDirection", direction);
@@ -199,14 +256,6 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		actor->NotifyAnimationGraph("staggerStart");
 		actor->AsActorState()->actorState2.staggered = true;
 		//actor->NotifyAnimationGraph("attackStop");
-		
-
-		/*
-			typedef void (*tfoo)(RE::Actor* a_target, float a_staggerMult, RE::Actor* a_aggressor);
-		REL::Relocation<tfoo> func{ REL::RelocationID(36700, 37710) };
-		func(actor, magnitude, heading);	
-		
-		*/
 
 		if (actor->GetRace()->HasKeyword(NPCKeyword))
 		{
@@ -242,12 +291,37 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 	{
 		return;
 	}
-	if (!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
+	const bool Angle = DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target);
+	if (Settings::VerboseLogging)
+	{
+		auto* Dir = DirectionHandler::GetSingleton();
+		const float Max = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
+		const float Cur = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
+		logger::info("[block] {} {:08X} ({}) vs {} {:08X} ({}) angle {} unblockable {} perks a/t {}/{} shield {} full {} stam {:.2f}",
+			attacker->GetName(), attacker->GetFormID(), static_cast<int>(Dir->GetCurrentDirection(attacker)),
+			target->GetName(), target->GetFormID(), static_cast<int>(Dir->GetCurrentDirection(target)),
+			Angle, Dir->IsUnblockable(attacker),
+			Dir->HasDirectionalPerks(attacker), Dir->HasDirectionalPerks(target),
+			HasShield(target), HasFullShieldBlock(target), Max > 0.f ? Cur / Max : 0.f);
+		float TargetAgo = -1.f, AttackerAgo = -1.f;
+		const Directions TargetPrev = Dir->GetPreviousDirection(target, TargetAgo);
+		const Directions AttackerPrev = Dir->GetPreviousDirection(attacker, AttackerAgo);
+		logger::info("[block]   guard up for {:.3f}s, parry {}, locked target {:08X}, target was ({}) {:.3f}s ago, attacker was ({}) {:.3f}s ago",
+			GetBraceSeconds(target), Dir->HasTimedParry(target), Dir->GetLockedTargetFormID(),
+			static_cast<int>(TargetPrev), TargetAgo,
+			static_cast<int>(AttackerPrev), AttackerAgo);
+	}
+	if (!Angle)
 	{
 		target->SetGraphVariableBool("IsBlocking", false);
 		target->NotifyAnimationGraph("blockStop");
 		target->AsActorState()->actorState2.wantBlocking = false;
-		//logger::info("had wrong block angle");
+		// Latch the miss for the rest of the swing: a second hit event from the same
+		// swing must not find a guard still standing and be rescued as a block.
+		{
+			std::unique_lock lock(MissedParryMtx);
+			MissedParry[target->GetHandle()] = MissedParryTime;
+		}
 
 		// Disconfirmation must fire HERE: this strip clears IsBlocking before
 		// the hit event reaches SignalBadThing, so its wasBlocking check can
@@ -263,6 +337,11 @@ void BlockHandler::HandleBlock(RE::Actor* attacker, RE::Actor* target)
 		// succesffully blocked so remove any lockout if they cannot attack
 		AttackHandler::GetSingleton()->RemoveLockout(target);
 		GiveHyperarmor(target, attacker);
+		// A guard switch still blending when the hit lands: drop the slow transitions and snap to the line.
+		if (target->IsBlocking() && DirectionHandler::GetSingleton()->ClearAnimationQueue(target))
+		{
+			target->NotifyAnimationGraph("ForceBlockFast");
+		}
 	}
 }
 
@@ -302,6 +381,20 @@ void BlockHandler::ParriedAttacker(RE::Actor* actor, RE::Actor* attacker)
 	LastParriedMapMtx.unlock();
 }
 
+// A clash never reaches the hit path: both NPC sides hear it as a connection. The counter
+// started late, so its side doesn't time the windup.
+static void NotifyBladesMet(RE::Actor* attacker, RE::Actor* target)
+{
+	if (!target->IsPlayerRef())
+	{
+		AIHandler::GetSingleton()->NotifyPowerAttackHitExternalCalled(target, attacker);
+	}
+	if (!attacker->IsPlayerRef())
+	{
+		AIHandler::GetSingleton()->NotifyPowerAttackHitExternalCalled(attacker, target, false);
+	}
+}
+
 bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 {
 	// only the attacker should be allowed to get staggered
@@ -324,14 +417,56 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 			// greater time means they attacked later
 			if (TargetMasterstrikeTime >= AttackerMasterstrikeTime)
 			{
-				// power attack always has priority, you cannot masterstrike a power attack with a regular attack
-				if (!attackerPowerattack || (attackerPowerattack && targetPowerattack))
+				// A light can't be masterstruck, so it stays safe to open with: it clashes.
+				// Nobody is hit and both swings stop. The first swing was already charged at
+				// its pre-hit frame; the counter stops before its own charge, which is its win.
+				if (!attackerPowerattack)
 				{
+					// Read-only stats: both swings end here; the target countered.
+					if (attacker->IsPlayerRef() || target->IsPlayerRef())
+					{
+						AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Clashed);
+					}
+					if (target->IsPlayerRef())
+					{
+						AIHandler::GetSingleton()->RecordPlayerDefense(DirectionHandler::GetSingleton()->AnimationSet(target),
+							false, DirectionHandler::GetSingleton()->GetComboStep(attacker) > 0, AIHandler::DefenseOutcome::Countered);
+					}
 					FXHandler::GetSingleton()->PlayMasterstrike(target);
-					CauseStagger(attacker, target, 0.25f);
+					// Blades met: a connection for both reach learners.
+					NotifyBladesMet(attacker, target);
+					for (RE::Actor* Clashed : { attacker, target })
+					{
+						if (Clashed->IsAttacking())
+						{
+							Clashed->NotifyAnimationGraph("attackStop");
+							Clashed->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+						}
+					}
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[hit] clash: {} ran into {}'s counter", attacker->GetName(), target->GetName());
+					}
 					return true;
 				}
-				
+				// Only a power masterstrikes a power.
+				if (targetPowerattack)
+				{
+					// Read-only stats. The masterstriker's own power swings on and resolves later.
+					if (attacker->IsPlayerRef())
+					{
+						AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Masterstruck);
+					}
+					else if (target->IsPlayerRef())
+					{
+						AIHandler::GetSingleton()->RecordPlayerDefense(DirectionHandler::GetSingleton()->AnimationSet(target),
+							true, DirectionHandler::GetSingleton()->GetComboStep(attacker) > 0, AIHandler::DefenseOutcome::Countered);
+					}
+					FXHandler::GetSingleton()->PlayMasterstrike(target);
+					NotifyBladesMet(attacker, target);
+					CauseStagger(attacker, target, 0.5f);
+					return true;
+				}
 			}
 		}
 	}
@@ -373,6 +508,22 @@ void BlockHandler::ResetBrace(RE::Actor* actor)
 	}
 }
 
+// Seconds the guard has been up, or -1 if it isn't tracked. Diagnostic: a value
+// near zero when a block misbehaves means the hit beat the guard, not the logic.
+bool BlockHandler::HasMissedParry(RE::Actor* actor) const
+{
+	std::shared_lock lock(MissedParryMtx);
+	auto Iter = MissedParry.find(actor->GetHandle());
+	return Iter != MissedParry.end() && Iter->second > 0.f;
+}
+
+float BlockHandler::GetBraceSeconds(RE::Actor* actor) const
+{
+	std::shared_lock lock(BraceTimerMtx);
+	auto Iter = BraceTimer.find(actor->GetHandle());
+	return Iter == BraceTimer.end() ? -1.f : Iter->second;
+}
+
 float BlockHandler::GetBraceRatio(RE::Actor* actor) const
 {
 	std::shared_lock lock(BraceTimerMtx);
@@ -402,6 +553,15 @@ void BlockHandler::Update(float delta)
 			}
 			Iter->second = std::min(Iter->second + delta, Cap);
 			Iter++;
+		}
+	}
+	{
+		std::unique_lock lock(MissedParryMtx);
+		auto Iter = MissedParry.begin();
+		while (Iter != MissedParry.end())
+		{
+			Iter->second -= delta;
+			Iter = Iter->second <= 0.f ? MissedParry.erase(Iter) : std::next(Iter);
 		}
 	}
 
