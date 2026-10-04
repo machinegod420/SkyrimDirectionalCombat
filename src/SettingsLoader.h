@@ -157,6 +157,14 @@ struct WeaponSettings
 	static float AxeSpeed;
 	static float WeaponSpeedMult;
 	static float BowSpeedMult;
+	// Rebalance only. Multiplies the class speed of spears, pikes and quarterstaffs (by keyword);
+	// two-handed ones take the battleaxe class, whose polearm animations they play.
+	static float SpearSpeed;
+	// Rebalance and Precision only. Each weapon's speed is scaled by how hard it is to swing (model length
+	// and an estimated mass) against its class's steel weapon, which keeps the class speed.
+	// Strength 0 is off, 1 is full physics; damage compensates as with the class speeds.
+	static bool PhysicalWeaponSpeed;
+	static float PhysicalSpeedStrength;
 
 	// unneeded as battleaxes and warhammers are treated as polearms in this mod
 	static float HalberdSpeed;
@@ -210,6 +218,12 @@ struct AISettings
 	// What fraction of the combo read a VeryEasy actor gets. Legendary gets all
 	// of it; the tiers between interpolate.
 	static float ComboReadLowTierScale;
+	// Attempts per second to start an exchange (a swing, or a press into the guard) =
+	// (tier + offset + 1.5 x aggression) x per-tier rate, at full stamina. Counters don't use it.
+	// Tier runs 1 (VeryEasy) to 6 (Legendary). The offset lifts the low tiers more, in
+	// proportion, than the high ones.
+	static float InitiativeRatePerTier;
+	static float InitiativeRateTierOffset;
 	// Off: your follow-up habits stop feeding the saved profile and NPCs meet
 	// you cold. The saved profile is kept; in-fight reads are unaffected.
 	static bool LearnAcrossFights;
@@ -298,6 +312,10 @@ private:
 	// had it once its speed is pinned to the class rate. Both arguments are
 	// effective speeds, so two-handers compare like for like.
 	float CalcDamage(float oldEffective, float newEffective);
+	// Class speed multiplier per melee weapon from its model length and estimated mass, against
+	// its class's steel weapon. Loads every weapon model. A weapon missing from the map keeps
+	// the class speed.
+	std::unordered_map<RE::TESObjectWEAP*, float> PhysicalSpeedMults();
 	RE::BGSKeyword* IsWarhammer;
 	RE::BGSKeyword* IsBaxe;
 

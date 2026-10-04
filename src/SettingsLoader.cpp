@@ -1,5 +1,8 @@
 #include "SettingsLoader.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -13,7 +16,7 @@
 float DifficultySettings::ComboResetTimer = 3.f;
 float DifficultySettings::MeleeDamageMult = 2.f;
 float DifficultySettings::SameSideSpeedPenalty = 0.15f;
-float DifficultySettings::ChainPokeSpeedPenalty = 0.33f;
+float DifficultySettings::ChainPokeSpeedPenalty = 0.3f;
 float DifficultySettings::UnblockableDamageMult = 2.5f;
 float DifficultySettings::UnblockableHealthFloor = 0.1f;
 float DifficultySettings::PlayerUnblockableHealthFloor = 0.1f;
@@ -87,6 +90,9 @@ float WeaponSettings::SwordSpeed = 1.f;
 float WeaponSettings::AxeSpeed = 1.f;
 float WeaponSettings::WeaponSpeedMult = 1.f;
 float WeaponSettings::BowSpeedMult = 1.f;
+float WeaponSettings::SpearSpeed = 1.f;
+bool WeaponSettings::PhysicalWeaponSpeed = true;
+float WeaponSettings::PhysicalSpeedStrength = 0.15f;
 
 float AISettings::AIWaitTimer = 1.f;
 int AISettings::LegendaryLvl = 11;
@@ -114,6 +120,8 @@ float AISettings::FatigueUpdateSeconds = 0.08f;
 float AISettings::FatigueActionSeconds = 0.05f;
 float AISettings::ComboReadStrength = 0.5f;
 float AISettings::ComboReadLowTierScale = 0.2f;
+float AISettings::InitiativeRatePerTier = 0.57f;
+float AISettings::InitiativeRateTierOffset = 0.f;
 bool AISettings::LearnAcrossFights = true;
 bool AISettings::LearnReach = true;
 float AISettings::BeliefDisconfirmFraction = 0.5f;
@@ -565,6 +573,16 @@ void SettingsLoader::Load(const std::string& path)
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, AISettings, ComboReadLowTierScale, newval);
 				}
+				else if (fieldName == "InitiativeRatePerTier")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, InitiativeRatePerTier, newval);
+				}
+				else if (fieldName == "InitiativeRateTierOffset")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, InitiativeRateTierOffset, newval);
+				}
 				else if (fieldName == "LearnAcrossFights")
 				{
 					bool newval = field.as<bool>();
@@ -958,6 +976,21 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, WeaponSettings::BowSpeedMult);
 				}
+				else if (fieldName == "SpearSpeed")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, WeaponSettings, SpearSpeed, newval);
+				}
+				else if (fieldName == "PhysicalWeaponSpeed")
+				{
+					bool newval = field.as<bool>();
+					SETTING_MACRO(sectionName, WeaponSettings, PhysicalWeaponSpeed, newval);
+				}
+				else if (fieldName == "PhysicalSpeedStrength")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, WeaponSettings, PhysicalSpeedStrength, newval);
+				}
 			}
 		}
 	}
@@ -974,7 +1007,8 @@ void SettingsLoader::Load(const std::string& path)
 		{
 			weap->weaponData.speed = weap->weaponData.speed * WeaponSettings::WeaponSpeedMult;
 		}
-		else if (weap->IsBow() || weap->IsCrossbow())
+		// Not crossbows: a changed speed broke their reload.
+		else if (weap->IsBow())
 		{
 			weap->weaponData.speed *= WeaponSettings::BowSpeedMult;
 		}
@@ -984,6 +1018,153 @@ void SettingsLoader::Load(const std::string& path)
 // The behavior graph runs two-handed swings this much faster than the weapon's
 // speed value says, so the class speeds are divided by it before being written.
 constexpr float TwoHandSpeedFactor = 1.5f;
+
+static void CombineBound(RE::NiBound& a_into, const RE::NiBound& a_add)
+{
+	const RE::NiPoint3 Delta = a_add.center - a_into.center;
+	const float Dist = Delta.Length();
+	if (Dist + a_add.radius <= a_into.radius)
+	{
+		return;
+	}
+	if (Dist + a_into.radius <= a_add.radius)
+	{
+		a_into = a_add;
+		return;
+	}
+	const float Radius = (Dist + a_into.radius + a_add.radius) * 0.5f;
+	a_into.center += Delta * ((Radius - a_into.radius) / Dist);
+	a_into.radius = Radius;
+}
+
+// Precision's GetModelBounds without its render-flag checks. Particles are always skipped,
+// glow shells unless nothing else is left (bound weapons are all glow).
+static void AccumulateBounds(RE::NiAVObject* a_obj, const RE::NiTransform& a_parent, bool a_skipGlow,
+	RE::NiBound& a_bound, bool& a_any)
+{
+	// Scb is the sheath, which the engine moves off a drawn weapon; Precision never sees it.
+	const char* Name = a_obj ? a_obj->name.c_str() : nullptr;
+	if (!a_obj || a_obj->GetFlags().any(RE::NiAVObject::Flag::kHidden) || (Name && _stricmp(Name, "Scb") == 0))
+	{
+		return;
+	}
+	if (auto* Geom = a_obj->AsGeometry())
+	{
+		const auto Type = Geom->GetType();
+		if (Type == RE::BSGeometry::Type::kParticles || Type == RE::BSGeometry::Type::kStripParticles ||
+			(a_skipGlow && netimmerse_cast<RE::BSEffectShaderProperty*>(Geom->GetGeometryRuntimeData().shaderProperty.get())))
+		{
+			return;
+		}
+		RE::NiBound Bound = Geom->GetModelData().modelBound;
+		Bound.center = a_parent * (Geom->local * Bound.center);
+		Bound.radius *= Geom->local.scale * a_parent.scale;
+		if (!a_any)
+		{
+			a_bound = Bound;
+			a_any = true;
+		}
+		else
+		{
+			CombineBound(a_bound, Bound);
+		}
+		return;
+	}
+	if (auto* Node = a_obj->AsNode())
+	{
+		const RE::NiTransform Transform = a_parent * Node->local;
+		for (auto& Child : Node->GetChildren())
+		{
+			AccumulateBounds(Child.get(), Transform, a_skipGlow, a_bound, a_any);
+		}
+	}
+}
+
+// Precision's weapon length: bounding radius plus the centre's offset along the blade.
+// -1 when the model has no usable mesh.
+static float ModelLength(const char* a_model)
+{
+	RE::NiPointer<RE::NiNode> Root;
+	const RE::BSModelDB::DBTraits::ArgsType Args{};
+	if (RE::BSModelDB::Demand(a_model, Root, Args) != RE::BSResource::ErrorCode::kNone || !Root)
+	{
+		return -1.f;
+	}
+	// From the root's children: in hand the game ignores the root's own transform (a replacer's
+	// root offset of -20 along the shaft didn't move the weapon in game).
+	RE::NiBound Bound{};
+	bool Any = false;
+	for (const bool SkipGlow : { true, false })
+	{
+		for (auto& Child : Root->GetChildren())
+		{
+			AccumulateBounds(Child.get(), RE::NiTransform{}, SkipGlow, Bound, Any);
+		}
+		if (Any)
+		{
+			break;
+		}
+	}
+	return Any ? Bound.radius + std::fabs(Bound.center.y) : -1.f;
+}
+
+// A swung weapon as a shaft with mass along its length plus a head at the far end. Mass per
+// model unit and head mass in kg, estimates: a steel blade, or a wooden haft about a third of it.
+struct SwingBody
+{
+	float perUnit;
+	float head;
+	const char* kind;
+};
+constexpr float SteelPerUnit = 0.015f;
+constexpr float WoodPerUnit = 0.005f;
+constexpr SwingBody Blade{ SteelPerUnit, 0.f, "blade" };
+constexpr SwingBody WarAxe{ WoodPerUnit, 0.7f, "war axe" };
+constexpr SwingBody Mace{ WoodPerUnit, 0.9f, "mace" };
+constexpr SwingBody Battleaxe{ WoodPerUnit, 1.5f, "battleaxe" };
+constexpr SwingBody Warhammer{ WoodPerUnit, 1.8f, "warhammer" };
+constexpr SwingBody Halberd{ WoodPerUnit, 2.f, "halberd" };
+// Spears, pikes and quarterstaffs share one: a long wooden shaft with a light head.
+constexpr SwingBody Spear{ WoodPerUnit, 0.3f, "spear" };
+// Physical speed is held to this band around the class speed.
+constexpr float PhysicalSpeedMin = 0.8f;
+constexpr float PhysicalSpeedMax = 1.2f;
+
+// Resistance to being swung about a grip at one end.
+static float SwingInertia(float a_length, const SwingBody& a_body)
+{
+	return a_body.perUnit * a_length * a_length * a_length / 3.f + a_body.head * a_length * a_length;
+}
+
+// Spear mods file spears under the sword types, so only the keywords tell.
+static bool IsSpear(RE::TESObjectWEAP* a_weap)
+{
+	return a_weap->HasKeywordString("WeapTypeSpear") || a_weap->HasKeywordString("WeapTypePike") ||
+		a_weap->HasKeywordString("WeapTypeQtrStaff");
+}
+
+static const SwingBody& BodyOf(RE::TESObjectWEAP* a_weap, RE::BGSKeyword* a_warhammer)
+{
+	if (IsSpear(a_weap))
+	{
+		return Spear;
+	}
+	if (a_weap->HasKeywordString("WeapTypeHalberd"))
+	{
+		return Halberd;
+	}
+	switch (a_weap->GetWeaponType())
+	{
+	case RE::WEAPON_TYPE::kOneHandAxe:
+		return WarAxe;
+	case RE::WEAPON_TYPE::kOneHandMace:
+		return Mace;
+	case RE::WEAPON_TYPE::kTwoHandAxe:
+		return a_weap->HasKeyword(a_warhammer) ? Warhammer : Battleaxe;
+	default:
+		return Blade;
+	}
+}
 
 float SettingsLoader::CalcDamage(float oldEffective, float newEffective)
 {
@@ -1032,6 +1213,16 @@ void SettingsLoader::RebalanceWeapons()
 
 
 	}
+	std::unordered_map<RE::TESObjectWEAP*, float> PhysicalMults;
+	if (WeaponSettings::PhysicalWeaponSpeed && Settings::HasPrecision)
+	{
+		PhysicalMults = PhysicalSpeedMults();
+	}
+	else if (WeaponSettings::PhysicalWeaponSpeed)
+	{
+		logger::info("Physical weapon speed needs Precision; weapons keep their class speeds");
+	}
+	std::unordered_set<std::string> Logged;
 	for (auto& weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())
 	{
 		if (weap->IsMelee())
@@ -1059,7 +1250,8 @@ void SettingsLoader::RebalanceWeapons()
 
 			case RE::WEAPON_TYPE::kTwoHandSword:
 			{
-				classSpeed = WeaponSettings::GreatSwordSpeed;
+				// Two-handed spears swing the polearm set, which the battleaxe speed describes.
+				classSpeed = IsSpear(weap) ? WeaponSettings::BattleaxeSpeed : WeaponSettings::GreatSwordSpeed;
 				twoHand = true;
 				break;
 			}
@@ -1077,17 +1269,127 @@ void SettingsLoader::RebalanceWeapons()
 			{
 				continue;
 			}
+			const auto Physical = PhysicalMults.find(weap);
+			if (Physical != PhysicalMults.end())
+			{
+				classSpeed *= Physical->second;
+			}
+			if (IsSpear(weap))
+			{
+				classSpeed *= WeaponSettings::SpearSpeed;
+			}
 			const float factor = twoHand ? TwoHandSpeedFactor : 1.f;
 			const uint16_t newdamage = uint16_t(damage * CalcDamage(speed * factor, classSpeed));
 			const float newspeed = classSpeed / factor;
-			//logger::info("{} got its damaged changed from {} to {} and speed from {} to {}", weap->GetName(), weap->attackDamage, newdamage, speed, newspeed);
+			// One line per model; enchanted copies share the numbers.
+			const char* Model = weap->GetModel();
+			if (Settings::VerboseLogging && Model && Logged.insert(Model).second)
+			{
+				logger::info("[rebalance] {} {:08X}: speed {:.3f} -> {:.3f}, damage {} -> {}",
+					weap->GetName(), weap->GetFormID(), speed, newspeed, weap->attackDamage, newdamage);
+			}
 			weap->attackDamage = newdamage;
 			weap->weaponData.speed = newspeed;
 		}
 
-		
+
 	}
 }
+
+std::unordered_map<RE::TESObjectWEAP*, float> SettingsLoader::PhysicalSpeedMults()
+{
+	std::unordered_map<RE::TESObjectWEAP*, float> Mults;
+	if (WeaponSettings::PhysicalSpeedStrength <= 0.f)
+	{
+		return Mults;
+	}
+	const auto Start = std::chrono::steady_clock::now();
+	// Per model: enchanted copies share one, so each loads once.
+	std::unordered_map<std::string, float> Lengths;
+	int Unmeasured = 0;
+	auto LengthOf = [&](RE::TESObjectWEAP* a_weap) {
+		const char* Model = a_weap->GetModel();
+		if (!Model || !*Model)
+		{
+			return -1.f;
+		}
+		auto Found = Lengths.find(Model);
+		if (Found == Lengths.end())
+		{
+			Found = Lengths.emplace(Model, ModelLength(Model)).first;
+			if (Found->second < 0.f)
+			{
+				++Unmeasured;
+			}
+		}
+		return Found->second;
+	};
+	// Each class speed describes the class's steel weapon, whatever its model is in this load order.
+	auto SteelBaseline = [&](RE::FormID a_id) {
+		auto* Steel = RE::TESDataHandler::GetSingleton()->LookupForm<RE::TESObjectWEAP>(a_id, "Skyrim.esm");
+		const float Length = Steel ? LengthOf(Steel) : -1.f;
+		if (Length <= 0.f)
+		{
+			logger::warn("Physical weapon speed: steel weapon {:06X} has no usable model; its class keeps the class speed", a_id);
+			return 0.f;
+		}
+		return SwingInertia(Length, BodyOf(Steel, IsWarhammer));
+	};
+	const float SwordBaseline = SteelBaseline(0x13989);
+	const float AxeBaseline = SteelBaseline(0x13983);
+	const float GreatswordBaseline = SteelBaseline(0x13987);
+	const float BattleaxeBaseline = SteelBaseline(0x13984);
+	const float WarhammerBaseline = SteelBaseline(0x1398A);
+
+	std::unordered_set<std::string> Logged;
+	for (auto* weap : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESObjectWEAP>())
+	{
+		if (!weap->IsMelee())
+		{
+			continue;
+		}
+		float Baseline = 0.f;
+		switch (weap->GetWeaponType())
+		{
+		case RE::WEAPON_TYPE::kOneHandDagger:
+		case RE::WEAPON_TYPE::kOneHandSword:
+			Baseline = SwordBaseline;
+			break;
+		case RE::WEAPON_TYPE::kOneHandMace:
+		case RE::WEAPON_TYPE::kOneHandAxe:
+			Baseline = AxeBaseline;
+			break;
+		case RE::WEAPON_TYPE::kTwoHandSword:
+			Baseline = IsSpear(weap) ? BattleaxeBaseline : GreatswordBaseline;
+			break;
+		case RE::WEAPON_TYPE::kTwoHandAxe:
+			Baseline = weap->HasKeyword(IsWarhammer) ? WarhammerBaseline : BattleaxeBaseline;
+			break;
+		default:
+			break;
+		}
+		const float Length = Baseline > 0.f ? LengthOf(weap) : -1.f;
+		if (Length <= 0.f)
+		{
+			continue;
+		}
+		const SwingBody& Body = BodyOf(weap, IsWarhammer);
+		// Swing time goes with the square root of inertia; the strength compresses that.
+		const float Mult = std::clamp(std::pow(Baseline / SwingInertia(Length, Body), 0.5f * WeaponSettings::PhysicalSpeedStrength),
+			PhysicalSpeedMin, PhysicalSpeedMax);
+		Mults.emplace(weap, Mult);
+		if (Settings::VerboseLogging && Logged.insert(weap->GetModel()).second)
+		{
+			logger::info("[weapon] {} {:08X} {} length {:.1f}: speed x{:.2f} ({})",
+				weap->GetName(), weap->GetFormID(), Body.kind, Length, Mult, weap->GetModel());
+		}
+	}
+	const auto Ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - Start).count();
+	logger::info("Physical weapon speed: {} models measured in {} ms, {} without a usable mesh keep their class speed",
+		Lengths.size(), Ms, Unmeasured);
+	return Mults;
+}
+
 
 void SettingsLoader::HumanoidUndeadRaces()
 {

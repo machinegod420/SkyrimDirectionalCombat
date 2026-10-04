@@ -194,6 +194,12 @@ bool DodgeHandler::CanDodge(RE::Actor* actor)
 	}
 
 	if (IsDodging(actor)) {
+		// A dodge lasts well under a second; one still running after this never ended.
+		constexpr float StuckDodgeSeconds = 3.f;
+		const float Since = SecondsSinceDodge(actor);
+		if (actor->IsPlayerRef() && Since > StuckDodgeSeconds) {
+			logger::warn("[dodge] {} refused: a dodge started {:.1f}s ago still counts as running", Who(actor), Since);
+		}
 		return false;
 	}
 
@@ -371,7 +377,7 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	actor->NotifyAnimationGraph("moveStart");
 	// Signal behavior graph that we're entering an alternate-blend state for the dodge.
 	// Graph-side wiring uses this to swap whatever blend the dodge needs.
-	actor->NotifyAnimationGraph("DirmodForceAltBlend");
+	//actor->NotifyAnimationGraph("DirmodForceAltBlend");
 	if (!actor->IsPlayer())
 	{
 		actor->SetGraphVariableInt("iUseDirDodge", 1);
@@ -453,10 +459,11 @@ void DodgeHandler::ApplyOnGround(RE::bhkCharacterController* controller)
 			const RE::NiPoint3 delta = endPos - it->second.startPos;
 			const float horizontal = std::sqrt(delta.x * delta.x + delta.y * delta.y);
 			logger::info("Dodge end ({}): speed={} elapsed={:.3f}/{:.3f} -> horizontal={:.1f} units (3D={:.1f})",
-				dodgingActor->GetName(), it->second.speed, it->second.elapsed, it->second.timeTotal, horizontal, delta.Length());
+				Who(dodgingActor), it->second.speed, it->second.elapsed, it->second.timeTotal, horizontal, delta.Length());
 		}
+		
 		// Signal behavior graph back to normal blend state.
-		dodgingActor->NotifyAnimationGraph("DirmodForceNormalBlend");
+		//dodgingActor->NotifyAnimationGraph("DirmodForceNormalBlend");
 		if (!dodgingActor->IsPlayer())
 		{
 			dodgingActor->SetGraphVariableInt("iUseDirDodge", 0);
@@ -606,7 +613,7 @@ void DodgeHandler::CancelDodgeOnAir(RE::bhkCharacterController* controller)
 		const RE::NiPoint3 delta = endPos - it->second.startPos;
 		const float horizontal = std::sqrt(delta.x * delta.x + delta.y * delta.y);
 		logger::info("Dodge canceled airborne ({}): elapsed={:.3f}/{:.3f} -> horizontal={:.1f} units",
-			dodgingActor->GetName(), it->second.elapsed, it->second.timeTotal, horizontal);
+			Who(dodgingActor), it->second.elapsed, it->second.timeTotal, horizontal);
 	}
 	// Signal behavior graph back to normal blend state.
 	dodgingActor->NotifyAnimationGraph("DirmodForceNormalBlend");

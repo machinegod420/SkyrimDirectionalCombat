@@ -1,7 +1,15 @@
 #pragma once
 
 #include "Direction.h"
+#include <format>
+#include <string>
 #include <vector>
+
+// "Name FormID" for log lines: names repeat across actors, IDs don't.
+inline std::string Who(const RE::TESObjectREFR* a_ref)
+{
+	return a_ref ? std::format("{} {:08X}", a_ref->GetName(), a_ref->GetFormID()) : std::string("none");
+}
 
 // hash functions
 // https://github.com/D7ry/valhallaCombat/blob/Master/src/bin/events/animEventHandler.cpp#L7
@@ -34,9 +42,6 @@ namespace std
 		}
 	};
 }
-
-
-void DumpActorState(RE::Actor* a_actor, const char* a_tag);
 
 // The engine's own "this actor may not attack" switch
 inline bool IsAttackingDisabled(RE::Actor* a_actor)
@@ -124,7 +129,8 @@ inline bool IsLockedInAnimation(RE::Actor* a_actor)
 	if (a_actor->IsInKillMove()) return true;
 	if (a_actor->GetOccupiedFurniture()) return true;
 	if (a_actor->IsInRagdollState()) return true;
-	if (a_actor->IsInBleedout()) return true;
+	// Actor::IsInBleedout has no AE id in this CommonLib; this is the compare the engine does.
+	if (a_actor->AsActorState()->GetLifeState() == RE::ACTOR_LIFE_STATE::kBleedout) return true;
 	if (a_actor->GetActorRuntimeData().boolBits.all(RE::Actor::BOOL_BITS::kParalyzed)) return true;
 	if (a_actor->IsAnimationDriven()) return true;
 

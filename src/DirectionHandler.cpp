@@ -457,6 +457,117 @@ void DirectionHandler::ResetGuardCharge(RE::Actor* actor)
 	}
 }
 
+// CommonLib's hkStringPtr::c_str() strips the owner flag with a 32-bit mask and truncates the
+// pointer; this strips it at pointer width. The flag is the low bit.
+static const char* HkText(const RE::hkStringPtr& text)
+{
+	const auto Raw = *reinterpret_cast<const std::uintptr_t*>(std::addressof(text));
+	return reinterpret_cast<const char*>(Raw & ~static_cast<std::uintptr_t>(1));
+}
+
+static bool ContainsNoCase(const char* text, const char* needle)
+{
+	if (!text)
+	{
+		return false;
+	}
+	const size_t N = std::strlen(needle);
+	for (const char* p = text; *p; ++p)
+	{
+		size_t i = 0;
+		while (i < N && p[i] && std::tolower(static_cast<unsigned char>(p[i])) == needle[i])
+		{
+			++i;
+		}
+		if (i == N)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// The largest "DirMod_Twist.<degrees>" annotation among the idle clips the graph is playing, read
+// off their bound animations; no tag means no twist. Read from memory rather than waiting for the
+// clip's event, which only fires on activation. More than one idle is active during a transition
+// and picking the youngest by local time flickered between them, so the largest tag wins.
+static float ReadIdleTwist(RE::Actor* actor)
+{
+	RE::BSAnimationGraphManagerPtr Manager;
+	if (!actor->GetAnimationGraphManager(Manager) || !Manager)
+	{
+		return 0.f;
+	}
+	auto& Runtime = Manager->GetRuntimeData();
+	// The graph rebuilds its active node list under this lock.
+	RE::BSSpinLockGuard GraphLock(Runtime.updateLock);
+	if (Runtime.activeGraph >= Manager->graphs.size())
+	{
+		return 0.f;
+	}
+	const auto& Graph = Manager->graphs[Runtime.activeGraph];
+	if (!Graph || !Graph->behaviorGraph || !Graph->behaviorGraph->activeNodes)
+	{
+		return 0.f;
+	}
+	float Degrees = 0.f;
+	for (const auto& Info : *Graph->behaviorGraph->activeNodes)
+	{
+		if (!Info.nodeClone)
+		{
+			continue;
+		}
+		auto* Clip = skyrim_cast<RE::hkbClipGenerator*>(Info.nodeClone);
+		if (!Clip || !Clip->binding || !Clip->binding->animation ||
+			!ContainsNoCase(HkText(Clip->animationName), "idle"))
+		{
+			continue;
+		}
+		for (const auto& Track : Clip->binding->animation->annotationTracks)
+		{
+			for (const auto& Annotation : Track.annotations)
+			{
+				const char* Text = HkText(Annotation.text);
+				constexpr std::string_view Tag = "DirMod_Twist.";
+				if (Text && std::strncmp(Text, Tag.data(), Tag.size()) == 0)
+				{
+					Degrees = std::max(Degrees, static_cast<float>(std::atof(Text + Tag.size())));
+				}
+			}
+		}
+	}
+	return Degrees;
+}
+
+// Spine twist the graph applies while walking on a left guard, countering the walk straightening
+// the root. Sword and shield keep a straight block. Ramped so a stop or a switch doesn't pop.
+constexpr float SpineTwistMovingSpeed = 10.f;
+constexpr float SpineTwistDegreesPerSecond = 400.f;
+static void UpdateSpineTwist(RE::Actor* actor, Directions dir, float delta)
+{
+	float Speed = 0.f;
+	float Current = 0.f;
+	if (!actor->GetGraphVariableFloat("Speed", Speed) || !actor->GetGraphVariableFloat("DirModSpineTwist", Current))
+	{
+		return;
+	}
+	const bool Left = dir == Directions::TL || dir == Directions::BL;
+	const bool ShieldBlock = actor->IsBlocking() &&
+		DirectionHandler::GetSingleton()->AnimationSet(actor) == WeaponSet::OneHandShield;
+	// The player's fake first person body stays untwisted; the selector is 1 while it plays.
+	int BodyBlend = 0;
+	const bool FakeFirstPerson = actor->IsPlayerRef() &&
+		actor->GetGraphVariableInt("DirModBodyBlendSelect", BodyBlend) && BodyBlend == 1;
+	const bool Wanted = Left && !ShieldBlock && !FakeFirstPerson && Speed > SpineTwistMovingSpeed;
+	const float Target = Wanted ? ReadIdleTwist(actor) : 0.f;
+	const float Step = SpineTwistDegreesPerSecond * delta;
+	const float Next = std::clamp(Target, Current - Step, Current + Step);
+	if (Next != Current)
+	{
+		actor->SetGraphVariableFloat("DirModSpineTwist", Next);
+	}
+}
+
 void DirectionHandler::ApplyDirectionSpells(RE::Actor* actor, Directions dir)
 {
 	RE::SpellItem* DirectionSpell = GetDirectionalPerk(actor);
@@ -821,15 +932,16 @@ WeaponSet DirectionHandler::AnimationSet(RE::Actor* actor) const
 	{
 		return WeaponSet::OneHand;
 	}
-	if (Weapon->IsTwoHandedSword())
-	{
-		return WeaponSet::TwoHandSword;
-	}
+	// Keywords first: spear mods file spears as greatswords, but DAR plays them the polearm set.
 	if (Weapon->HasKeyword(BattleaxeKeyword) ||
 		(PikeKeyword && Weapon->HasKeyword(PikeKeyword)) ||
 		(PikeKeyword2 && Weapon->HasKeyword(PikeKeyword2)))
 	{
 		return WeaponSet::Battleaxe;
+	}
+	if (Weapon->IsTwoHandedSword())
+	{
+		return WeaponSet::TwoHandSword;
 	}
 	if (Weapon->IsTwoHandedAxe())
 	{
@@ -879,6 +991,7 @@ void DirectionHandler::RemoveDirectionalPerks(RE::ActorHandle handle)
 		return;
 	}
 	actor->NotifyAnimationGraph("DirmodStop");
+	actor->SetGraphVariableFloat("DirModSpineTwist", 0.f);
 	if (actor->HasSpell(TR))
 	{
 		actor->RemoveSpell(TR);
@@ -977,7 +1090,7 @@ bool DirectionHandler::ShouldHaveDirectionalPerks(RE::Actor* actor, RE::TESObjec
 		{
 			if (HasDirectionalPerks(actor))
 			{
-				if (Settings::VerboseLogging) logger::info("[perk] {} removed: TDMOnlyLockedHumanoids gate (no capable target locked)", actor->GetName());
+				if (Settings::VerboseLogging) logger::info("[perk] {} removed: TDMOnlyLockedHumanoids gate (no capable target locked)", Who(actor));
 				ToRemoveMtx.lock();
 				ToRemove.insert(actor->GetHandle());
 				ToRemoveMtx.unlock();
@@ -1005,7 +1118,7 @@ bool DirectionHandler::ShouldHaveDirectionalPerks(RE::Actor* actor, RE::TESObjec
 	{
 		if (HasDirectionalPerks(actor))
 		{
-			if (Settings::VerboseLogging) logger::info("[perk] {} removed cause weapon is not drawn", actor->GetName());
+			if (Settings::VerboseLogging) logger::info("[perk] {} removed cause weapon is not drawn", Who(actor));
 			ToRemoveMtx.lock();
 			ToRemove.insert(actor->GetHandle());
 			ToRemoveMtx.unlock();
@@ -1019,7 +1132,7 @@ bool DirectionHandler::ShouldHaveDirectionalPerks(RE::Actor* actor, RE::TESObjec
 	{
 		if (HasDirectionalPerks(actor))
 		{
-			if (Settings::VerboseLogging) logger::info("[perk] {} removed: not capable (dead/no melee weapon/h2h disabled)", actor->GetName());
+			if (Settings::VerboseLogging) logger::info("[perk] {} removed: not capable (dead/no melee weapon/h2h disabled)", Who(actor));
 			ToRemoveMtx.lock();
 			ToRemove.insert(actor->GetHandle());
 			ToRemoveMtx.unlock();
@@ -1066,7 +1179,7 @@ bool DirectionHandler::ShouldHaveDirectionalPerks(RE::Actor* actor, RE::TESObjec
 			{
 				if (Settings::VerboseLogging)
 				{
-					logger::info("{} removed: {}", actor->GetName(),
+					logger::info("{} removed: {}", Who(actor),
 						target ? "target not capable of directional combat" : "no engagement target");
 				}
 				ToRemoveMtx.lock();
@@ -1091,7 +1204,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	{
 		if (HasDirectionalPerks(actor))
 		{
-			if (Settings::VerboseLogging) logger::info("[perk] {} removed cause too far", actor->GetName());
+			if (Settings::VerboseLogging) logger::info("[perk] {} removed cause too far", Who(actor));
 			ToRemoveMtx.lock();
 			ToRemove.insert(actor->GetHandle());
 			ToRemoveMtx.unlock();
@@ -1100,6 +1213,12 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	}
 
 	SettingsLoader::GetSingleton()->RetargetStaticBones(actor);
+
+	if (HasDirectionalPerks(actor))
+	{
+		const Directions Line = GetCurrentDirection(actor);
+		UpdateSpineTwist(actor, Line, delta);
+	}
 
 	// Accrue guard charge: holding a line while neither swinging nor blocking
 	// faster next attack. 
@@ -1215,7 +1334,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		{
 			if (Settings::VerboseLogging)
 			{
-				logger::info("{} reconciling missing direction spell ({})", actor->GetName(), (int)desired);
+				logger::info("{} reconciling missing direction spell ({})", Who(actor), (int)desired);
 			}
 			actor->AddSpell(desiredSpell);
 		}
@@ -1230,7 +1349,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 			if (Settings::VerboseLogging)
 			{
 				logger::info("{} reconciling stale direction spell ({} -> {})",
-					actor->GetName(), (int)PerkToDirection(currentSpell), (int)desired);
+					Who(actor), (int)PerkToDirection(currentSpell), (int)desired);
 			}
 			ApplyDirectionSpells(actor, desired);
 		}
@@ -1239,7 +1358,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	{
 		if (Settings::VerboseLogging)
 		{
-			logger::info("{} stripping stale direction spells", actor->GetName());
+			logger::info("{} stripping stale direction spells", Who(actor));
 		}
 		if (actor->HasSpell(TR))
 		{
@@ -1277,7 +1396,7 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		AddDirectional(actor, Weapon);
 		// temporary
 		//actor->AsActorValueOwner()->SetBaseActorValue(RE::ActorValue::kWeaponSpeedMult, 0.1f);
-		if (Settings::VerboseLogging) logger::info("[perk] gave {} {} perks", actor->GetName(), actor->GetHandle().native_handle());
+		if (Settings::VerboseLogging) logger::info("[perk] gave {} {} perks", Who(actor), actor->GetHandle().native_handle());
 	}
 	else
 	{

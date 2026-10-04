@@ -201,7 +201,7 @@ bool AttackHandler::HandleFeint(RE::Actor* actor)
 		Feinted = true;
 		if (Settings::VerboseLogging)
 		{
-			logger::info("[feint] {} feints {} from line {} (cost {:.0f} of {:.0f})", actor->GetName(),
+			logger::info("[feint] {} feints {} from line {} (cost {:.0f} of {:.0f})", Who(actor),
 				IsPowerAttacking(actor) ? "power" : "light",
 				static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)), FeintCost, Stamina);
 		}
@@ -222,7 +222,7 @@ bool AttackHandler::HandleFeint(RE::Actor* actor)
 	FeintWindowMtx.unlock();
 	if (WindowOpen && !Feinted && Settings::VerboseLogging)
 	{
-		logger::info("[feint] {} can't afford a feint (cost {:.0f} of {:.0f})", actor->GetName(), FeintCost, Stamina);
+		logger::info("[feint] {} can't afford a feint (cost {:.0f} of {:.0f})", Who(actor), FeintCost, Stamina);
 	}
 	return Feinted;
 }
@@ -344,7 +344,7 @@ bool DoAction(RE::Actor* actor, RE::BGSAction* action, const char* animEvent,
 	bool succ = func(data.get());
 	if (!succ)
 	{
-		if (Settings::VerboseLogging) logger::info("[attack] failed attack action! {}", actor->GetName());
+		if (Settings::VerboseLogging) logger::info("[attack] failed attack action! {}", Who(actor));
 	}
 	return succ;
 }

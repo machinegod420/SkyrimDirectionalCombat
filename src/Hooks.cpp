@@ -54,6 +54,21 @@ static void ApplyStaminaRegen(RE::Actor* actor)
 
 constexpr float BlockFacingCone = 70.f;
 
+// A raised guard on the attacker's line, facing it. Needs no hit data.
+static bool GuardAnswersLine(RE::Actor* attacker, RE::Actor* target)
+{
+	if (BlockHandler::GetSingleton()->HasMissedParry(target) || !IsGuardUp(target) ||
+		!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
+	{
+		return false;
+	}
+	const RE::NiPoint3 To = attacker->GetPosition() - target->GetPosition();
+	float Bearing = std::atan2(To.x, To.y) - target->GetAngleZ();
+	while (Bearing > 3.14159265f) Bearing -= 6.28318531f;
+	while (Bearing < -3.14159265f) Bearing += 6.28318531f;
+	return std::fabs(Bearing) * 57.2957795f <= BlockFacingCone;
+}
+
 static bool CountsAsBlock(RE::Actor* attacker, RE::Actor* target, const RE::HitData& hitData,
 	bool* outRescued = nullptr)
 {
@@ -66,16 +81,7 @@ static bool CountsAsBlock(RE::Actor* attacker, RE::Actor* target, const RE::HitD
 	{
 		return true;
 	}
-	if (BlockHandler::GetSingleton()->HasMissedParry(target) || !IsGuardUp(target) ||
-		!DirectionHandler::GetSingleton()->HasBlockAngle(attacker, target))
-	{
-		return false;
-	}
-	const RE::NiPoint3 To = attacker->GetPosition() - target->GetPosition();
-	float Bearing = std::atan2(To.x, To.y) - target->GetAngleZ();
-	while (Bearing > 3.14159265f) Bearing -= 6.28318531f;
-	while (Bearing < -3.14159265f) Bearing += 6.28318531f;
-	if (std::fabs(Bearing) * 57.2957795f > BlockFacingCone)
+	if (!GuardAnswersLine(attacker, target))
 	{
 		return false;
 	}
@@ -119,7 +125,8 @@ namespace Hooks
 			{
 				if (Settings::VerboseLogging)
 				{
-					logger::info("[prehit] {} locked out, hit ignored", attacker->GetName());
+					logger::info("[prehit] {} hit on {} ignored: {}", Who(attacker), Who(target),
+						IsAttackingDisabled(attacker) ? "attacking disabled" : "locked out");
 				}
 				ret.bIgnoreHit = true;
 				return ret;
@@ -128,7 +135,7 @@ namespace Hooks
 			const bool GuardUp = IsGuardUp(target);
 			if (Settings::VerboseLogging)
 			{
-				logger::info("[prehit] {} -> {} guard {}", attacker->GetName(), target->GetName(), GuardUp);
+				logger::info("[prehit] {} -> {} guard {}", Who(attacker), Who(target), GuardUp);
 			}
 			if (GuardUp)
 			{
@@ -142,7 +149,7 @@ namespace Hooks
 				// A bash into an attack is OnMeleeHit's to fail; a clash here would drop it first.
 				if (!IsBashing(attacker) && BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
-					if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", attacker->GetName());
+					if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", Who(attacker));
 					ret.bIgnoreHit = true;
 				}
 			}
@@ -195,6 +202,11 @@ namespace Hooks
 				attacker->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kNone;
 			if (!AttackHandler::GetSingleton()->CanAttack(attacker) || Outlived)
 			{
+				if (Settings::VerboseLogging)
+				{
+					logger::info("[hit] {} hit on {} discarded: {}", Who(attacker), Who(target),
+						Outlived ? "attack already ended" : IsAttackingDisabled(attacker) ? "attacking disabled" : "locked out");
+				}
 				if (attacker->IsAttacking())
 				{
 					attacker->NotifyAnimationGraph("attackStop");
@@ -283,7 +295,7 @@ namespace Hooks
 				if (CountsAsBlock(attacker, target, hitData))
 				{
 					if (Settings::VerboseLogging) logger::info("[hit] blocked proc {} from {}",
-						hitData.attackDataSpell->GetName(), attacker->GetName());
+						hitData.attackDataSpell->GetName(), Who(attacker));
 					return;
 				}
 				if (Settings::VerboseLogging) logger::info("[hit] empty hit {}", hitData.attackDataSpell->GetName());
@@ -301,6 +313,11 @@ namespace Hooks
 				{
 					if (target->IsAttacking())
 					{
+						if (Settings::VerboseLogging)
+						{
+							logger::info("[hit] {}'s bash fails: {} is mid-attack (state {}), basher recoils",
+								Who(attacker), Who(target), static_cast<int>(target->AsActorState()->GetAttackState()));
+						}
 						BlockHandler::GetSingleton()->CauseStagger(attacker, target, 0.25f);
 						return;
 					}
@@ -311,6 +328,12 @@ namespace Hooks
 						{
 							//bash does stamina damage
 							float StaminaDamage = target->AsActorValueOwner()->GetBaseActorValue(RE::ActorValue::kStamina);
+							if (Settings::VerboseLogging)
+							{
+								logger::info("[hit] {}'s bash lands on {}: blocking {}, stamina {:.0f} of base {:.0f}, already staggered {}",
+									Who(attacker), Who(target), target->IsBlocking(), CurrentTargetStamina, StaminaDamage,
+									static_cast<bool>(target->AsActorState()->actorState2.staggered));
+							}
 							if (target->IsBlocking())
 							{
 															// staggers as well
@@ -346,7 +369,7 @@ namespace Hooks
 							return;
 						}
 						//hitData.stagger = 0;
-						if (Settings::VerboseLogging) logger::info("[hit] failed bash!");
+						if (Settings::VerboseLogging) logger::info("[hit] {}'s bash on {} ignored: target is locked out", Who(attacker), Who(target));
 					}
 
 					return;
@@ -374,7 +397,7 @@ namespace Hooks
 				while (Bearing > 3.14159265f) Bearing -= 6.28318531f;
 				while (Bearing < -3.14159265f) Bearing += 6.28318531f;
 				logger::info("[block] {} was blocking but the hit from {} carried no blocked flag (bearing {:.0f} deg)",
-					target->GetName(), attacker->GetName(), std::fabs(Bearing) * 57.2957795f);
+					Who(target), Who(attacker), std::fabs(Bearing) * 57.2957795f);
 			}
 			bool RescuedBlock = false;
 			if (CountsAsBlock(attacker, target, hitData, &RescuedBlock) &&
@@ -383,7 +406,7 @@ namespace Hooks
 				if (RescuedBlock && Settings::VerboseLogging)
 				{
 					logger::info("[block] rescued: {} blocked {} on line with no engine flag (no recoil or sound fired)",
-						target->GetName(), attacker->GetName());
+						Who(target), Who(attacker));
 				}
 				// Read-only stats, before AddCombo below moves the attacker's combo on.
 				if (attacker->IsPlayerRef())
@@ -532,7 +555,7 @@ namespace Hooks
 				if (RescuedBlock && Settings::VerboseLogging)
 				{
 					logger::info("[block] rescued (creature): {} blocked {} on line with no engine flag",
-						target->GetName(), attacker->GetName());
+						Who(target), Who(attacker));
 				}
 				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 			}
@@ -583,7 +606,7 @@ namespace Hooks
 			{
 				if (Settings::VerboseLogging)
 				{
-					logger::info("[hit] {} vanilla-path hit ignored{}", attacker->GetName(),
+					logger::info("[hit] {} vanilla-path hit ignored{}", Who(attacker),
 						Outlived ? " (attack already ended)" : " (locked out)");
 				}
 				_OnBeginMeleeHit(attacker, target, a_int1, a_bool, a_unkptr);
@@ -596,7 +619,7 @@ namespace Hooks
 				auto* Process = attacker->GetActorRuntimeData().currentProcess;
 				const auto* AttackData = Process && Process->high ? Process->high->attackData.get() : nullptr;
 				logger::warn("[hit] vanilla-path hit {} -> {}: state {}, attack data {}, bashing {}, guard {}",
-					attacker->GetName(), target->GetName(), static_cast<int>(attacker->AsActorState()->GetAttackState()),
+					Who(attacker), Who(target), static_cast<int>(attacker->AsActorState()->GetAttackState()),
 					AttackData ? AttackData->event.c_str() : "null", IsBashing(attacker), IsGuardUp(target));
 			}
 
@@ -612,7 +635,7 @@ namespace Hooks
 					// This should always be from the attacker side, not the target side, because the first attacker is the hit we want to ignore
 					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 					{
-						if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", attacker->GetName());
+						if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", Who(attacker));
 					}
 				}
 			}
@@ -1098,6 +1121,45 @@ namespace Hooks
 		return Moved;
 	}
 
+	void HookWeaponHitSpells::Install()
+	{
+		const MH_STATUS init = MH_Initialize();
+		if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED)
+		{
+			logger::error("[hitspells] MH_Initialize failed: {}", static_cast<int>(init));
+			return;
+		}
+
+		REL::Relocation<std::uintptr_t> target{ RELOCATION_ID(37799, 38748) };
+		void* addr = reinterpret_cast<void*>(target.address());
+
+		if (MH_CreateHook(addr, reinterpret_cast<void*>(&ApplyWeaponHitSpellItems),
+				reinterpret_cast<void**>(&_ApplyWeaponHitSpellItems)) != MH_OK ||
+			MH_EnableHook(addr) != MH_OK)
+		{
+			logger::error("[hitspells] failed to hook ApplyWeaponHitSpellItems at {:#x}", target.address());
+			return;
+		}
+		logger::info("[hitspells] hooked ApplyWeaponHitSpellItems at {:#x}", target.address());
+	}
+
+	void HookWeaponHitSpells::ApplyWeaponHitSpellItems(RE::Actor* a_attacker, RE::InventoryEntryData* a_weapon, bool a_leftHand, RE::TESObjectREFR* a_target)
+	{
+		// A guard that answers the line eats them. This runs before the block is resolved, so a
+		// hit that goes on to break the guard loses them too.
+		RE::Actor* Target = a_target ? a_target->As<RE::Actor>() : nullptr;
+		// The pair must be in the system first: the line test alone passes any shield at high stamina.
+		auto* Dir = DirectionHandler::GetSingleton();
+		if (a_attacker && Target && Dir->HasDirectionalPerks(Target) &&
+			(Dir->HasDirectionalPerks(a_attacker) || CreatureHandler::GetSingleton()->IsDirectionalAttacker(a_attacker)) &&
+			GuardAnswersLine(a_attacker, Target))
+		{
+			if (Settings::VerboseLogging) logger::info("[hit] blocked weapon spells from {}", Who(a_attacker));
+			return;
+		}
+		_ApplyWeaponHitSpellItems(a_attacker, a_weapon, a_leftHand, a_target);
+	}
+
 	void HookAnimEvent::ProcessCharacterEvent(RE::BSTEventSink<RE::BSAnimationGraphEvent>* a_sink, RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource)
 	{
 		UNUSED(a_sink);
@@ -1405,6 +1467,7 @@ namespace Hooks
 		HookNotifyAnimationGraph::Install();
 		HookCombatAdvanceRadius::Install();
 		HookProcessMotionData::Install();
+		HookWeaponHitSpells::Install();
 		HookCharacterStateOnGround::Install();
 		HookCharacterStateInAir::Install();
 		logger::info("All hooks installed");

@@ -101,6 +101,8 @@ constexpr float BackpedalLeadUnits = 40.f;
 // below 1: a wrong "out" takes a hit, a wrong "in" only wastes a block.
 constexpr float DefendReachBase = 1.0f;
 constexpr float DefendReachCautionScale = 0.2f;
+// The reflex block's reach gate, over that threat. Measured 2026-10-01: no landed swing started past 0.82x.
+constexpr float ReflexThreatMargin = 1.25f;
 
 // Extra stamina a cautious actor keeps in hand before attacking, added to every
 // attack threshold so the whole ladder shifts together. 
@@ -221,13 +223,17 @@ static float StaminaAttackScale(float Ratio, float FullRatio, float Reserve, flo
 	const float Full = std::max(FullRatio + Reserve - Commitment, Floor + 0.01f);
 	return std::clamp((Ratio - Floor) / (Full - Floor), 0.f, 1.f);
 }
-// Attacks/sec per point of (difficulty + aggression). At 0.57 a neutral
-// Legendary sits near its previous 3.4/sec and Normal near 1.7 — raise it if
-// low tiers still read as passive.
-constexpr float AttackRatePerMod = 0.57f;
 // Floor on (tier + aggression * 1.5): a Turtle at VeryEasy sits near zero and
 // would never attack at all.
-constexpr float AttackRateBaseFloor = 0.5f;
+constexpr float InitiativeRateBaseFloor = 0.5f;
+// Attempts per second to start an exchange from neutral (a swing, or a press into the guard),
+// at full stamina outside a combo. Counters don't use it. Rate and offset are ini
+// (InitiativeRatePerTier, InitiativeRateTierOffset).
+static float BaseInitiativeRate(int tier, float aggression)
+{
+	return std::max(InitiativeRateBaseFloor, tier + AISettings::InitiativeRateTierOffset + aggression * 1.5f) *
+		AISettings::InitiativeRatePerTier;
+}
 // Subtracted from the full-rate point in proportion to combo progress; sized
 // against the taper width so stamina still matters mid-combo.
 constexpr float ComboCommitmentDiscount = 0.10f;
@@ -580,11 +586,21 @@ bool AIHandler::IsIncomingSwing(RE::Actor* attacker, RE::Actor* defender)
 		IsSwingingAt(attacker, defender) && IsBlockableSwing(attacker);
 }
 
-// Reflex-block ready: hands free, wind to hold, and in stance or still outside own reach.
+// Reflex-block ready: hands free, wind to hold, in stance or still outside own reach, and the
+// target's swing can reach. Without that last part the guard went up at any range and held the
+// actor off instead of closing.
 bool AIHandler::IsPreparedToBlock(RE::Actor* actor, RE::Actor* target, const AIDifficulty& diff) const
 {
-	const bool Approaching = TorsoDistanceSq(actor, target) > diff.CurrentWeaponLengthSQ;
+	const float DistSQ = TorsoDistanceSq(actor, target);
+	const bool Approaching = DistSQ > diff.CurrentWeaponLengthSQ;
 	if ((!diff.defending && !Approaching) || actor->IsBlocking() || actor->IsAttacking())
+	{
+		return false;
+	}
+	const float Slack = std::clamp(DefendReachBase + diff.cautionMod * DefendReachCautionScale, 1.f, 1.6f);
+	const float Reach = TargetReachEstimate(target, diff, DirectionHandler::GetSingleton()->GetCurrentDirection(target),
+		IsPowerAttacking(target)) * diff.reachMisjudge * Slack * ReflexThreatMargin;
+	if (DistSQ >= Reach * Reach)
 	{
 		return false;
 	}
@@ -638,8 +654,8 @@ void AIHandler::NotifyPowerAttackHitExternalCalled(RE::Actor* actor, RE::Actor* 
 		Learned = std::max(Learned, Sample);
 		if (Settings::VerboseLogging)
 		{
-			logger::info("[reach] {} learns {}'s {} from line {} reaches {:.0f} (sample {:.0f})", actor->GetName(),
-				TargetActor->GetName(), diff.swingWasPower ? "power" : "light", diff.swingLine, Learned, Sample);
+			logger::info("[reach] {} learns {}'s {} from line {} reaches {:.0f} (sample {:.0f})", Who(actor),
+				Who(TargetActor), diff.swingWasPower ? "power" : "light", diff.swingLine, Learned, Sample);
 		}
 		diff.swingStartGap = -1.f;
 	}
@@ -864,7 +880,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		// no guard and no line to read: step the pattern, let vanilla swing
 		if (CanAct(actor))
 		{
-			// Held here so the order stays DifficultyMapMtx -> AIHandlerDataMtx/ActionQueueMtx.
+			// Held here so the order stays DifficultyMapMtx -> ActionQueueMtx.
 			std::unique_lock DiffLock(DifficultyMapMtx);
 			SwitchToNextAttack(actor);
 			// Not fencing: release the last exchange, the spacing mult and any raised block.
@@ -938,12 +954,12 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			diff.statusLogTimer = 1.f;
 			const float Stamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) /
 				std::max(1.f, actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina));
-			logger::info("[tick] {} {:08X} ({} tier {}) -> {} dist {:.0f} own reach {:.0f} target reach {:.0f} judge {} stamina {:.2f} defending {} canAct {} state {} spacing {:.2f} base attack rate {:.2f}/s aggression shift {:+.2f}",
-				actor->GetName(), actor->GetFormID(), diff.archetype ? diff.archetype : "?", static_cast<int>(diff.difficulty), target->GetName(), std::sqrt(TargetDistSQ),
+			logger::info("[tick] {} {:08X} ({} tier {}) -> {} dist {:.0f} own reach {:.0f} target reach {:.0f} judge {} stamina {:.2f} defending {} canAct {} state {} spacing {:.2f} initiative rate {:.2f}/s aggression shift {:+.2f}",
+				actor->GetName(), actor->GetFormID(), diff.archetype ? diff.archetype : "?", static_cast<int>(diff.difficulty), Who(target), std::sqrt(TargetDistSQ),
 				actor->GetReach() + AttackLungeUnits, (target->GetReach() + AttackLungeUnits) * diff.reachMisjudge,
 				TargetDistSQ < JudgeRadius * JudgeRadius,
 				Stamina, diff.defending, CanAct(actor), static_cast<int>(actor->AsActorState()->GetAttackState()), diff.spacingTarget,
-				std::max(AttackRateBaseFloor, static_cast<int>(diff.difficulty) + diff.aggressionMod * 1.5f) * AttackRatePerMod,
+				BaseInitiativeRate(static_cast<int>(diff.difficulty), diff.aggressionMod),
 				diff.aggressionShift);
 		}
 	}
@@ -1112,7 +1128,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				const float Slack = std::clamp(DefendReachBase + diff.cautionMod * DefendReachCautionScale, 1.f, 1.6f);
 				const float Threat = TargetReachEstimate(target, diff, seen, diff.swingWasPower) * diff.reachMisjudge * Slack;
 				logger::info("[dmt] {} {:08X} sees {} swing from {} at {:.0f} (threat {:.0f}), line seen {:.0f}ms ago, window {:.0f}ms",
-					actor->GetName(), actor->GetFormID(), target->GetName(), static_cast<int>(seen), std::sqrt(TargetDistSQ), Threat,
+					actor->GetName(), actor->GetFormID(), Who(target), static_cast<int>(seen), std::sqrt(TargetDistSQ), Threat,
 					diff.timeSinceLineChange * 1000.f, CommitWindow(diff) * 1000.f);
 			}
 
@@ -1156,7 +1172,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					if (Chambered && Settings::VerboseLogging)
 					{
 						logger::info("[dmt] {} masterstrike in {:.2f}s ({} windup {:.2f}, feint habit {:.2f})",
-							actor->GetName(), StrikeDelay, diff.swingWasPower ? "power" : "light", Windup, FeintHabit);
+							Who(actor), StrikeDelay, diff.swingWasPower ? "power" : "light", Windup, FeintHabit);
 					}
 				}
 			}
@@ -1491,7 +1507,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					{
 						DontChangeDirection = true;
 					}
-					if (Settings::VerboseLogging) logger::info("[preblock] {} locked-out pre-block", actor->GetName());
+					if (Settings::VerboseLogging) logger::info("[preblock] {} locked-out pre-block", Who(actor));
 				}
 				// Neutral-game pre-block: strong read on the target's held
 				// line + a cautionMod roll to commit. 
@@ -1504,7 +1520,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					{
 						DontChangeDirection = true;
 					}
-					if (Settings::VerboseLogging) logger::info("[preblock] {} neutral pre-block belief={} caution={:.2f}", actor->GetName(), beliefOnLine, diff.cautionMod);
+					if (Settings::VerboseLogging) logger::info("[preblock] {} neutral pre-block belief={} caution={:.2f}", Who(actor), beliefOnLine, diff.cautionMod);
 				}
 				// Close-range bash at a target that isn't attacking. Above the offense
 				// branch only so a raised guard can be bashed at all; the cooldown
@@ -1554,7 +1570,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						}
 						if (Settings::VerboseLogging)
 						{
-							logger::info("[opportunity] {} sees {} staggered, magnitude {}: {}", actor->GetName(), target->GetName(),
+							logger::info("[opportunity] {} sees {} staggered, magnitude {}: {}", Who(actor), Who(target),
 								HasMagnitude ? std::format("{:.2f}", TargetStagger) : "n/a",
 								Opportunity ? "swing" : Hard ? "out of reach" : "initiative only");
 						}
@@ -2264,7 +2280,7 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 	if (Settings::VerboseLogging && force && !diff.sawSwingLastTick)
 	{
 		logger::info("[dmt] {} {:08X} answers {} swing from {}: {} (guard {} -> {}, line seen {:.0f}ms, window {:.0f}ms)",
-			actor->GetName(), actor->GetFormID(), target->GetName(), static_cast<int>(CurrentTargetDir), decisionKind,
+			actor->GetName(), actor->GetFormID(), Who(target), static_cast<int>(CurrentTargetDir), decisionKind,
 			static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)),
 			SuppressSwitch ? -1 : static_cast<int>(DirectionHandler::GetCounterDirection(ToCounter)),
 			diff.timeSinceLineChange * 1000.f, CommitWindow(diff) * 1000.f);
@@ -2358,7 +2374,7 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 			// multiplier. The dominant difficulty axis in play.
 			const float StaminaScale = StaminaAttackScale(
 				CurrentStaminaRatio, AttackStaminaOffLine, Reserve, Commitment);
-			if (RollPerSecond(std::max(AttackRateBaseFloor, mod + diff.aggressionMod * 1.5f) * AttackRatePerMod * StaminaScale * ComboRate, Tick))
+			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate, Tick))
 			{
 				// the attack lands from the queued line if one is still in
 				// transit, otherwise from the one already held
@@ -2402,7 +2418,7 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 			// counter line, so it reaches full rate earlier.
 			const float StaminaScale = StaminaAttackScale(
 				CurrentStaminaRatio, AttackStaminaFeint, Reserve, Commitment);
-			if (RollPerSecond(std::max(AttackRateBaseFloor, mod + diff.aggressionMod * 1.5f) * AttackRatePerMod * StaminaScale * ComboRate, Tick))
+			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate, Tick))
 			{
 				// Flat reach: a feint redirects to a cut, whatever line it starts on.
 				const float CutReach = actor->GetReach() + CutLungeUnits;
@@ -3106,7 +3122,7 @@ void AIHandler::SwitchToNextAttack(RE::Actor* actor)
 		Directions dir = diff.attackPattern[idx];
 		if ((int)dir > 3)
 		{
-			if (Settings::VerboseLogging) logger::info("[ai] {} had error in attack pattern to {}", actor->GetName(), (int)dir);
+			if (Settings::VerboseLogging) logger::info("[ai] {} had error in attack pattern to {}", Who(actor), (int)dir);
 		}
 		QueueDirectionSwitch(actor, dir, false);
 	}
@@ -3189,7 +3205,7 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 		ret = static_cast<Difficulty>(std::clamp(static_cast<int>(Base) + Jitter,
 			static_cast<int>(Difficulty::VeryEasy), static_cast<int>(Difficulty::Legendary)));
 		if (Settings::VerboseLogging) logger::info("[ai] {} got difficulty level {} (base {}, jitter {:+})",
-			actor->GetName(), (int)ret, (int)Base, Jitter);
+			Who(actor), (int)ret, (int)Base, Jitter);
 		AIDifficulty aidiff = { ret, 0.f };
 		DifficultyMap[actor->GetHandle()] = aidiff;
 		DifficultyMap[actor->GetHandle()].lastDirectionsEncountered.reserve(MaxDirs);
@@ -3300,7 +3316,7 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 			if (Settings::VerboseLogging)
 			{
 				logger::info("{} archetype={} (agg={:.2f} pat={:.2f} bait={:.2f} caut={:.2f} pow={:.2f} feint={:.2f})",
-					actor->GetName(), arch.name,
+					Who(actor), arch.name,
 					d.aggressionMod, d.patienceMod, d.baitTendency, d.cautionMod, d.powerAttackTendency, d.feintTendency);
 			}
 		}
@@ -3492,16 +3508,11 @@ void AIHandler::IncreaseBlockChance(RE::Actor* actor, Directions dir, int percen
 
 float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 {
-	std::shared_lock lock(AIHandlerDataMtx);
 	DifficultyUpdateTimerMtx.lock_shared();
 	Difficulty mod = CalcAndInsertDifficulty(actor);
 	assert(DifficultyUpdateTimer.contains(mod));
 	float base = DifficultyUpdateTimer.at(mod);
 	DifficultyUpdateTimerMtx.unlock_shared();
-	if (mod < Difficulty::VeryHard && NumPlayerAttackers > 3)
-	{
-		base += NumPlayerAttackers * 0.05;
-	}
 	// find, not at(): see CalcActionTimer.
 	auto DiffIter = DifficultyMap.find(actor->GetHandle());
 	if (DiffIter != DifficultyMap.end())
@@ -3515,7 +3526,6 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 
 float AIHandler::CalcActionTimer(RE::Actor* actor)
 {
-	std::shared_lock lock(AIHandlerDataMtx);
 	DifficultyActionTimerMtx.lock_shared();
 	const Difficulty mod = CalcAndInsertDifficulty(actor);
 	assert(DifficultyActionTimer.contains(mod));
@@ -3672,14 +3682,14 @@ void AIHandler::Update(float delta)
 					ActionQueueIter->second.priority = 1;
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[riposte] {} drops its guard to riposte", actor->GetName());
+						logger::info("[riposte] {} drops its guard to riposte", Who(actor));
 					}
 				}
 				else
 				{
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[riposte] {} drops its riposte: staggered", actor->GetName());
+						logger::info("[riposte] {} drops its riposte: staggered", Who(actor));
 					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
@@ -3698,7 +3708,12 @@ void AIHandler::Update(float delta)
 				if (!actor->IsAttacking() && !InTransition(actor) && AttackHandler::GetSingleton()->CanAttack(actor))
 				{
 					DeferredBashCooldowns.push_back(ActionQueueIter->first);
-					if (AttackHandler::GetSingleton()->DoBash(actor))
+					const bool Bashed = AttackHandler::GetSingleton()->DoBash(actor);
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[bash] {} {}", Who(actor), Bashed ? "starts a bash" : "bash refused by the engine");
+					}
+					if (Bashed)
 					{
 						ActionQueueIter->second.toDo = Actions::ReleaseBash;
 						ActionQueueIter->second.timeLeft = LowestTime;
@@ -3711,6 +3726,11 @@ void AIHandler::Update(float delta)
 				}
 				else
 				{
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[bash] {} drops its bash: attacking {}, in transition {}, can attack {}", Who(actor),
+							actor->IsAttacking(), InTransition(actor), AttackHandler::GetSingleton()->CanAttack(actor));
+					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 			}
@@ -3721,6 +3741,11 @@ void AIHandler::Update(float delta)
 				actor->GetGraphVariableBool("IsBashing", Bashing);
 				if (Bashing || ActionQueueIter->second.waitedForDir >= BashReleaseWaitMax)
 				{
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[bash] {} releases: graph bashing {}, waited {:.2f}s, state {}", Who(actor), Bashing,
+							ActionQueueIter->second.waitedForDir, static_cast<int>(actor->AsActorState()->GetAttackState()));
+					}
 					actor->NotifyAnimationGraph("bashRelease");
 					ActionQueueIter->second.toDo = Actions::ResetState;
 					ActionQueueIter->second.timeLeft = 0.1f;
@@ -3775,7 +3800,7 @@ void AIHandler::Update(float delta)
 				if (!Feinted && Settings::VerboseLogging && !actor->IsBlocking())
 				{
 					logger::info("[feint] {} planned feint didn't fire (window open {})",
-						actor->GetName(), AttackHandler::GetSingleton()->InFeintWindow(actor));
+						Who(actor), AttackHandler::GetSingleton()->InFeintWindow(actor));
 				}
 				RE::Actor* FeintTarget = Feinted ? GetCombatTarget(actor) : nullptr;
 				// Already countered: hold the line the counter is aimed at and let the
@@ -3784,7 +3809,7 @@ void AIHandler::Update(float delta)
 				{
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[feint] {} holds its line: {} is already countering", actor->GetName(), FeintTarget->GetName());
+						logger::info("[feint] {} holds its line: {} is already countering", Who(actor), Who(FeintTarget));
 					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
@@ -3811,7 +3836,7 @@ void AIHandler::Update(float delta)
 				{
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[feint] {} drops its follow-up: {} is countering", actor->GetName(), FeintTarget->GetName());
+						logger::info("[feint] {} drops its follow-up: {} is countering", Who(actor), Who(FeintTarget));
 					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
@@ -3832,7 +3857,7 @@ void AIHandler::Update(float delta)
 				{
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[opportunity] {} drops its swing: the opening closed", actor->GetName());
+						logger::info("[opportunity] {} drops its swing: the opening closed", Who(actor));
 					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
@@ -3848,7 +3873,15 @@ void AIHandler::Update(float delta)
 					const bool Swung = TryAttack(actor);
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[opportunity] {} {} {}", actor->GetName(), Swung ? "swings at" : "couldn't swing at", Opening->GetName());
+						// Which of TryAttack's checks refused.
+						auto* Attacks = AttackHandler::GetSingleton();
+						const char* Why = Swung ? "" :
+							InTransition(actor) ? ": in transition" :
+							IsAttackingDisabled(actor) ? ": attacking disabled" :
+							!Attacks->CanAttack(actor) ? ": locked out" :
+							Attacks->InFeintWindow(actor) ? ": feint window" :
+							Attacks->LacksAttackStamina(actor) ? ": no stamina" : ": mid-swing";
+						logger::info("[opportunity] {} {} {}{}", Who(actor), Swung ? "swings at" : "couldn't swing at", Who(Opening), Why);
 					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
@@ -3978,7 +4011,6 @@ void AIHandler::Update(float delta)
 	UpdateTimerMtx.lock();
 	// spread out AI actions to control difficulty
 	auto UpdateTimerIter = UpdateTimer.begin();
-	int NumActorsTargettingPlayer = 0;
 	while (UpdateTimerIter != UpdateTimer.end())
 	{
 		if (!UpdateTimerIter->first)
@@ -3992,11 +4024,6 @@ void AIHandler::Update(float delta)
 			UpdateTimerIter = UpdateTimer.erase(UpdateTimerIter);
 			continue;
 		}
-		RE::Actor* currentTarget = actor->GetActorRuntimeData().currentCombatTarget.get().get();
-		if (currentTarget && currentTarget->IsPlayer() && actor->IsHostileToActor(currentTarget))
-		{
-			NumActorsTargettingPlayer++;
-		}
 		if (UpdateTimerIter->second >= 0)
 		{
 			// don't erase actually, since these AI can be acting a lot this will cause a lot of memory allocations
@@ -4006,9 +4033,6 @@ void AIHandler::Update(float delta)
 
 
 	}
-	AIHandlerDataMtx.lock();
-	NumPlayerAttackers = NumActorsTargettingPlayer;
-	AIHandlerDataMtx.unlock();
 	UpdateTimerMtx.unlock();
 
 	

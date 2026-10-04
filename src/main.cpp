@@ -34,7 +34,6 @@ void InitLogger()
 
 void OnDataLoad()
 {
-	SettingsLoader::GetSingleton()->Load("Data\\SKSE\\Plugins\\Settings.ini");
 	PRECISION_API::IVPrecision3* precision = reinterpret_cast<PRECISION_API::IVPrecision3*>(PRECISION_API::RequestPluginAPI(PRECISION_API::InterfaceVersion::V3));
 	if (precision)
 	{
@@ -59,7 +58,9 @@ void OnDataLoad()
 		logger::info("TDM dll not found");
 		Settings::HasTDM = false;
 	}
-	
+	// After the API checks: the weapon rebalance runs inside Load and reads HasPrecision.
+	SettingsLoader::GetSingleton()->Load("Data\\SKSE\\Plugins\\Settings.ini");
+
 	Hooks::Hooks::Install();
 	DirectionHandler::GetSingleton()->Initialize(tdm);
 	FXHandler::GetSingleton()->Initialize();

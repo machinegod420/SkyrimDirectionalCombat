@@ -72,7 +72,7 @@ void CreatureHandler::UpdateActor(RE::Actor* actor)
 				}
 				HasLine = true;
 				LogRaceOnce(actor);
-				if (Settings::VerboseLogging) logger::info("[creature] {} swing {} -> line {} (height {} player {})", actor->GetName(), AttackData->event.data() ? AttackData->event.data() : "", static_cast<int>(Line), BodyHeight(actor), BodyHeight(RE::PlayerCharacter::GetSingleton()));
+				if (Settings::VerboseLogging) logger::info("[creature] {} swing {} -> line {} (height {} player {})", Who(actor), AttackData->event.data() ? AttackData->event.data() : "", static_cast<int>(Line), BodyHeight(actor), BodyHeight(RE::PlayerCharacter::GetSingleton()));
 			}
 		}
 	}

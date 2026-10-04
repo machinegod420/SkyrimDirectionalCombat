@@ -81,7 +81,10 @@ namespace Hooks
 		{
 			REL::Relocation<std::uintptr_t> UpdateBase{ RELOCATION_ID(35565, 36564) };
 			auto& trampoline = SKSE::GetTrampoline();
-			_Update = trampoline.write_call<5>(UpdateBase.address() + REL::Relocate(0x748, 0xC38), Update);
+			// AE moved this call in 1.7.99: 0xC26 before it, 0xC38 from it on (Precision's offsets).
+			const std::size_t Offset = REL::VariantOffset(0x748,
+				REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_7_99) ? 0xC38 : 0xC26, 0x748).offset();
+			_Update = trampoline.write_call<5>(UpdateBase.address() + Offset, Update);
 			logger::info("Hook Update");
 
 		}
@@ -248,6 +251,16 @@ namespace Hooks
 		static void Install();
 		static bool ProcessMotionData(RE::Character* a_this, float a_dt, RE::NiPoint3* a_translation, RE::NiPoint3* a_rotation, bool* a_flag);
 		static inline decltype(&ProcessMotionData) _ProcessMotionData = nullptr;
+	};
+
+	// Actor::ApplyWeaponHitSpellItems: casts the weapon's enchantment, its poison and perk hit
+	// spells. The engine calls it before the hit data exists, so a block never stopped them.
+	class HookWeaponHitSpells
+	{
+	public:
+		static void Install();
+		static void ApplyWeaponHitSpellItems(RE::Actor* a_attacker, RE::InventoryEntryData* a_weapon, bool a_leftHand, RE::TESObjectREFR* a_target);
+		static inline decltype(&ApplyWeaponHitSpellItems) _ApplyWeaponHitSpellItems = nullptr;
 	};
 
 	// hooks bhkCharacterStateOnGround::SimulateStatePhysics (vfunc 8) so we can write

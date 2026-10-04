@@ -199,7 +199,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	if (Settings::VerboseLogging)
 	{
 		logger::info("[block] {} absorbed from {}: stamina {:.0f} of {:.0f} left, cost {:.0f}, through {:.0f}{} | health {:.1f}, hitData phys {:.1f} total {:.1f} -> {:.1f}, flags {:#x}",
-			target->GetName(), attacker->GetName(), ActorStamina, ActorMaxStamina, Damage, FinalDamage,
+			Who(target), Who(attacker), ActorStamina, ActorMaxStamina, Damage, FinalDamage,
 			Imperfect ? " (imperfect)" : "",
 			target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth),
 			hitData.physicalDamage, hitData.totalDamage, FinalDamage,
@@ -253,7 +253,12 @@ void BlockHandler::CauseStagger(RE::Actor* actor, RE::Actor* heading, float magn
 		float direction = (headingAngle >= 0.0f) ? headingAngle / 360.0f : (360.0f + headingAngle) / 360.0f;
 		actor->SetGraphVariableFloat("staggerDirection", direction);
 		actor->SetGraphVariableFloat("StaggerMagnitude", magnitude);
-		actor->NotifyAnimationGraph("staggerStart");
+		if (!actor->NotifyAnimationGraph("staggerStart"))
+		{
+			// The flag below is still set, and only a finished stagger clears it: nothing will.
+			logger::warn("[stagger] {} graph refused staggerStart (magnitude {:.2f}, attacking {}, blocking {}); staggered flag set with no stagger playing",
+				Who(actor), magnitude, actor->IsAttacking(), actor->IsBlocking());
+		}
 		actor->AsActorState()->actorState2.staggered = true;
 		//actor->NotifyAnimationGraph("attackStop");
 
@@ -445,7 +450,7 @@ bool BlockHandler::HandleMasterstrike(RE::Actor* attacker, RE::Actor* target)
 					}
 					if (Settings::VerboseLogging)
 					{
-						logger::info("[hit] clash: {} ran into {}'s counter", attacker->GetName(), target->GetName());
+						logger::info("[hit] clash: {} ran into {}'s counter", Who(attacker), Who(target));
 					}
 					return true;
 				}
@@ -508,8 +513,6 @@ void BlockHandler::ResetBrace(RE::Actor* actor)
 	}
 }
 
-// Seconds the guard has been up, or -1 if it isn't tracked. Diagnostic: a value
-// near zero when a block misbehaves means the hit beat the guard, not the logic.
 bool BlockHandler::HasMissedParry(RE::Actor* actor) const
 {
 	std::shared_lock lock(MissedParryMtx);
@@ -517,6 +520,8 @@ bool BlockHandler::HasMissedParry(RE::Actor* actor) const
 	return Iter != MissedParry.end() && Iter->second > 0.f;
 }
 
+// Seconds the guard has been up, or -1 if it isn't tracked. Diagnostic: a value
+// near zero when a block misbehaves means the hit beat the guard, not the logic.
 float BlockHandler::GetBraceSeconds(RE::Actor* actor) const
 {
 	std::shared_lock lock(BraceTimerMtx);

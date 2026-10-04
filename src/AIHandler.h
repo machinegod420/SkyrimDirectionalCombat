@@ -467,11 +467,6 @@ private:
 	std::mutex PlayerStatsMtx;
 	void SeedChainEdges(AIDifficulty& diff, WeaponSet a_set);
 
-
-
-	int NumPlayerAttackers;
-	mutable std::shared_mutex AIHandlerDataMtx;
-
 	public:
 	PRECISION_API::IVPrecision3* Precision = nullptr;
 };
