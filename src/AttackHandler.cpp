@@ -5,6 +5,10 @@
 constexpr float NPCLockoutTime = 0.15f;
 constexpr float AttackSpeedMult = 0.1f;
 constexpr float SmallAttackSpeedMult = 0.04f;
+// Warhammer light/power alternation, its follow-up identity. The light after a heavy
+// is the unreactable move; the heavy after a light must stay parryable on reaction.
+constexpr float WarhammerLightAfterHeavyBonus = 0.25f;
+constexpr float WarhammerHeavyAfterLightBonus = 0.05f;
 // SpeedMult points each combo step takes off the actor it lands on, and the
 // floor they stack to. Lasts the combo window so it covers the finisher.
 constexpr float ComboSlowPerStep = -15.f;
@@ -13,6 +17,10 @@ constexpr float ComboSlowMax = -30.f;
 constexpr float ChargeBuffDuration = 3.0f;
 // timer to figure out if someone is stuck in an attack state but not attacking so we can unfuck them
 constexpr float StuckAttackGraceSeconds = 1.f;
+// Longest windup a swing clock waits for its hit frame (mirrors the AI's PowerWindupTimeout).
+constexpr float SwingClockTimeout = 2.f;
+// The engine plays two-handed attack clips at 1.5x the record speed.
+constexpr float TwoHandedSpeedMult = 1.5f;
 // Old auto-mixup feint, off while the hard feint is tried; uncomment every "old feint" block to restore.
 // constexpr float FeintQueueTime = 0.2f; // carefully tailored magic number
 
@@ -78,18 +86,16 @@ float AttackHandler::GetChamberWindowTime(RE::Actor* actor)
 	return ret;
 }
 
-bool AttackHandler::InFeintWindow(RE::Actor* actor)
+bool AttackHandler::FeintPending(RE::Actor* actor)
 {
-	bool ret = false;
-	FeintWindowMtx.lock_shared();
-	ret = FeintWindow.contains(actor->GetHandle());
-	FeintWindowMtx.unlock_shared();
-	return ret;
+	std::shared_lock lock(FeintMtx);
+	auto It = Feints.find(actor->GetHandle());
+	return It != Feints.end() && It->second.pending;
 }
 
 float AttackHandler::SecondsSinceFeint(RE::Actor* actor)
 {
-	std::shared_lock lock(FeintWindowMtx);
+	std::shared_lock lock(FeintMtx);
 	auto It = LastFeintAt.find(actor->GetHandle());
 	if (It == LastFeintAt.end())
 	{
@@ -98,11 +104,89 @@ float AttackHandler::SecondsSinceFeint(RE::Actor* actor)
 	return std::chrono::duration<float>(std::chrono::steady_clock::now() - It->second).count();
 }
 
-void AttackHandler::RemoveFeintWindow(RE::Actor* actor)
+bool AttackHandler::TakeFeintResolved(RE::Actor* actor)
 {
-	// Exclusive lock — erase is a write, and mutating under a shared lock is UB.
-	std::unique_lock lock(FeintWindowMtx);
-	FeintWindow.erase(actor->GetHandle());
+	std::unique_lock lock(FeintMtx);
+	auto It = Feints.find(actor->GetHandle());
+	if (It == Feints.end() || !It->second.resolved)
+	{
+		return false;
+	}
+	It->second.resolved = false;
+	return true;
+}
+
+float AttackHandler::EffectiveAttackSpeed(RE::Actor* actor)
+{
+	// Non-positive would divide by zero; the required speed fix makes 1.0 the base.
+	// A 0.67 polehammer hit at 0.43 s like the 1.04 sword: 0.67 x 1.5 = 1.0.
+	float Speed = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kWeaponSpeedMult);
+	Speed = Speed > 0.f ? Speed : 1.f;
+	if (auto* Equipped = actor->GetEquippedObject(false))
+	{
+		auto* Weapon = Equipped->As<RE::TESObjectWEAP>();
+		if (Weapon && Weapon->weaponData.speed > 0.f)
+		{
+			Speed *= Weapon->weaponData.speed;
+			if (Weapon->IsTwoHandedSword() || Weapon->IsTwoHandedAxe())
+			{
+				Speed *= TwoHandedSpeedMult;
+			}
+		}
+	}
+	return std::max(0.25f, Speed);
+}
+
+float AttackHandler::FeintPoint(RE::Actor* actor)
+{
+	return DifficultySettings::FeintPointSeconds / EffectiveAttackSpeed(actor);
+}
+
+void AttackHandler::StartSwingClock(RE::Actor* actor)
+{
+	std::unique_lock lock(FeintMtx);
+	// A new swing owes nothing to the last one's feint.
+	Feints[actor->GetHandle()] = FeintState{ 0.f, false, false };
+}
+
+void AttackHandler::EndSwingClock(RE::Actor* actor)
+{
+	std::unique_lock lock(FeintMtx);
+	auto It = Feints.find(actor->GetHandle());
+	if (It == Feints.end())
+	{
+		return;
+	}
+	if (It->second.pending && Settings::VerboseLogging)
+	{
+		logger::info("[feint] {} queued feint dropped: the swing reached its hit at {:.2f}s (point {:.2f})",
+			Who(actor), It->second.swingElapsed, FeintPoint(actor));
+	}
+	It->second.swingElapsed = -1.f;
+	It->second.pending = false;
+}
+
+bool AttackHandler::QueueFeint(RE::Actor* actor)
+{
+	std::unique_lock lock(FeintMtx);
+	auto It = Feints.find(actor->GetHandle());
+	const bool Live = It != Feints.end() && It->second.swingElapsed >= 0.f;
+	const float Point = FeintPoint(actor);
+	if (!Live || It->second.swingElapsed >= Point)
+	{
+		if (Settings::VerboseLogging)
+		{
+			logger::info("[feint] {} can't queue a feint: {}", Who(actor),
+				Live ? "past the feint point" : "no swing to feint");
+		}
+		return false;
+	}
+	if (!It->second.pending && Settings::VerboseLogging)
+	{
+		logger::info("[feint] {} queues a feint at {:.2f}s, fires at {:.2f}", Who(actor), It->second.swingElapsed, Point);
+	}
+	It->second.pending = true;
+	return true;
 }
 
 bool AttackHandler::CanAttack(RE::Actor* actor)
@@ -128,7 +212,8 @@ bool AttackHandler::CanInitiateAttack(RE::Actor* actor)
 	{
 		return false;
 	}
-	if (InFeintWindow(actor) /* old feint: || InFeintQueue(actor) */)
+	// The follow-up waits for the feint to fire.
+	if (FeintPending(actor) /* old feint: || InFeintQueue(actor) */)
 	{
 		return false;
 	}
@@ -193,38 +278,46 @@ bool AttackHandler::HandleFeint(RE::Actor* actor)
 	auto* Values = actor->AsActorValueOwner();
 	const float FeintCost = Values->GetPermanentActorValue(RE::ActorValue::kStamina) * DifficultySettings::FeintStaminaCost;
 	const float Stamina = Values->GetActorValue(RE::ActorValue::kStamina);
-	bool Feinted = false;
-	FeintWindowMtx.lock();
-	const bool WindowOpen = FeintWindow.contains(actor->GetHandle());
-	if (WindowOpen && Stamina >= FeintCost)
+	// The swing may have been cut short (stagger, block) since the feint was queued.
+	if (!actor->IsAttacking())
 	{
-		Feinted = true;
 		if (Settings::VerboseLogging)
 		{
-			logger::info("[feint] {} feints {} from line {} (cost {:.0f} of {:.0f})", Who(actor),
-				IsPowerAttacking(actor) ? "power" : "light",
-				static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)), FeintCost, Stamina);
+			logger::info("[feint] {} has no swing left to feint", Who(actor));
 		}
-		actor->NotifyAnimationGraph("ForceAttackStop");
-
-		//actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
-		actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(FeintFX, false, actor, 0.f, false, 0.f, nullptr);
-		Values->DamageActorValue(RE::ActorValue::kStamina, FeintCost);
-		// Old feint: forced switch to the other side, a sped-up follow-up thrown 0.2 s later.
-		// Restoring it means dropping the NPC EndFeint's own switch call again. The buff
-		// is off because the feint only supports a direction change; it isn't a mixup itself.
-		// HandleFeintChangeDirection(actor);
-		// GiveAttackSpeedBuff(actor);
-		FeintWindow.erase(actor->GetHandle());
-		LastFeintAt[actor->GetHandle()] = std::chrono::steady_clock::now();
-		// AddFeintQueue(actor);
+		return false;
 	}
-	FeintWindowMtx.unlock();
-	if (WindowOpen && !Feinted && Settings::VerboseLogging)
+	if (Stamina < FeintCost)
 	{
-		logger::info("[feint] {} can't afford a feint (cost {:.0f} of {:.0f})", Who(actor), FeintCost, Stamina);
+		if (Settings::VerboseLogging)
+		{
+			logger::info("[feint] {} can't afford a feint (cost {:.0f} of {:.0f})", Who(actor), FeintCost, Stamina);
+		}
+		return false;
 	}
-	return Feinted;
+	if (Settings::VerboseLogging)
+	{
+		logger::info("[feint] {} feints {} from line {} (cost {:.0f} of {:.0f})", Who(actor),
+			IsPowerAttacking(actor) ? "power" : "light",
+			static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)), FeintCost, Stamina);
+	}
+	actor->NotifyAnimationGraph("ForceAttackStop");
+
+	//actor->AsActorState()->actorState1.meleeAttackState = RE::ATTACK_STATE_ENUM::kNone;
+	actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant)->CastSpellImmediate(FeintFX, false, actor, 0.f, false, 0.f, nullptr);
+	Values->DamageActorValue(RE::ActorValue::kStamina, FeintCost);
+	// Old feint: forced switch to the other side, a sped-up follow-up thrown 0.2 s later.
+	// Restoring it means dropping the NPC EndFeint's own switch call again. The buff
+	// is off because the feint only supports a direction change; it isn't a mixup itself.
+	// HandleFeintChangeDirection(actor);
+	// GiveAttackSpeedBuff(actor);
+	{
+		std::unique_lock lock(FeintMtx);
+		Feints[actor->GetHandle()].resolved = true;
+		LastFeintAt[actor->GetHandle()] = std::chrono::steady_clock::now();
+	}
+	// AddFeintQueue(actor);
+	return true;
 }
 
 void AttackHandler::AddChamberWindow(RE::Actor* actor)
@@ -233,13 +326,6 @@ void AttackHandler::AddChamberWindow(RE::Actor* actor)
 	ChamberWindowMtx.lock();
 	ChamberWindow[actor->GetHandle()] = DifficultySettings::ChamberWindowTime;
 	ChamberWindowMtx.unlock();
-}
-
-void AttackHandler::AddFeintWindow(RE::Actor* actor)
-{
-	FeintWindowMtx.lock();
-	FeintWindow[actor->GetHandle()] = DifficultySettings::FeintWindowTime;
-	FeintWindowMtx.unlock();
 }
 
 void AttackHandler::RemoveLockout(RE::Actor* actor)
@@ -376,10 +462,10 @@ void AttackHandler::Cleanup()
 	AttackLockout.clear();
 	AttackLockoutMtx.unlock();
 
-	FeintWindowMtx.lock();
-	FeintWindow.clear();
+	FeintMtx.lock();
+	Feints.clear();
 	LastFeintAt.clear();
-	FeintWindowMtx.unlock();
+	FeintMtx.unlock();
 
 	{
 		// One pass: back out each actor's applied net, then drop everything.
@@ -415,9 +501,9 @@ void AttackHandler::RemoveActor(RE::ActorHandle actor)
 	AttackLockoutMtx.lock();
 	AttackLockout.erase(actor);
 	AttackLockoutMtx.unlock();
-	FeintWindowMtx.lock();
-	FeintWindow.erase(actor);
-	FeintWindowMtx.unlock();
+	FeintMtx.lock();
+	Feints.erase(actor);
+	FeintMtx.unlock();
 
 	RE::Actor* a = actor.get().get();
 
@@ -509,11 +595,14 @@ void AttackHandler::GiveAttackSpeedBuff(RE::Actor* actor)
 	ApplySpeedNet(actor, Entry);
 }
 
-void AttackHandler::GiveSmallAttackSpeedBuff(RE::Actor* actor)
+void AttackHandler::GiveSmallAttackSpeedBuff(RE::Actor* actor, bool powerSwing)
 {
+	// Alternating light and power keeps a heavy head moving.
+	const float Bonus = DirectionHandler::GetSingleton()->AnimationSet(actor) == WeaponSet::Warhammer ?
+		(powerSwing ? WarhammerHeavyAfterLightBonus : WarhammerLightAfterHeavyBonus) : SmallAttackSpeedMult;
 	std::unique_lock lock(SpeedModsMtx);
 	auto& Entry = SpeedMods[actor->GetHandle()];
-	Entry.SmallChain.Set(SmallAttackSpeedMult, 2.f);
+	Entry.SmallChain.Set(Bonus, 2.f);
 	ApplySpeedNet(actor, Entry);
 }
 
@@ -542,7 +631,7 @@ void AttackHandler::SetChainLinePenalty(RE::Actor* actor, float Penalty)
 {
 	std::unique_lock lock(SpeedModsMtx);
 	auto& Entry = SpeedMods[actor->GetHandle()];
-	Entry.ChainLine.Set(-Penalty, Penalty > 0.f ? ChargeBuffDuration : 0.f);
+	Entry.ChainLine.Set(-Penalty, Penalty != 0.f ? ChargeBuffDuration : 0.f);
 	ApplySpeedNet(actor, Entry);
 }
 
@@ -624,32 +713,48 @@ void AttackHandler::Update(float delta)
 	}
 
 
+	// Swing clocks: a queued feint fires at the point; entries with nothing live are dropped.
+	std::vector<RE::Actor*> FeintsDue;
 	{
-		FeintWindowMtx.lock();
-		auto FeintIter = FeintWindow.begin();
-		while (FeintIter != FeintWindow.end())
+		std::unique_lock lock(FeintMtx);
+		auto FeintIter = Feints.begin();
+		while (FeintIter != Feints.end())
 		{
-			if (!FeintIter->first)
-			{
-				FeintIter = FeintWindow.erase(FeintIter);
-				continue;
-			}
-			RE::Actor* actor = FeintIter->first.get().get();
+			RE::Actor* actor = FeintIter->first ? FeintIter->first.get().get() : nullptr;
 			if (!actor)
 			{
-				FeintIter = FeintWindow.erase(FeintIter);
+				FeintIter = Feints.erase(FeintIter);
 				continue;
 			}
-			FeintIter->second -= delta;
-			if (FeintIter->second <= 0)
+			FeintState& State = FeintIter->second;
+			if (State.swingElapsed >= 0.f)
 			{
-				FeintIter = FeintWindow.erase(FeintIter);
+				State.swingElapsed += delta;
+				if (State.pending && State.swingElapsed >= FeintPoint(actor))
+				{
+					State.pending = false;
+					State.swingElapsed = -1.f;
+					FeintsDue.push_back(actor);
+				}
+				// A swing whose hit frame never came (interrupted, ranged start): not live.
+				else if (State.swingElapsed > SwingClockTimeout)
+				{
+					State.swingElapsed = -1.f;
+					State.pending = false;
+				}
+			}
+			else if (!State.pending && !State.resolved)
+			{
+				FeintIter = Feints.erase(FeintIter);
 				continue;
 			}
 			FeintIter++;
 		}
-		FeintWindowMtx.unlock();
-
+	}
+	// Outside the lock: the cancel notifies the graph.
+	for (RE::Actor* actor : FeintsDue)
+	{
+		HandleFeint(actor);
 	}
 
 	// Old feint: throws the follow-up when the queue expires.

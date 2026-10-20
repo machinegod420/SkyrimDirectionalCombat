@@ -93,15 +93,15 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	// weapon stamina modifiers
 	auto AttackerWeapon = attacker->GetEquippedObject(false);
 	float AttackerWeaponWeight = AttackerWeapon ? AttackerWeapon->GetWeight() : 0.f;
+	const bool CreatureAttacker = CreatureHandler::GetSingleton()->IsCreatureGraph(attacker->GetRace());
 	// A creature's size stands in only when it carries no weapon; an armed
 	// draugr is costed by its weapon like anyone else.
-	if (AttackerWeaponWeight <= 0.f && CreatureHandler::GetSingleton()->IsCreatureGraph(attacker->GetRace()))
+	if (AttackerWeaponWeight <= 0.f && CreatureAttacker)
 	{
 		AttackerWeaponWeight = CreatureHandler::SizeWeight(attacker);
 	}
 	auto DefenderWeapon = target->GetEquippedObject(false);
 	float DefenderWeaponWeight = DefenderWeapon ? DefenderWeapon->GetWeight() : 0.f;
-	bool hasShield = HasShield(target);
 
 	// Flat, unlike the rest of the cost, so a deep stamina pool absorbs a heavy
 	// weapon better — the one place the attribute pays off. Capped against the
@@ -119,12 +119,11 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	{
 		Damage *= DifficultySettings::PowerAttackBlockCostMult;
 	}
-	// After the weight term, so the discount covers the mass being absorbed too.
-	if (hasShield)
+	// A creature swings too rarely to stack blocks; each one has to dent the next chain.
+	if (CreatureAttacker)
 	{
-		Damage *= 0.8f;
+		Damage *= DifficultySettings::CreatureBlockCostMult;
 	}
-
 	// Braced block: a set guard absorbs better than one thrown up at the last
 	// instant. Peaks across the parry window then decays, so it can't be camped.
 	Damage *= 1.f - GetBraceRatio(target) * BraceMaxReduction;
@@ -144,16 +143,12 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 		FXHandler::GetSingleton()->PlayTimedBlock(target);
 		Damage *= 0.5f;
 		CauseStagger(attacker, target, 0.1f, true);
-		// Lights only
-		if (!IsPowerAttacking(attacker))
+		// Lights only. The hit's flag: the stagger above has already cleared the attacker's attack data.
+		if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
 		{
 			DirectionHandler::GetSingleton()->AddCombo(target, true);
 		}
 	}
-
-	// cap stamina damage
-	float ActorMaxStaminaDamage = ActorMaxStamina * DifficultySettings::StaminaDamageCap;
-	Damage = std::min(Damage, ActorMaxStaminaDamage);
 
 	target->AsActorValueOwner()->DamageActorValue(RE::ActorValue::kStamina,Damage);
 	// breaks stamina
@@ -181,8 +176,7 @@ void BlockHandler::ApplyBlockDamage(RE::Actor* target, RE::Actor* attacker, RE::
 	}
 	// A creature has no guard to trade with, so a plain block still gets moved;
 	// only the parry holds. After the break stagger, which takes precedence.
-	if (CreatureHandler::GetSingleton()->IsCreatureGraph(attacker->GetRace()) &&
-		!DirectionHandler::GetSingleton()->HasTimedParry(target))
+	if (CreatureAttacker && !DirectionHandler::GetSingleton()->HasTimedParry(target))
 	{
 		const float Stagger = CreatureBlockStagger *
 			std::min(CreatureHandler::SizeRatio(attacker), CreatureBlockStaggerMaxSize);

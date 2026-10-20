@@ -23,6 +23,9 @@ public:
 	// A press can't fire yet: one is already held, the guard is still moving, a bash is
 	// finishing, or your own swing hasn't landed.
 	bool ShouldHoldPress() const;
+	// A press out of a straight back dodge: held as a light while the guard turns to
+	// the poke line. False outside that window, leaving the press to the usual path.
+	bool BufferBackDodgePoke();
 	// The block button: a press cancels any buffered attack.
 	void OnBlockPressed();
 	void Update(float delta);
@@ -40,6 +43,9 @@ private:
 	float PendingAge = 0.f;
 	int PendingFrames = 0;
 	float GraphIdleAttacking = 0.f;
+	// What the queued feint cancels, read at the press: the resolve comes after the stop.
+	bool FeintedPower = false;
+	int FeintedStep = 0;
 
 	enum : uint32_t
 	{

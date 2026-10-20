@@ -38,6 +38,7 @@ public:
 		Attack,
 		Block,
 		UnblockRiposte,
+		UnblockPowerRiposte,
 		UnblockStartFeint,
 		StartFeint,
 		EndFeint, 
@@ -104,12 +105,15 @@ public:
 	inline void IncreaseBlockChance(RE::Actor* actor, Directions dir, int percent, int modifier);
 	void ReduceDifficulty(RE::Actor* actor);
 	void SwitchToNextAttack(RE::Actor* actor);
-	// Chain graph row for a swing with no landed line in the ring: the opener.
+	// Chain graph row for a swing with no swing inside ComboResetTimer before it: the opener.
 	static constexpr int OpenerRow = 4;
-	// Player habit profile: the player's own chain transitions (last landed line,
-	// or OpenerRow, to the next swing's line), per weapon set, learned across every
-	// fight and used to seed each NPC's chain graph when it engages the player.
-	void RecordPlayerChainTransition(WeaponSet a_set, int a_from, Directions a_to);
+	// Player habit profile: the player's own chain transitions (last swing line inside
+	// ComboResetTimer, or OpenerRow, to this swing's line), per weapon set, learned across
+	// every fight and used to seed each NPC's chain graph when it engages the player.
+	void RecordPlayerSwingLine(WeaponSet a_set, Directions a_to);
+	// One "[xchg]" line per swing involving the player: from the hit path when it connects,
+	// from the perception frame's end edge when it doesn't. Diagnostic only.
+	void LogExchange(RE::Actor* attacker, RE::Actor* defender, const char* outcome, float damage);
 	// Kept in the co-save, so a reload rewinds what the AI learned since.
 	static constexpr std::uint32_t PlayerHabitRecord = 'HABT';
 	static constexpr std::uint32_t PlayerHabitVersion = 1;
@@ -178,8 +182,14 @@ private:
 	// action, never rush one — a computed deadline, not a discount. Negative
 	// means "as soon as the action timer allows", which is every other caller.
 	void AddAction(RE::Actor* actor, Actions toDo, bool force = false, int priority = 0, DodgeDirection dodgeDir = DodgeDirection::Backward, float TargetDelay = -1.f);
+	// Lets the queued action dispatch on the next runner pass instead of waiting out its timer.
+	void ExpediteQueuedAction(RE::Actor* actor);
+	// Turns the queued light into a charged opener; false if no light is queued.
+	bool SetQueuedChargeGoal(RE::Actor* actor, float goal);
 	float CalcUpdateTimer(RE::Actor* actor);
 	float CalcActionTimer(RE::Actor* actor);
+	// Seconds to register a stimulus before the action timer; reactions only.
+	float CalcProcessingTimer(RE::Actor* actor);
 	void DidAct(RE::Actor* actor);
 
 	Actions GetQueuedAction(RE::Actor* actor);
@@ -199,6 +209,9 @@ private:
 		// land. Bounded, because an actor that keeps re-deciding its line would
 		// otherwise never swing at all.
 		float waitedForDir = 0.f;
+		// A charged opener: the guard charge ratio this swing holds its line for (0 = none).
+		float chargeGoal = 0.f;
+		float heldForCharge = 0.f;
 	};
 
 	struct AIDifficulty
@@ -233,13 +246,29 @@ private:
 		// Weights the cascade last rolled against. Cached so the HUD renders
 		// what the AI acted on rather than recomputing and drifting from it.
 		int lastCascadeWeights[4] = {};
-		// Chain flow graph: [a][b] is how often the target, with a landed hit
-		// from a still in its combo ring, swings next from b. Row OpenerRow is
-		// the ring-empty swing, on top of directionChangeChance.
+		// Reflex expectation: the pick made on the frame the line changed, kept for the
+		// tick so it isn't rolled twice. One reflex per decision tick.
+		Directions reflexPick = Directions::TR;
+		bool reflexPickValid = false;
+		bool reflexSpent = false;
+		// The one answer to the target's next chained swing, decided at its switch:
+		// 0 undecided, 1 block pressed with the read, 2 escape when the swing starts.
+		int chainAnswer = 0;
+		// Chain flow graph: [a][b] is how often the target, whose last swing inside
+		// ComboResetTimer was from a, swings next from b. Row OpenerRow is the swing
+		// after a pause, on top of directionChangeChance.
 		int chainEdges[OpenerRow + 1][4] = {};
 		// The edge the target's current swing walked, for the lose-shift on a block.
 		int lastChainFrom = -1;
 		int lastChainTo = -1;
+		// The last swing line seen from this target: the chain node for learning and
+		// prediction, so the sequence read survives blocks and finishers.
+		int lastSeenSwingLine = -1;
+		// Seconds since that swing started (the profile's clock too); past
+		// ComboResetTimer the node is the opener again.
+		float sinceLastSwing = 0.f;
+		// The line change that arrived with the swing was the attack, not a show.
+		bool switchCameWithSwing = false;
 		// chainEdges started from the player habit profile for this target.
 		bool chainSeeded = false;
 		// Learned draw-to-hit for this target's power attacks at base attack speed,
@@ -263,10 +292,25 @@ private:
 		// windup estimates and the masterstrike, closed with the feint habit.
 		float swingElapsed = -1.f;   // negative when not tracking
 		bool swingWasPower = false;  // set from IsPowerAttacking at the start edge
+		// Seconds since a guard switch was queued against a swing (negative = none).
+		// Inside GuardCommitSeconds a further move pays for un-committing.
+		float guardMovedAgo = -1.f;
+		bool swingCorrectionLogged = false;
 		// The target's WeaponSpeedMult at the start edge. Windups are learned at base
 		// speed (elapsed x this) and predicted for a swing as base / its speed.
 		float swingSpeed = 1.f;
+		// Exchange record (diagnostic): the first answer to the target's current swing, when
+		// its guard was due (s after the swing start), a later change of mind, the press's due
+		// time, and whether the swing connected.
+		const char* answerKind = "none";
+		const char* answerLater = nullptr;
+		float answerAt = -1.f;
+		float pressAt = -1.f;
+		bool swingContact = false;
+		bool swingChained = false;   // the target's combo step at the start edge (the hit advances it)
 		bool defending = false;
+		// Seconds a pre-block keeps the guard up with no swing to answer.
+		float holdBlockLeft = 0.f;
 		// Held out of the fight since the last decision tick.
 		bool heldOff = false;
 		// seconds spent in the defending state; zeroed on leaving it. Drives
@@ -333,6 +377,8 @@ private:
 		float timeSinceLineChange = 0.f;
 		// Whose guard the perception state describes; a retarget resets it.
 		uint32_t observedTargetId = 0;
+		// The target's right-hand weapon the windup estimates were learned against.
+		RE::TESForm* observedTargetWeapon = nullptr;
 
 		// Dynamic spacing. spacingTarget is recomputed on the decision tick from
 		// combat state and personality; 
@@ -370,6 +416,10 @@ private:
 	static bool IsIncomingSwing(RE::Actor* attacker, RE::Actor* defender);
 	bool IsPreparedToBlock(RE::Actor* actor, RE::Actor* target, const AIDifficulty& diff) const;
 	float TargetReachEstimate(RE::Actor* target, const AIDifficulty& diff, Directions line, bool power) const;
+	// A back-dodge started now is out of their reach by the hit frame.
+	bool EscapeClearsSwing(RE::Actor* target, const AIDifficulty& diff, Directions line, bool power, float distSq) const;
+	// Writes diff.lastCascadeWeights from the chain node as it stands now.
+	void ComputeCascade(RE::Actor* target, AIDifficulty& diff) const;
 	bool CanAnswerLine(RE::Actor* actor, RE::Actor* target, const AIDifficulty& diff) const;
 	// Seconds a target's guard switch is protected for, derived from this
 	// actor's decision latency rather than set independently. Reads the tier
@@ -396,7 +446,26 @@ private:
 	// latencies would both write DirectionTimers, so a slow one could overwrite
 	// a fast one that had already committed — the AI picking an attack line and
 	// then being dragged off it by an older defensive decision.
-	void QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool force);
+	// inputDelay: seconds before the switch fires, negative = the normal input delay;
+	// a seen swing stretches it to the reaction floor.
+	void QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool force, float inputDelay = -1.f);
+	// True when a switch to this line (folded) is already queued.
+	bool IsSwitchPending(RE::Actor* actor, Directions dir) const;
+	// A switch to dir in either queue: ours (waiting out its input delay) or the handler's (the animation).
+	bool IsSwitchUnderway(RE::Actor* actor, Directions dir) const;
+	// Drops whatever switch is underway in either queue: the guard stays where it is.
+	void CancelSwitchUnderway(RE::Actor* actor);
+	// How much a line change of the target's reads as an attack telegraph rather than a guard
+	// move: 1 with a swing or combo live, 0 from outside their reach, else their guard charge
+	// and this actor's caution.
+	float SwitchCoverWeight(RE::Actor* target, const AIDifficulty& diff, float distSq, Directions line, bool comboLive);
+	bool SwitchLooksLikeAttack(RE::Actor* actor, RE::Actor* target, AIDifficulty& diff, float distSq, Directions line, bool comboLive);
+	// The one answer to a switch of theirs: swing into the line their guard left (by aggression),
+	// move the guard (the cover weight), or nothing (the cover weight's remainder). One roll.
+	enum class SwitchAnswer { Ignore, Cover, Attack };
+	SwitchAnswer AnswerSwitch(RE::Actor* actor, RE::Actor* target, AIDifficulty& diff, float distSq, Directions was, Directions seen, bool comboLive);
+	// Formats the exchange line; the end edge calls it with the actor's own record.
+	void LogExchangeLine(RE::Actor* attacker, RE::Actor* defender, const AIDifficulty* diff, const char* outcome, float damage) const;
 	// True while a guard change is still in flight, in EITHER phase: the hand
 	// still moving (our queue) or the guard mid-transition (DirectionHandler's
 	// timer).
@@ -414,10 +483,17 @@ private:
 	phmap::flat_hash_map<Difficulty, float> DifficultyActionTimer;
 	mutable std::shared_mutex DifficultyActionTimerMtx;
 
+	phmap::flat_hash_map<Difficulty, float> DifficultyProcessingTimer;
+	mutable std::shared_mutex DifficultyProcessingTimerMtx;
+
 	// Decayed transition counts, [set][from][to], for the player habit profile.
 	// Lock order: DifficultyMapMtx before PlayerHabitMtx.
 	float PlayerHabit[NumWeaponSets][OpenerRow + 1][4] = {};
 	std::mutex PlayerHabitMtx;
+	// The player's last swing, for the profile's "from" row. Guarded by PlayerHabitMtx.
+	int PlayerLastSwingLine = -1;
+	int PlayerLastSwingSet = -1;
+	std::chrono::steady_clock::time_point PlayerLastSwingAt{};
 
 	// Co-save layout v1, frozen: a new layout is a new struct and version, and
 	// LoadPlayerStats keeps converting this one.

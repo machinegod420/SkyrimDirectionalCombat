@@ -53,12 +53,20 @@ public:
 	bool LacksAttackStamina(RE::Actor* actor);
 	// What preHitFrame charges for a paid swing at the actor's current repeat step.
 	float SwingStaminaCost(RE::Actor* actor, bool Power);
-	bool InFeintWindow(RE::Actor* actor);
+	// A feint is queued and waiting for the swing to reach the feint point.
+	bool FeintPending(RE::Actor* actor);
 	float SecondsSinceFeint(RE::Actor* actor);
+	// A press anywhere before the point queues a cancel that fires at the point
+	// (FeintPointSeconds / attack speed). False with no swing live or the point passed.
+	bool QueueFeint(RE::Actor* actor);
+	// True once per fired feint: the caller's cue to throw the follow-up.
+	bool TakeFeintResolved(RE::Actor* actor);
+	// The clock the feint point is measured on: started by the attack-start event
+	// (chained swings too), stopped at preHitFrame, where a pending feint is dropped.
+	void StartSwingClock(RE::Actor* actor);
+	void EndSwingClock(RE::Actor* actor);
 
 	void AddChamberWindow(RE::Actor* actor);
-	void AddFeintWindow(RE::Actor* actor);
-	void RemoveFeintWindow(RE::Actor* actor);
 
 	// Old feint:
 	// void AddFeintQueue(RE::Actor* actor);
@@ -69,14 +77,16 @@ public:
 	// }
 
 	void GiveAttackSpeedBuff(RE::Actor* actor);
-	void GiveSmallAttackSpeedBuff(RE::Actor* actor);
+	// powerSwing: the swing being sped up is the power half of the alternation.
+	void GiveSmallAttackSpeedBuff(RE::Actor* actor, bool powerSwing);
 	void RemoveSmallAttackSpeedBuff(RE::Actor* actor);
 	// Guard-charge attack speed: Ratio is 0-1 from DirectionHandler's guard
 	// charge, cashed in at swing start.
 	void GiveChargeSpeedBuff(RE::Actor* actor, float Ratio);
 	// Attack-speed penalty for the weak continuation of a combo (same side on
-	// four lines, a light poke in any mode). Its own slot rather than netted into
-	// the charge, so it keeps applying when guard charge is off. 0 clears it.
+	// four lines, a light poke in any mode), less the weapon's follow-up bonus, so
+	// it can go negative. Its own slot rather than netted into the charge, so it
+	// keeps applying when guard charge is off. 0 clears it.
 	// Routes through ApplySpeedNet; never touches WeaponSpeedMult directly.
 	void SetChainLinePenalty(RE::Actor* actor, float Penalty);
 	// Net attack-speed delta currently applied to the actor: charge, chain, same-side.
@@ -90,6 +100,7 @@ public:
 	void ResetAttackState(RE::Actor* actor);
 	// Resets a melee attack state that has had nothing attacking in the graph for over a second.
 	bool ClearStuckAttack(RE::Actor* actor, float& idleSeconds, float delta);
+	// The cancel itself; Update fires it when a queued feint reaches the point.
 	bool HandleFeint(RE::Actor* actor);
 	void HandleFeintChangeDirection(RE::Actor* actor);
 
@@ -135,10 +146,25 @@ private:
 	phmap::flat_hash_map<RE::ActorHandle, float> ChamberWindow;
 	mutable std::shared_mutex ChamberWindowMtx;
 
-	phmap::flat_hash_map<RE::ActorHandle, float> FeintWindow;
-	// Also guarded by FeintWindowMtx.
+	struct FeintState
+	{
+		// Seconds since the swing's attack-start event; negative = no swing live.
+		float swingElapsed = -1.f;
+		bool pending = false;
+		// The cancel fired; cleared by TakeFeintResolved.
+		bool resolved = false;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, FeintState> Feints;
+	// Also guarded by FeintMtx.
 	phmap::flat_hash_map<RE::ActorHandle, std::chrono::steady_clock::time_point> LastFeintAt;
-	mutable std::shared_mutex FeintWindowMtx;
+	mutable std::shared_mutex FeintMtx;
+	// FeintPointSeconds in the actor's own swing time.
+	static float FeintPoint(RE::Actor* actor);
+public:
+	// The rate the actor's attack clips play at: WeaponSpeedMult x the record speed,
+	// two-handers x1.5 on top (the engine's hidden multiplier). Never below 0.25.
+	static float EffectiveAttackSpeed(RE::Actor* actor);
+private:
 
 	// Old feint:
 	// phmap::flat_hash_map<RE::ActorHandle, float> FeintQueue;
@@ -179,7 +205,7 @@ private:
 		SpeedMod Chain;       // attack chain, 1s
 		SpeedMod SmallChain;  // small attack chain, 2s
 		SpeedMod Charge;      // guard charge cashed in at swing start
-		SpeedMod ChainLine;   // negative: combo continued on a weak line
+		SpeedMod ChainLine;   // negative on a weak line, positive on the weapon's easy follow-up
 		SpeedMod ComboSlow;   // negative SpeedMult: caught in an opponent's combo
 		// The one value ever written to WeaponSpeedMult for this actor. Removals
 		// use THIS, never a recomputed figure, so the slots above can change

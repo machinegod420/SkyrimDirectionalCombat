@@ -28,7 +28,9 @@ namespace Hooks
 			
 			SKSE::Trampoline& Trampoline = SKSE::GetTrampoline();
 			// for 1.7 looks like its the same hook location as 1.6
-			_OnMeleeHit = Trampoline.write_call<5>(hook.address() + REL::VariantOffset(0x3C0, 0x4A8, 0).offset(), OnMeleeHit);
+			const std::uintptr_t Site = hook.address() + REL::VariantOffset(0x3C0, 0x4A8, 0).offset();
+			CheckCallSite(Site, "melee hit", true);
+			_OnMeleeHit = Trampoline.write_call<5>(Site, OnMeleeHit);
 			logger::info("Hook OnMeleeHit");
 		}
 		static void OnMeleeHit(RE::Actor* target, RE::HitData& hitData);
@@ -55,6 +57,54 @@ namespace Hooks
 		static inline REL::Relocation<decltype(OnMissileHit)> _OnMissileHit;
 	};
 
+	// A fencer rates a spell only for its left hand: the vanilla tree would otherwise swap
+	// the weapon out for it, and each swap back rebuilt the AI record. Vtable slots, so no AE offsets.
+	class HookSpellScore
+	{
+	public:
+		static void Install()
+		{
+			// CombatInventoryItemMagic is abstract: every live spell item is a CombatInventoryItemMagicT
+			// instantiation (one per caster kind) with its own vtable copy, so each copy gets the slot.
+			// All copies share the base CalculateScore, hence one saved original.
+			static constexpr std::array SpellItemVtables{
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterOffensive_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterScript_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterParalyze_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterReanimate_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterTargetEffect_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterArmor_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterBoundItem_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterInvisibility_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterLight_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterCloak_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterDisarm_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterStagger_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterSummon_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterRestore_[0],
+				RE::VTABLE_CombatInventoryItemMagicT_CombatInventoryItemMagic_CombatMagicCasterWard_[0],
+			};
+			std::uintptr_t Original = 0;
+			for (const auto& Vtbl : SpellItemVtables)
+			{
+				REL::Relocation<std::uintptr_t> V{ Vtbl };
+				const auto Prev = V.write_vfunc(0xC, CalculateScore);
+				if (!Original)
+				{
+					Original = Prev;
+				}
+				else if (Prev != Original)
+				{
+					logger::warn("SpellScore: a spell item vtable overrides CalculateScore, hook falls back to the base");
+				}
+			}
+			_CalculateScore = Original;
+			logger::info("Hook SpellScore");
+		};
+		static float CalculateScore(RE::CombatInventoryItemMagic* a_this, RE::CombatController* a_controller);
+		static inline REL::Relocation<decltype(CalculateScore)> _CalculateScore;
+	};
+
 	// called before melee hit has been processed
 	//https://github.com/D7ry/valhallaCombat/blob/Master/src/include/Hooks.h#L202
 	class HookBeginMeleeHit
@@ -64,7 +114,12 @@ namespace Hooks
 		{
 			REL::Relocation<std::uintptr_t> OnMeleeHitBase{ RELOCATION_ID(37650, 38603) };
 			auto& trampoline = SKSE::GetTrampoline();
-			_OnBeginMeleeHit = trampoline.write_call<5>(OnMeleeHitBase.address() + REL::Relocate(0x38B, 0x45A), OnBeginMeleeHit);
+			const std::uintptr_t Site = OnMeleeHitBase.address() + REL::Relocate(0x38B, 0x45A);
+			// The call into DealDamage.
+			CheckCallSite(Site, "begin melee hit", true, [](std::uintptr_t a_target) {
+				return a_target == REL::Relocation<std::uintptr_t>{ RELOCATION_ID(37673, 38627) }.address();
+			});
+			_OnBeginMeleeHit = trampoline.write_call<5>(Site, OnBeginMeleeHit);
 			logger::info("Hook BeginMeleeHit");
 
 		}
@@ -84,6 +139,11 @@ namespace Hooks
 			// AE moved this call in 1.7.99: 0xC26 before it, 0xC38 from it on (Precision's offsets).
 			const std::size_t Offset = REL::VariantOffset(0x748,
 				REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_7_99) ? 0xC38 : 0xC26, 0x748).offset();
+			// The call is to a nullsub (ret).
+			CheckCallSite(UpdateBase.address() + Offset, "main update", true, [](std::uintptr_t a_target) {
+				const auto Op = *reinterpret_cast<const std::uint8_t*>(a_target);
+				return Op == 0xC3 || Op == 0xC2;
+			});
 			_Update = trampoline.write_call<5>(UpdateBase.address() + Offset, Update);
 			logger::info("Hook Update");
 
@@ -157,7 +217,15 @@ namespace Hooks
 		{
 			auto& trampoline = SKSE::GetTrampoline();
 			REL::Relocation<std::uintptr_t> AttackActionBase{ RELOCATION_ID(48139, 49170) };
-			_PerformAttackAction = trampoline.write_call<5>(AttackActionBase.address() + REL::Relocate(0x4D7, 0x435), PerformAttackAction);
+			const std::uintptr_t Site = AttackActionBase.address() + REL::Relocate(0x4D7, 0x435);
+			// The call is a virtual-call stub (mov rax,[rcx]; jmp [rax+28h]). The compiler folds
+			// identical stubs, so its bytes count as well as CommonLib's address for it.
+			CheckCallSite(Site, "attack action", true, [](std::uintptr_t a_target) {
+				static constexpr std::uint8_t Stub[] = { 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x28 };
+				return a_target == REL::Relocation<std::uintptr_t>{ RELOCATION_ID(43239, 44440) }.address() ||
+					std::memcmp(reinterpret_cast<const void*>(a_target), Stub, sizeof(Stub)) == 0;
+			});
+			_PerformAttackAction = trampoline.write_call<5>(Site, PerformAttackAction);
 			logger::info("Hook AI attack");
 			logger::info("WARNING: THIS MOD MAY NOT RETURN ON RELOCATION_ID(48139, 49170). THIS MAY RESULT IN COMPATIBILITY ISSUES WITH OTHER SKSE PLUGINS");
 		}
@@ -170,25 +238,6 @@ namespace Hooks
 	class HookAttackRange
 	{
 
-	};
-
-	//https://github.com/max-su-2019/SCAR/blob/main/src/Hook_AttackStart.h#L95
-	class HookHasAttackAngle
-	{
-	public:
-		static void Install()
-		{
-			auto& trampoline = SKSE::GetTrampoline();
-
-			REL::Relocation<std::uintptr_t> AttackDistanceBase{ RELOCATION_ID(48139, 49170) };
-			_GetAttackAngle = trampoline.write_call<5>(AttackDistanceBase.address() + REL::Relocate(0x493, 0x3F1), GetAttackAngle);
-			logger::info("Hook AI Check Attack Angle");
-		}
-
-	private:
-		static bool GetAttackAngle(RE::Actor* a_attacker, RE::Actor* a_target, const RE::NiPoint3& a3, const RE::NiPoint3& a4, RE::BGSAttackData* a_attackData, float a6, void* a7, bool a8);
-
-		static inline REL::Relocation<decltype(GetAttackAngle)> _GetAttackAngle;
 	};
 
 

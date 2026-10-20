@@ -48,14 +48,102 @@ constexpr float DodgeClipSeconds = 1.f;
 constexpr float BashReleaseWaitMax = 0.5f;
 // Stamina headroom before the AI spends its combo finisher as a power attack.
 constexpr float ComboFinisherStaminaRatio = 0.65f;
+// How often a warhammer in a chain picks the opposite of its last swing type.
 // simulates human mouse or contorller input to change guard
 constexpr float GuardInputSeconds = 0.15f;
+// How long a guard switch made against a swing counts as a commitment.
+constexpr float GuardCommitSeconds = 0.6f;
 // Mirrors DirectionHandler's TimeBetweenChanges todo keep it in a central constexpr file to avoid this horrible hack
 constexpr float GuardTransitionSeconds = 0.133f;
 // Decision to actually standing on the new line. Nothing shorter than this is
 // worth chasing — the answer arrives after the target has already moved on.
 constexpr float GuardCommitLatency = GuardInputSeconds + GuardTransitionSeconds;
 constexpr float MaxAttackDirWait = GuardCommitLatency + 0.02f;
+// A queued swing that still can't start this long after its timer ran out is dropped.
+constexpr float StaleSwingSeconds = 1.f;
+// The target's guard sits on the counter of this attack line (pre-covered; up or not).
+static bool LineCovered(RE::Actor* target, Directions line)
+{
+	return DirectionHandler::FoldDirection(DirectionHandler::GetSingleton()->GetCurrentDirection(target)) ==
+		DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(line));
+}
+
+// An enabled attack line the target's guard isn't covering, other than the one held; the
+// held line when every other is covered.
+static Directions OpenLineAgainst(RE::Actor* actor, RE::Actor* target)
+{
+	const Directions Held = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+	Directions Open[4];
+	int Count = 0;
+	const uint8_t Mask = DirectionHandler::EnabledDirections();
+	for (Directions Line : { Directions::TR, Directions::TL, Directions::BL, Directions::BR })
+	{
+		if ((Mask & (1u << static_cast<int>(Line))) && Line != Held && !LineCovered(target, Line))
+		{
+			Open[Count++] = Line;
+		}
+	}
+	return Count > 0 ? Open[static_cast<unsigned>(GetRand()) % Count] : Held;
+}
+
+// Binary entropy of a share: 0 when it is always or never, 1 bit at a coin flip.
+static float Entropy2(float p)
+{
+	p = std::clamp(p, 0.f, 1.f);
+	if (p <= 0.f || p >= 1.f)
+	{
+		return 0.f;
+	}
+	return -(p * std::log2(p) + (1.f - p) * std::log2(1.f - p));
+}
+// Hick's law on the kind axis: how unpredictable the opponent's swing kind is, from the
+// power and feint shares this actor has watched. Pure lights that never feint: 0 bits;
+// half powers and a third feints: ~1.9.
+static float KindBits(float powerShare, float feintLight, float feintPower)
+{
+	const float Feint = feintLight * (1.f - powerShare) + feintPower * powerShare;
+	return Entropy2(powerShare) + Entropy2(Feint);
+}
+#define KIND_BITS(diff) KindBits((diff).powerHabit, (diff).feintHabit[0], (diff).feintHabit[1])
+// Hick's law on the action timer: a read picks among the enabled lines, log2(n+1) bits, 2
+// bits on three lines, which the action timers are calibrated to, plus the kind bits; a
+// press on a line the guard already covers is one bit plus the kind bits.
+static float ReadBitsScale(float kindBits)
+{
+	int Lines = 0;
+	for (uint8_t Mask = DirectionHandler::EnabledDirections(); Mask; Mask >>= 1)
+	{
+		Lines += Mask & 1;
+	}
+	return (std::log2(static_cast<float>(Lines + 1)) + kindBits) / 2.f;
+}
+constexpr float PressBitsScale = 0.5f;
+// Recognition varies swing to swing: uniform within half the tier's timer either way, so a
+// swing the read just beats is blocked most of the time, not every time. Floored where
+// perception itself bottoms out, so the fast tail stays human.
+constexpr float ProcessingFloor = 0.08f;
+static float RollProcessing(float Base, std::mt19937& Rand)
+{
+	std::uniform_real_distribution<float> Spread(0.5f, 1.5f);
+	return std::max(ProcessingFloor, Base * Spread(Rand));
+}
+// Share of NPC feint follow-ups thrown on the feinted line; one that always crosses is a read.
+constexpr float FeintSameLineShare = 0.5f;
+// ForceAttackStop leaves the attack through a 0.167 s blend (1hm_behavior #3544). An attackStart
+// inside it is accepted and never plays: 4 of 6 follow-ups fired at 0.16 s vanished (10-12 log).
+constexpr float FeintFollowupSettle = 0.18f;
+// Charged openers: a light opener held on its line until the guard charge speeds it past a
+// reaction. Patience waits, aggression doesn't, low stamina welcomes the rest.
+constexpr float ChargeShareBase = 0.2f;
+constexpr float ChargeSharePatience = 0.4f;
+constexpr float ChargeShareAggression = 0.2f;
+constexpr float ChargeShareLowStamina = 0.3f;
+constexpr float ChargeShareMax = 0.8f;
+constexpr float ChargeGoalMin = 0.4f;
+// Past the full charge time the hold ends whatever the ratio (a block zeroed it).
+constexpr float ChargeHoldMargin = 0.5f;
+// The hold ends when the target gets this far outside the swing's reach.
+constexpr float ChargeReachSlack = 1.3f;
 
 // Forward travel an attack animation carries the attacker through, rough estimate
 // Kept under the real travel: a swing from too close still lands, one from
@@ -95,6 +183,33 @@ float AIHandler::TargetReachEstimate(RE::Actor* target, const AIDifficulty& diff
 	}
 	return std::max(Estimate, Weapon);
 }
+// A back-dodge's travel t seconds after the decision. Speed 5 with the ease-out over 0.5 s
+// measured 97-120 units end to end; the first frame goes to dispatch.
+constexpr float EscapeTravelUnits = 110.f;
+constexpr float EscapeDuration = 0.5f;
+constexpr float EscapeStartup = 0.05f;
+constexpr float EscapeMarginUnits = 20.f;
+constexpr float DefaultLightWindup = 0.45f;
+constexpr float DefaultPowerWindup = 0.85f;
+static float EscapeTravel(float seconds)
+{
+	const float T = std::clamp((seconds - EscapeStartup) / EscapeDuration, 0.f, 1.f);
+	// Integral of the (1 - t^2) speed profile, normalised to the full travel.
+	return EscapeTravelUnits * 1.5f * (T - T * T * T / 3.f);
+}
+// Will a back-dodge started now be out of their reach when the swing lands? Their reach
+// already carries the step-in and lunge; the windup is the one learned for the kind.
+bool AIHandler::EscapeClearsSwing(RE::Actor* target, const AIDifficulty& diff, Directions line, bool power, float distSq) const
+{
+	const float Threat = TargetReachEstimate(target, diff, line, power) * diff.reachMisjudge;
+	float Windup = power ? diff.powerWindupEstimate : diff.lightWindupEstimate;
+	if (Windup <= 0.f)
+	{
+		Windup = power ? DefaultPowerWindup : DefaultLightWindup;
+	}
+	const float TimeToHit = std::max(0.f, Windup / std::max(0.5f, diff.swingSpeed) - std::max(0.f, diff.swingElapsed));
+	return std::sqrt(distSq) + EscapeTravel(TimeToHit) > Threat + EscapeMarginUnits;
+}
 // Distance a backpedalling target opens during the windup: its travel over ~0.34s.
 constexpr float BackpedalLeadUnits = 40.f;
 // Slack past the estimated target reach before a swing is worth defending. Never
@@ -103,6 +218,18 @@ constexpr float DefendReachBase = 1.0f;
 constexpr float DefendReachCautionScale = 0.2f;
 // The reflex block's reach gate, over that threat. Measured 2026-10-01: no landed swing started past 0.82x.
 constexpr float ReflexThreatMargin = 1.25f;
+// A line change in reach is taken as an attack telegraph with this chance, plus their guard
+// charge (a loaded line) and this actor's caution. Measured 10-12: 73% of the player's switches
+// had no swing behind them, so predicting on every one moved the guard three times per swing.
+constexpr float SwitchThreatBase = 0.35f;
+constexpr float SwitchThreatChargeScale = 0.4f;
+constexpr float SwitchThreatCautionScale = 0.25f;
+constexpr float SwitchThreatFloor = 0.1f;
+// Swinging into the line their switch left, from where the actor stands: by aggression, only
+// when the actor reaches them. Carved out of the cover roll so a switch gets one answer.
+constexpr float PunishBase = 0.3f;
+constexpr float PunishAggressionScale = 0.4f;
+constexpr float PunishMax = 0.8f;
 
 // Extra stamina a cautious actor keeps in hand before attacking, added to every
 // attack threshold so the whole ladder shifts together. 
@@ -204,9 +331,10 @@ constexpr int StructuralRankPrior = 10;
 constexpr float PlayerHabitDecay = 0.95f;
 // Decayed transitions from a line before its row seeds at full strength.
 constexpr float PlayerHabitFullCount = 10.f;
-// Edge points a certain, fully learned habit seeds at Legendary: about three
-// observed transitions' worth.
-constexpr float PlayerHabitSeedMax = 60.f;
+// Edge points a certain, fully learned habit seeds at Legendary: four observed
+// transitions' worth, never certain. The player is a new opponent to every NPC;
+// the seed stands for experience against people, not knowledge of this one.
+constexpr float PlayerHabitSeedMax = 80.f;
 // Share of the profile the lowest tier starts with.
 constexpr float PlayerHabitSeedFloor = 0.1f;
 // Points per second the held line gains at full guard charge.
@@ -249,6 +377,12 @@ constexpr float ShiftEaseSeconds = 2.f;
 // The AI's own attack decision, separate from the engine-driven ladder above.
 // Full rate down to these, then a taper to the floor: two to four fresh swings.
 constexpr float AttackStaminaOffLine = 0.55f;  // attacking off the guarded line
+// A neutral pre-block stays up this long with no swing to answer; an answered swing's
+// block stays up this long after it, so a chain doesn't drop and re-raise it.
+constexpr float PreBlockHoldSeconds = 1.0f;
+constexpr float AnsweredHoldSeconds = 0.3f;
+// A block pressed with the read holds until the chained swing it was pressed for is due.
+constexpr float FlickHoldSeconds = 0.7f;
 constexpr float AttackStaminaFeint = 0.45f;    // the feint branch
 
 constexpr float MaxMistakeRange = 0.05f;
@@ -261,6 +395,8 @@ constexpr float SpacingStaminaWeight = 0.5f;     // fully winded -> give ground
 constexpr float SpacingLockoutWeight = 0.35f;    // can't attack -> proximity is pure risk
 constexpr float SpacingPressWeight = 0.25f;      // per discrete press opportunity
 constexpr float SpacingAdvantageWeight = 0.45f;  // full stamina edge -> close hard
+constexpr float SpacingUnknownWeight = 0.35f;    // no read on them -> mixup range is unsafe
+constexpr float SpacingKnownSum = 40.f;          // expectation chance that counts as a read
 // Offense closes flat out, regardless of personality or weapon. Anything at or
 // below 0.5 bottoms out against SpacingMinBandWidth, so that floor — not this
 // value — is what actually sets the closing distance.
@@ -359,6 +495,8 @@ constexpr float SpacingEaseRate = 4.f;           // exponential ease, ~0.25s to 
 
 // How often the perception layer samples the target.
 constexpr float PerceptionInterval = 0.02f;
+// A line change this close before a swing start is the attack's own switch.
+constexpr float SwitchWithSwingSeconds = 0.06f;
 
 // todo replace with reading game setting
 float BashDistance = 110;
@@ -395,14 +533,14 @@ struct AIPersonalityArchetype
 };
 static constexpr AIPersonalityArchetype kPersonalityArchetypes[] = {
 	// name           agg    pat    bait   caut   pow    feint   reads as
-	{ "Aggressor",   +1.0f, -0.8f, -0.5f, -0.5f, +0.6f,  0.0f }, // charges in, swings constantly, rarely dodges
-	{ "Turtle",      -0.6f, +1.0f, +0.5f, +0.8f, -0.4f, -0.5f }, // holds block, waits, hard to break
-	{ "Trickster",   +0.3f, +0.3f, +0.7f, +0.2f, -0.3f, +1.0f }, // feints constantly, mind games heavy
-	{ "Counter",     -0.1f, +0.8f, +1.0f, +0.5f, +0.3f, +0.4f }, // patient, waits for masterstrike opportunity
-	{ "Brute",       +0.6f, -0.3f, -0.4f, -0.2f, +1.0f, -0.7f }, // power-attack-heavy heavy hitter
-	{ "Evasive",     -0.1f,  0.0f, -0.2f, +1.0f, -0.5f, +0.3f }, // dodges everything, mobile fighter
-	{ "Balanced",     0.0f,  0.0f,  0.0f,  0.0f,  0.0f,  0.0f }, // no lean, every gate at its base value
-	{ "Balanced",     0.0f,  0.0f,  0.0f,  0.0f,  0.0f,  0.0f }, // 2 balanced archetypes because they should be the most common
+	{ "Aggressor",   +1.0f, -0.8f, -0.5f, -0.5f, +0.6f,  +0.2f }, // charges in, swings constantly, rarely dodges
+	{ "Turtle",      -0.3f, +1.0f, +0.5f, +0.8f,  0.0f,  0.0f }, // holds block, waits, hard to break
+	{ "Trickster",   +0.6f, +0.3f, +0.7f, +0.2f, -0.1f, +1.0f }, // feints constantly, mind games heavy
+	{ "Counter",     +0.2f, +0.8f, +1.0f, +0.5f, +0.4f, +0.4f }, // patient, waits for masterstrike opportunity
+	{ "Brute",       +0.8f, -0.3f, -0.4f, -0.2f, +1.0f, -0.5f }, // power-attack-heavy heavy hitter
+	{ "Evasive",      0.0f,  0.0f, -0.2f, +1.0f,  0.2f, +0.5f }, // dodges everything, mobile fighter
+	{ "Balanced",     0.3f,  0.0f,  0.0f,  0.0f,  0.3f,  0.3f }, // no lean, every gate at its base value
+	{ "Balanced",     0.3f,  0.0f,  0.0f,  0.0f,  0.3f,  0.3f }, // 2 balanced archetypes because they should be the most common
 };
 constexpr std::size_t kNumPersonalityArchetypes = std::size(kPersonalityArchetypes);
 
@@ -425,6 +563,18 @@ void AIHandler::InitializeValues(PRECISION_API::IVPrecision3* precision)
 	DifficultyActionTimer[Difficulty::VeryHard] = AISettings::VeryHardActionTimer;
 	// peak human reaction time
 	DifficultyActionTimer[Difficulty::Legendary] = AISettings::LegendaryActionTimer;
+
+	// time to register a stimulus before acting on it
+	DifficultyProcessingTimer[Difficulty::VeryEasy] = AISettings::VeryEasyProcessingTimer;
+	DifficultyProcessingTimer[Difficulty::Easy] = AISettings::EasyProcessingTimer;
+	DifficultyProcessingTimer[Difficulty::Normal] = AISettings::NormalProcessingTimer;
+	DifficultyProcessingTimer[Difficulty::Hard] = AISettings::HardProcessingTimer;
+	DifficultyProcessingTimer[Difficulty::VeryHard] = AISettings::VeryHardProcessingTimer;
+	DifficultyProcessingTimer[Difficulty::Legendary] = AISettings::LegendaryProcessingTimer;
+	for (auto& iter : DifficultyProcessingTimer)
+	{
+		iter.second = std::max(iter.second * AISettings::AIDifficultyMult, 0.02f);
+	}
 
 
 	logger::info("Difficulty Mult is {}", AISettings::AIDifficultyMult);
@@ -452,7 +602,8 @@ void AIHandler::AddAction(RE::Actor* actor, Actions toDo, bool force, int priori
 	// A pending action is replaced only by a higher priority. An unranked one also gives
 	// way once its timer has run out; a ranked one holds until it runs. Forced is priority 1.
 	priority = std::max(priority, force ? 1 : 0);
-	const bool Riposte = toDo == Actions::UnblockRiposte || toDo == Actions::UnblockStartFeint;
+	const bool Riposte = toDo == Actions::UnblockRiposte || toDo == Actions::UnblockPowerRiposte ||
+		toDo == Actions::UnblockStartFeint;
 	// don't do anything if we already have the same action queued
 	if (actor->IsBlocking() && toDo == Actions::Block)
 	{
@@ -559,6 +710,8 @@ void AIHandler::DidAct(RE::Actor* actor)
 		DiffIter->second.observedSwitchCount = 0;
 		// The decision has fired, so a new stimulus may preempt again.
 		DiffIter->second.preemptSpent = false;
+		DiffIter->second.reflexSpent = false;
+		DiffIter->second.switchCameWithSwing = false;
 	}
 	UpdateTimerMtx.lock();
 	UpdateTimer[actor->GetHandle()] = NewTimer;
@@ -586,14 +739,68 @@ bool AIHandler::IsIncomingSwing(RE::Actor* attacker, RE::Actor* defender)
 		IsSwingingAt(attacker, defender) && IsBlockableSwing(attacker);
 }
 
-// Reflex-block ready: hands free, wind to hold, in stance or still outside own reach, and the
-// target's swing can reach. Without that last part the guard went up at any range and held the
-// actor off instead of closing.
+// Reflex-block ready: hands free, wind to hold, and the target's swing can reach. Without
+// that last part the guard went up at any range and held the actor off instead of closing.
+// Any posture: a swing is answered whether the actor was defending or lining up its own.
+float AIHandler::SwitchCoverWeight(RE::Actor* target, const AIDifficulty& diff, float distSq, Directions line, bool comboLive)
+{
+	if (diff.swingElapsed >= 0.f || comboLive)
+	{
+		return 1.f;
+	}
+	const float Slack = std::clamp(DefendReachBase + diff.cautionMod * DefendReachCautionScale, 1.f, 1.6f);
+	const float Reach = TargetReachEstimate(target, diff, line, false) * diff.reachMisjudge * Slack * ReflexThreatMargin;
+	if (distSq >= Reach * Reach)
+	{
+		return 0.f;
+	}
+	return std::clamp(SwitchThreatBase +
+		SwitchThreatChargeScale * DirectionHandler::GetSingleton()->GetGuardChargeRatio(target) +
+		SwitchThreatCautionScale * diff.cautionMod, SwitchThreatFloor, 1.f);
+}
+
+bool AIHandler::SwitchLooksLikeAttack(RE::Actor* actor, RE::Actor* target, AIDifficulty& diff, float distSq, Directions line, bool comboLive)
+{
+	UNUSED(actor);
+	std::uniform_real_distribution<float> Roll(0.f, 1.f);
+	return Roll(diff.npcRand) < SwitchCoverWeight(target, diff, distSq, line, comboLive);
+}
+
+AIHandler::SwitchAnswer AIHandler::AnswerSwitch(RE::Actor* actor, RE::Actor* target, AIDifficulty& diff, float distSq, Directions was, Directions seen, bool comboLive)
+{
+	// Their swing or combo: nothing to punish, the guard answers.
+	if (diff.swingElapsed >= 0.f || comboLive)
+	{
+		return SwitchAnswer::Cover;
+	}
+	const float Cover = SwitchCoverWeight(target, diff, distSq, seen, comboLive);
+	float Attack = 0.f;
+	// Own guard in transit: the swing would come out from a line not judged here.
+	if (!actor->IsAttacking() && GetQueuedAction(actor) == Actions::None && !HasPendingDirectionSwitch(actor))
+	{
+		auto* Dir = DirectionHandler::GetSingleton();
+		const Directions Held = Dir->GetCurrentDirection(actor);
+		// The line they left: covered by the old guard, open to the new one.
+		const bool WasCovered = DirectionHandler::FoldDirection(was) ==
+			DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(Held));
+		const float Reach = GateReach(actor, Held, Dir->GetComboStep(actor) > 0, false);
+		if (WasCovered && !LineCovered(target, Held) && distSq < Reach * Reach &&
+			AttackHandler::GetSingleton()->CanInitiateAttack(actor))
+		{
+			Attack = std::clamp(PunishBase + PunishAggressionScale * diff.aggressionMod, 0.f, PunishMax);
+		}
+	}
+	// Ignore is the cover roll's remainder, so with no swing possible this is that roll unchanged.
+	const float Ignore = 1.f - Cover;
+	std::uniform_real_distribution<float> Roll(0.f, Attack + Cover + Ignore);
+	const float R = Roll(diff.npcRand);
+	return R < Attack ? SwitchAnswer::Attack : R < Attack + Cover ? SwitchAnswer::Cover : SwitchAnswer::Ignore;
+}
+
 bool AIHandler::IsPreparedToBlock(RE::Actor* actor, RE::Actor* target, const AIDifficulty& diff) const
 {
 	const float DistSQ = TorsoDistanceSq(actor, target);
-	const bool Approaching = DistSQ > diff.CurrentWeaponLengthSQ;
-	if ((!diff.defending && !Approaching) || actor->IsBlocking() || actor->IsAttacking())
+	if (actor->IsBlocking() || actor->IsAttacking())
 	{
 		return false;
 	}
@@ -665,7 +872,10 @@ bool AIHandler::HasSwingQueued(RE::Actor* actor)
 {
 	const Actions Queued = GetQueuedAction(actor);
 	return Queued == Actions::Attack || Queued == Actions::PowerAttack || Queued == Actions::Followup ||
-		Queued == Actions::FeintFollowup || Queued == Actions::OpportunityAttack || Queued == Actions::DashAttack;
+		Queued == Actions::FeintFollowup || Queued == Actions::OpportunityAttack || Queued == Actions::DashAttack ||
+		Queued == Actions::StartFeint || Queued == Actions::EndFeint ||
+		Queued == Actions::UnblockRiposte || Queued == Actions::UnblockPowerRiposte ||
+		Queued == Actions::UnblockStartFeint;
 }
 
 void AIHandler::RecordWindupSample(AIDifficulty& diff, float sampleDist, bool power) const
@@ -744,8 +954,12 @@ float AIHandler::CalcSpacingTarget(RE::Actor* actor, RE::Actor* target, const AI
 
 	// Personality sets how often the actor takes its turn, never how close it
 	// stands. Out-reached, it defends while closing instead of standing off.
+	// Pressing is having the wind and the right to attack, not a posture flag:
+	// the standoff below is for the winded and the locked out.
 	const bool Outreached = diff.CurrentWeaponLengthSQ < diff.targetReachSQ * diff.reachMisjudge * diff.reachMisjudge;
-	if (!diff.defending || Outreached)
+	const bool Pressing = ownStaminaRatio > AttackStaminaOffLine &&
+		AttackHandler::GetSingleton()->CanAttack(actor);
+	if (Pressing || Outreached)
 	{
 		// Entering measure is the decision the stamina read gates, scaled by
 		// difficulty: VeryEasy still charges, Legendary waits for the edge.
@@ -789,6 +1003,18 @@ float AIHandler::CalcSpacingTarget(RE::Actor* actor, RE::Actor* target, const AI
 			- diff.cautionMod * SpacingAdvantageCaution,
 		0.f, 2.f);
 	spacing -= staminaEdge * SpacingAdvantageWeight * pressAppetite;
+	// Unknown opponent: with no expectation to fall back on, a switch-and-attack is a
+	// coin flip, so the band moves out until the habits are learned. Belief accrues
+	// 1/condMod per tier, scaled back to one footing; aggression ignores the unknown,
+	// caution can at most fully respect it.
+	{
+		const int Sum = diff.lastCascadeWeights[0] + diff.lastCascadeWeights[1] +
+			diff.lastCascadeWeights[2] + diff.lastCascadeWeights[3];
+		const int CondMod = std::clamp(static_cast<int>(diff.difficulty), 1, 3);
+		const float Known = std::clamp(static_cast<float>(Sum * CondMod) / (3.f * SpacingKnownSum), 0.f, 1.f);
+		const float Respect = std::clamp(1.f + diff.cautionMod - diff.aggressionMod, 0.f, 1.f);
+		spacing += (1.f - Known) * SpacingUnknownWeight * Respect;
+	}
 
 	// Same wide personality spread used everywhere else: a Turtle genuinely
 	// fights at range, an Aggressor crowds.
@@ -866,6 +1092,50 @@ void AIHandler::ApplySpacingExternalCalled(RE::Actor* actor, float* a_inOutInner
 }
 
 // i abandoned good coding conventions a long time ago
+// How hard a tier acts on its read: 1 picks lines in proportion to their weight, the way a
+// novice matches the odds; higher commits to the favourite, the way an expert maximizes.
+static float ReadDecisiveness(AIHandler::Difficulty tier)
+{
+	return 1.f + 0.5f * static_cast<float>(std::max(0, static_cast<int>(tier) - static_cast<int>(AIHandler::Difficulty::VeryEasy)));
+}
+
+// The expectation roll, shared by the reflex and the tick: whether it fires is the raw weight
+// sum; which line it picks is the weights raised to the tier's decisiveness.
+static bool RollExpectation(const int weights[4], float decisiveness, Directions& outPick)
+{
+	const int Sum = weights[0] + weights[1] + weights[2] + weights[3];
+	if (Sum <= 0 || static_cast<int>(mt_rand() % 100) >= Sum)
+	{
+		return false;
+	}
+	float Sharp[4];
+	float Total = 0.f;
+	for (int i = 0; i < 4; ++i)
+	{
+		Sharp[i] = weights[i] > 0 ? std::pow(static_cast<float>(weights[i]), decisiveness) : 0.f;
+		Total += Sharp[i];
+	}
+	float Draw = static_cast<float>(mt_rand() % 10000u) / 10000.f * Total;
+	for (int i = 0; i < 4; ++i)
+	{
+		Draw -= Sharp[i];
+		if (Draw < 0.f && Sharp[i] > 0.f)
+		{
+			outPick = static_cast<Directions>(i);
+			return true;
+		}
+	}
+	for (int i = 3; i >= 0; --i)
+	{
+		if (Sharp[i] > 0.f)
+		{
+			outPick = static_cast<Directions>(i);
+			return true;
+		}
+	}
+	return false;
+}
+
 void AIHandler::RunActor(RE::Actor* actor, float delta)
 {
 	DirectionHandler* DirHandler = DirectionHandler::GetSingleton();
@@ -951,7 +1221,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		diff.statusLogTimer -= delta;
 		if (diff.statusLogTimer <= 0.f)
 		{
-			diff.statusLogTimer = 1.f;
+			diff.statusLogTimer = 2.f;
 			const float Stamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) /
 				std::max(1.f, actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina));
 			logger::info("[tick] {} {:08X} ({} tier {}) -> {} dist {:.0f} own reach {:.0f} target reach {:.0f} judge {} stamina {:.2f} defending {} canAct {} state {} spacing {:.2f} initiative rate {:.2f}/s aggression shift {:+.2f}",
@@ -974,6 +1244,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		{
 			diff.observedTargetId = targetId;
 			diff.hasObservation = false;
+			diff.lastSeenSwingLine = -1;
 			// The shift measured the old matchup.
 			diff.aggressionShift = 0.f;
 			diff.aggressionMod = diff.baseAggression;
@@ -1004,6 +1275,24 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			diff.lastChainFrom = -1;
 			diff.chainSeeded = false;
 		}
+		// A weapon swap changes the windup and reach; the old estimates would mislead.
+		RE::TESForm* const TargetWeapon = target->GetEquippedObject(false);
+		if (diff.observedTargetWeapon != TargetWeapon)
+		{
+			if (Settings::VerboseLogging && (diff.powerWindupEstimate > 0.f || diff.lightWindupEstimate > 0.f))
+			{
+				logger::info("[dmt] {} clears windups and reach: {} swapped weapons", Who(actor), Who(target));
+			}
+			diff.observedTargetWeapon = TargetWeapon;
+			diff.powerWindupEstimate = 0.f;
+			diff.powerWindupDist = 0.f;
+			diff.lightWindupEstimate = 0.f;
+			diff.lightWindupDist = 0.f;
+			for (auto& Row : diff.targetReachLearned)
+			{
+				std::fill(std::begin(Row), std::end(Row), 0.f);
+			}
+		}
 		// Against the player, the graph starts from what fighters have seen of
 		// the player's style, scaled by tier. The lowest tiers meet the player cold,
 		// and so does everyone with LearnAcrossFights off.
@@ -1024,10 +1313,25 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		}
 		diff.timeSinceLineChange += delta;
 		diff.defendTime = diff.defending ? diff.defendTime + delta : 0.f;
+		diff.holdBlockLeft = std::max(0.f, diff.holdBlockLeft - delta);
 		// Pacing for the player: only time spent fighting them counts.
 		if (target->IsPlayerRef() && TargetDistSQ < JudgeRadius * JudgeRadius)
 		{
 			diff.fightSeconds += delta;
+		}
+		// The target's combo wears off: the next swing is an opener again.
+		if (diff.lastSeenSwingLine >= 0)
+		{
+			diff.sinceLastSwing += delta;
+			if (diff.sinceLastSwing >= DifficultySettings::ComboResetTimer)
+			{
+				if (Settings::VerboseLogging)
+				{
+					logger::info("[chain] {} drops {}'s line {} as the node: {:.1f}s without a swing", Who(actor), Who(target),
+						diff.lastSeenSwingLine, diff.sinceLastSwing);
+				}
+				diff.lastSeenSwingLine = -1;
+			}
 		}
 		// Runs per frame, not per perception tick — this is the measurement the
 		// timed block is built on, so its resolution shouldn't be 20ms.
@@ -1039,6 +1343,14 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			if (diff.swingElapsed > PowerWindupTimeout)
 			{
 				diff.swingElapsed = -1.f;
+			}
+		}
+		if (diff.guardMovedAgo >= 0.f)
+		{
+			diff.guardMovedAgo += delta;
+			if (diff.guardMovedAgo > GuardCommitSeconds)
+			{
+				diff.guardMovedAgo = -1.f;
 			}
 		}
 		// Framerate-independent ease toward the tick-computed spacing
@@ -1053,6 +1365,9 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 		diff.perceptionAccum = 0.f;
 
 		const Directions seen = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
+		// The guard they left, for the switch answer below.
+		const Directions Was = diff.lastObservedDirection;
+		bool lineChanged = false;
 		if (!diff.hasObservation)
 		{
 			diff.hasObservation = true;
@@ -1067,6 +1382,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			}
 			diff.lastObservedDirection = seen;
 			diff.timeSinceLineChange = 0.f;
+			lineChanged = true;
 			// Not a preempt: a switch is information, not a threat, and spending
 			// the reaction on it leaves none for the swing that follows.
 		}
@@ -1091,26 +1407,40 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			// A new swing's first tick may spike, even mid-chain where the
 			// target never stops swinging between swings.
 			diff.sawSwingLastTick = false;
+			// A switch that arrives with the swing is the attack, not a show: it must not
+			// condition the line left behind.
+			if (targetAttackState != RE::ATTACK_STATE_ENUM::kBash && diff.observedSwitchCount > 0 &&
+				diff.timeSinceLineChange <= SwitchWithSwingSeconds)
+			{
+				diff.observedSwitchCount--;
+				diff.switchCameWithSwing = true;
+			}
 
 			// Arm the swing lifecycle: timed from here to the hit for the windup estimates.
 			diff.swingElapsed = 0.f;
+			diff.sinceLastSwing = 0.f;
+			diff.swingCorrectionLogged = false;
+			diff.answerKind = diff.reflexPickValid ? "expect-pre" : "none";
+			diff.answerLater = nullptr;
+			diff.answerAt = -1.f;
+			diff.pressAt = -1.f;
+			diff.swingContact = false;
+			diff.swingChained = DirectionHandler::GetSingleton()->GetComboStep(target) > 0;
 			diff.swingWasPower = IsPowerAttacking(target);
 			// For the reach learner: where their swing started, and where I stood.
 			diff.swingStartGap = std::sqrt(TargetDistSQ);
 			diff.swingStartOwnPos = actor->GetPosition();
 			diff.swingLine = static_cast<int>(seen) < 4 ? static_cast<int>(seen) : -1;
-			// Non-positive would divide by zero below; the required speed fix makes 1.0 the base.
-			const float Speed = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kWeaponSpeedMult);
-			diff.swingSpeed = Speed > 0.f ? Speed : 1.f;
-			// Chain graph: walk the edge from the target's last landed line to
-			// this swing's. No landed line in the ring walks the opener row.
+			// The clip's playback rate (AV x record speed, two-handers x1.5): a windup learned
+			// at "base speed" is then in clip time and survives their weapon swaps and a retune.
+			diff.swingSpeed = AttackHandler::EffectiveAttackSpeed(target);
+			// Chain graph: walk the edge from the last swing line seen to this one. Keyed by
+			// what was seen, not the combo ring, so the sequence read survives blocks,
+			// finishers and pauses; the first swing seen walks the opener row.
 			diff.lastChainFrom = -1;
-			Directions ChainFrom;
-			const bool Chained = DirectionHandler::GetSingleton()->GetLastAttackDirection(target, ChainFrom);
-			if (targetAttackState != RE::ATTACK_STATE_ENUM::kBash &&
-				(!Chained || static_cast<int>(ChainFrom) < 4) && static_cast<int>(seen) < 4)
+			if (targetAttackState != RE::ATTACK_STATE_ENUM::kBash && static_cast<int>(seen) < 4)
 			{
-				const int From = Chained ? static_cast<int>(ChainFrom) : OpenerRow;
+				const int From = diff.lastSeenSwingLine >= 0 ? diff.lastSeenSwingLine : OpenerRow;
 				const int To = static_cast<int>(seen);
 				for (int i = 0; i < 4; ++i)
 				{
@@ -1120,6 +1450,62 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				}
 				diff.lastChainFrom = From;
 				diff.lastChainTo = To;
+			}
+			// Chain escape: a chained swing is a mixup, so a cautious fighter leaves instead of
+			// guessing the line. Decided here, on the frame the swing is seen: from the tick a
+			// dodge starts ~190 ms late and no longer clears the hitbox. Caution is the rate.
+			if (Settings::ActiveDodgeSystem != DodgeSystem::None &&
+				targetAttackState != RE::ATTACK_STATE_ENUM::kBash && !actor->IsAttacking() &&
+				diff.DodgeCooldown <= 0.f && IsSwingingAt(target, actor) &&
+				DirectionHandler::GetSingleton()->GetComboStep(target) > 0)
+			{
+				const float Threat = TargetReachEstimate(target, diff, seen, diff.swingWasPower) * diff.reachMisjudge;
+				const float Stamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) /
+					std::max(1.f, actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina));
+				// Decided at their switch when one was seen (the flick pressed the block instead when
+				// it chose to stay); undecided swings, a same-line chain, roll here.
+				const bool Chosen = diff.chainAnswer == 2;
+				const bool Go = diff.chainAnswer != 0 ? Chosen :
+					static_cast<float>(mt_rand() % 10000u) / 10000.f < std::clamp(diff.cautionMod, 0.f, 1.f);
+				diff.chainAnswer = 0;
+				// Only when the dodge is out of reach by the hit frame: inside a sword's reach it
+				// never is, and a dodge that gets hit has dropped the guard for nothing.
+				const bool Clears = EscapeClearsSwing(target, diff, seen, diff.swingWasPower, TargetDistSQ);
+				if (TargetDistSQ < Threat * Threat && Stamina > 0.3f && Go && Clears)
+				{
+					// The dodge can't fire through a raised guard; drop it now, the queue takes the dodge
+					// the frame the graph lets go. Priority 2 so the defend branch's block can't displace it.
+					const bool GuardWasUp = actor->IsBlocking();
+					if (GuardWasUp)
+					{
+						actor->AsActorState()->actorState2.wantBlocking = 0;
+						actor->NotifyAnimationGraph("blockStop");
+					}
+					AddAction(actor, Actions::Dodge, true, 2, DodgeDirection::Backward);
+					// Measured: through the action timer the dodge started ~200-240 ms after this frame
+					// and had moved ~50 units by a light's hit frame, so 4 of 5 escapes were still hit.
+					if (GetQueuedAction(actor) == Actions::Dodge)
+					{
+						ExpediteQueuedAction(actor);
+					}
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[escape] {} leaves {}'s chained swing from {} at {:.0f} (caution {:.2f}, guard was {})",
+							Who(actor), Who(target), static_cast<int>(seen), std::sqrt(TargetDistSQ), diff.cautionMod, GuardWasUp);
+					}
+				}
+				else if (Chosen && !actor->IsBlocking())
+				{
+					// The escape decided at their switch displaced the block press; it can't go, so
+					// the block is pressed now instead of standing on nothing.
+					AddAction(actor, Actions::Block, true);
+					diff.holdBlockLeft = std::max(diff.holdBlockLeft, FlickHoldSeconds);
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[escape] {} can't clear {}'s chained swing from {} at {:.0f}, blocks instead",
+							Who(actor), Who(target), static_cast<int>(seen), std::sqrt(TargetDistSQ));
+					}
+				}
 			}
 			if (Settings::VerboseLogging)
 			{
@@ -1133,8 +1519,8 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			}
 
 			// Reflex, once per swing: chamber it or block it, paying only the action timer.
-			const bool Prepared = IsPreparedToBlock(actor, target, diff) && IsBlockableSwing(target) &&
-				CanAnswerLine(actor, target, diff);
+			// The line is the read's business; the guard comes up regardless.
+			const bool Prepared = IsPreparedToBlock(actor, target, diff) && IsBlockableSwing(target);
 			bool Chambered = false;
 			if (Prepared)
 			{
@@ -1178,12 +1564,15 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 			}
 			if (Prepared && !Chambered)
 			{
-				// Full action timer: "prepared" is worth the skipped decision stage.
-				// Against an expected power the press waits out the learned windup.
+				// A one-bit reaction: register the swing, then half the action timer (the guard
+				// already covers the line, so there is no line to choose). AddAction floors it at
+				// the action timer. Against an expected power the press waits out the learned windup.
 				const bool ExpectPower = RollPowerParryRead(diff.difficulty) ?
 					diff.swingWasPower :
 					static_cast<float>(mt_rand() % 10000u) < diff.powerHabit * 10000.f;
-				float TargetDelay = -1.f;
+				// The press chooses now / later / hold: their kind mixup is its extra bits.
+				float TargetDelay = RollProcessing(CalcProcessingTimer(actor), diff.npcRand) +
+					CalcActionTimer(actor) * (PressBitsScale + KIND_BITS(diff) * 0.5f);
 				if (ExpectPower && diff.powerWindupEstimate > 0.f)
 				{
 					// Shift the estimate to this swing's gap.
@@ -1200,10 +1589,64 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				}
 				AddAction(actor, Actions::Block, true, 0,
 					DodgeDirection::Backward, TargetDelay);
+				diff.pressAt = std::max(CalcActionTimer(actor), TargetDelay);
 				if (Settings::VerboseLogging)
 				{
 					logger::info("[dmt] {} {:08X} reflex block, delay {:.0f}ms (expects power {}, swing is power {})",
 						actor->GetName(), actor->GetFormID(), std::max(TargetDelay, 0.f) * 1000.f, ExpectPower, diff.swingWasPower);
+				}
+			}
+			// The read, decided on the frame that sees the swing: the guard is off their line and
+			// no expectation is already carrying it there. Priced as a human reaction, recognition
+			// plus the action timer for the choice of line, plus the fixation when the guard
+			// already moved this swing (a wrong prediction). A bash is spacing's problem.
+			if (targetAttackState != RE::ATTACK_STATE_ENUM::kBash && static_cast<int>(seen) < 4 &&
+				TargetDistSQ < JudgeRadius * JudgeRadius && !actor->IsAttacking() && IsSwingingAt(target, actor))
+			{
+				const Directions Counter = DirectionHandler::GetCounterDirection(seen);
+				const bool OnAngle = DirectionHandler::GetSingleton()->HasBlockAngle(target, actor);
+				// The guard already covers the swing: a prediction still moving it elsewhere was wrong,
+				// and the swing in flight is the proof. Hold the line instead.
+				if (OnAngle && HasPendingDirectionSwitch(actor) && !IsSwitchUnderway(actor, Counter))
+				{
+					CancelSwitchUnderway(actor);
+					diff.answerKind = "hold-cancel";
+					diff.answerAt = 0.f;
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[dmt] {} holds its line against {}'s swing from {}: the pending switch was wrong", Who(actor), Who(target), static_cast<int>(seen));
+					}
+				}
+				else if (!OnAngle && !IsSwitchUnderway(actor, Counter))
+				{
+					const Directions Covered = DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(
+						DirectionHandler::GetSingleton()->GetCurrentDirection(actor)));
+					const float Fixation = static_cast<float>(diff.directionChangeChance[Covered]) /
+						static_cast<float>(BeliefBudget) * AISettings::ConditionedFixationSeconds;
+					const float Commit = diff.guardMovedAgo >= 0.f ? Fixation : 0.f;
+					const float Input = RollProcessing(CalcProcessingTimer(actor), diff.npcRand) +
+						CalcActionTimer(actor) * ReadBitsScale(KIND_BITS(diff)) + Commit;
+					QueueDirectionSwitch(actor, Counter, true, Input);
+					diff.guardMovedAgo = 0.f;
+					diff.swingCorrectionLogged = true;
+					diff.answerKind = "read";
+					diff.answerAt = Input + GuardTransitionSeconds;
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[dmt] {} reads {}'s swing from {}: guard counts in {:.0f}ms (commit cost {:.0f}ms)",
+							Who(actor), Who(target), static_cast<int>(seen), (Input + GuardTransitionSeconds) * 1000.f, Commit * 1000.f);
+					}
+				}
+				else if (OnAngle)
+				{
+					// Already on their line: nothing to decide, the press carries it.
+					diff.answerKind = "hold";
+					diff.answerAt = 0.f;
+				}
+				else
+				{
+					// A switch to the counter is already in flight from an earlier decision.
+					diff.answerKind = "underway";
 				}
 			}
 			// Learned after the guess, so the guess only uses past swings.
@@ -1222,11 +1665,119 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				const bool Feinted = AttackHandler::GetSingleton()->SecondsSinceFeint(target) <= diff.swingElapsed;
 				float& Habit = diff.feintHabit[diff.swingWasPower ? 1 : 0];
 				Habit += ((Feinted ? 1.f : 0.f) - Habit) * FeintHabitWeight;
+				// Exchange record for a swing that never connected.
+				if (!diff.swingContact && target->IsPlayerRef())
+				{
+					LogExchangeLine(target, actor, &diff, Feinted ? "feinted" : "whiff", 0.f);
+				}
+			}
+			// The chain node moves on only once the swing is over: while it is in flight the
+			// row keyed by the previous swing is the one that predicts it.
+			if (diff.swingLine >= 0 && diff.lastObservedAttackState != static_cast<int>(RE::ATTACK_STATE_ENUM::kBash))
+			{
+				diff.lastSeenSwingLine = diff.swingLine;
 			}
 			// swingStartGap stays armed: the hit can land after this state change.
 			diff.swingElapsed = -1.f;
+			// A chain answer decided for a swing that has now passed is spent.
+			diff.chainAnswer = 0;
 		}
 		diff.lastObservedAttackState = static_cast<int>(targetAttackState);
+
+		// Reflex expectation: the line changed, so a defending guard goes to the expected
+		// counter now, paying only the input. The tick keeps this pick instead of rolling
+		// again, and its read still comes due at its own time. The move is a commitment.
+		Directions Pick = Directions::TR;
+		// Gated on the actor's own swing, not the defend flag: a switch is the stimulus
+		// whether the actor was defending, closing or lining up a poke.
+		const bool ComboLive = lineChanged && DirectionHandler::GetSingleton()->GetComboStep(target) > 0;
+		// One answer per switch: swing into the line they left, move the guard, or nothing.
+		const SwitchAnswer Answer = lineChanged ? AnswerSwitch(actor, target, diff, TargetDistSQ, Was, seen, ComboLive) : SwitchAnswer::Ignore;
+		if (Answer == SwitchAnswer::Attack)
+		{
+			// See-and-go from the held line: one stimulus, one choice, so press-sized bits. Priority
+			// 0, so a forced block from their swing start replaces it. From a raised guard it takes
+			// the riposte's path (blockStop, settle, swing), which keeps rank into the swing.
+			AddAction(actor, actor->IsBlocking() ? Actions::UnblockRiposte : Actions::Attack, false, 0, DodgeDirection::Backward,
+				RollProcessing(CalcProcessingTimer(actor), diff.npcRand) + CalcActionTimer(actor) * PressBitsScale);
+			if (Settings::VerboseLogging)
+			{
+				logger::info("[punish] {} swings into {}'s switch from {} to {}: line {} opened at {:.0f} (aggression {:.2f})",
+					Who(actor), Who(target), static_cast<int>(Was), static_cast<int>(seen),
+					static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)), std::sqrt(TargetDistSQ), diff.aggressionMod);
+			}
+		}
+		// A pick still held from an earlier switch doesn't disarm this one: the newest read wins
+		// (the match function that spends a pick is skipped while an attack is queued).
+		// A swing already in flight on this frame is read, not predicted: the start edge above
+		// queued the switch to its actual line, and a forced prediction would overwrite it.
+		const bool AttackLike = Answer == SwitchAnswer::Cover;
+		const bool ReflexArmed = lineChanged && !actor->IsAttacking() && TargetDistSQ < JudgeRadius * JudgeRadius &&
+			!diff.reflexSpent && !(inSwingPhase && !wasSwingPhase) && AttackLike;
+		if (ReflexArmed)
+		{
+			// The row as the chain node stands this frame, not the tick's copy: the node moved on
+			// the hit frame, and a chain switch lands before the next tick refreshes the cache.
+			ComputeCascade(target, diff);
+		}
+		const bool ReflexFired = ReflexArmed && RollExpectation(diff.lastCascadeWeights, ReadDecisiveness(diff.difficulty), Pick);
+		if (ReflexFired)
+		{
+			for (Directions Dir : { Directions::TR, Directions::TL, Directions::BL, Directions::BR })
+			{
+				diff.directionChangeChance[Dir] = std::max(0, diff.directionChangeChance[Dir] - AISettings::BeliefCascadeDrain);
+			}
+			diff.reflexPick = Pick;
+			diff.reflexPickValid = true;
+			diff.reflexSpent = true;
+			const Directions ToSwitch = DirectionHandler::GetCounterDirection(Pick);
+			// Forced between their chained swings too: a correction still pending there is for
+			// a swing that has already landed, and it was refusing the read's switch.
+			QueueDirectionSwitch(actor, ToSwitch, diff.swingElapsed >= 0.f || ComboLive, GuardInputSeconds);
+			if (DirectionHandler::FoldDirection(ToSwitch) != DirectionHandler::GetSingleton()->GetCurrentDirection(actor))
+			{
+				diff.guardMovedAgo = 0.f;
+			}
+			// The flick: with their combo live the next swing is due within ~1 s, and a block
+			// pressed on seeing it goes live ~0.4 s later, a coin flip. So the press rides with
+			// the read, as the player's does. Not expedited: the switch request must reach the
+			// handler before the guard is up, or the landing kills the parry window. A cautious
+			// fighter that will escape the swing keeps its guard down instead: one answer per swing.
+			if (ComboLive && !actor->IsBlocking())
+			{
+				// Decided with the escape's own gates: a chained swing is a light until it isn't.
+				const bool Escapes = Settings::ActiveDodgeSystem != DodgeSystem::None && diff.DodgeCooldown <= 0.f &&
+					static_cast<float>(mt_rand() % 10000u) / 10000.f < std::clamp(diff.cautionMod, 0.f, 1.f) &&
+					EscapeClearsSwing(target, diff, seen, false, TargetDistSQ);
+				diff.chainAnswer = Escapes ? 2 : 1;
+				if (!Escapes)
+				{
+					AddAction(actor, Actions::Block, true);
+					// Outlives the tail's "nothing to answer" release until the swing is due.
+					diff.holdBlockLeft = std::max(diff.holdBlockLeft, FlickHoldSeconds);
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[flick] {} presses with the read on {}'s chain (switch to {})", Who(actor), Who(target), static_cast<int>(seen));
+					}
+				}
+			}
+			if (Settings::VerboseLogging)
+			{
+				logger::info("[dmt] {} {:08X} reflex expects {} on {}'s switch to {}: {} (weights {} {} {} {})",
+					actor->GetName(), actor->GetFormID(), static_cast<int>(Pick), Who(target), static_cast<int>(seen),
+					Pick == seen ? "right" : "wrong",
+					diff.lastCascadeWeights[0], diff.lastCascadeWeights[1], diff.lastCascadeWeights[2], diff.lastCascadeWeights[3]);
+			}
+		}
+		else if (Settings::VerboseLogging && ComboLive && TargetDistSQ < JudgeRadius * JudgeRadius)
+		{
+			// Why a chained switch got no expectation: a closed gate, or the roll on these
+			// weights (the tick's copy when the gate was closed).
+			logger::info("[dmt] {} {:08X} reflex passes on {}'s switch to {}: armed {} (answer {}, attacking {}, spent {}, pick held {}, dist {:.0f}) weights {} {} {} {}",
+				actor->GetName(), actor->GetFormID(), Who(target), static_cast<int>(seen), ReflexArmed, static_cast<int>(Answer),
+				actor->IsAttacking(), diff.reflexSpent, diff.reflexPickValid, std::sqrt(TargetDistSQ),
+				diff.lastCascadeWeights[0], diff.lastCascadeWeights[1], diff.lastCascadeWeights[2], diff.lastCascadeWeights[3]);
+		}
 
 		// Attention capture: the clock restarts from the stimulus, so a swing is
 		// answered one update timer later wherever it fell in the tick grid.
@@ -1417,20 +1968,26 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					AddAction(actor, Actions::Attack);
 					DontChangeDirection = true;
 				}
-				// Poke: they can't reach me on the line they hold, I can reach them on
-				// mine, and their guard isn't answering it. Opportunistic, bait-scaled.
-				else if (!TargetSwingingAtMe && !Recovering && diff.baitTendency > 0.f &&
+				// Poke from outside their reach: free, at the full rate, since a longer weapon
+				// abuses its reach. Inside their reach it is rolled in the tail, on a tick the
+				// pattern passed on.
+				else if (!TargetSwingingAtMe && !Recovering &&
 					TargetDistSQ > ThreatReachSQ &&
 					TargetDistSQ < PokeReach * PokeReach &&
 					(!IsGuardUp(target) || DirHandler->GetCurrentDirection(target) !=
 						DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(Poke))) &&
 					CurrentStaminaRatio > AttackStaminaOffLine + StaminaReserve(diff.cautionMod) &&
 					AttackHandler::GetSingleton()->CanAttack(actor) &&
-					RollPerSecond(PokeRatePerSecond * diff.baitTendency, Tick))
+					RollPerSecond(PokeRatePerSecond, Tick))
 				{
 					DirHandler->WantToSwitchTo(actor, Poke, true);
 					AddAction(actor, Actions::Attack);
 					DontChangeDirection = true;
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[poke] {} thrusts at {} from {} at {:.0f} (outside their reach)", Who(actor), Who(target),
+							static_cast<int>(Poke), std::sqrt(TargetDistSQ));
+					}
 				}
 				// Most important case, attempt to defend
 				else if (TargetSwingingAtMe && IsBlockableSwing(target) && TargetInThreatRange)
@@ -1460,6 +2017,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 						CurrentStaminaRatio > StaminaGate(0.45f, -1.f, diff.cautionMod, diff.aggressionMod) &&
 						TargetDistSQ < PerceivedReachSQ &&
 						TargetDistSQ > PerceivedReachSQ * DodgeRimFraction &&
+						EscapeClearsSwing(target, diff, DirHandler->GetCurrentDirection(target), diff.swingWasPower, TargetDistSQ) &&
 						// rolls per decision tick, so it compounds across an
 						// attack — keep the per-tick odds low
 						RollTickScaled(std::max(RimEvadeRollFloor, 1.0f + diff.cautionMod * 3.0f), 40.f, Tick))
@@ -1501,7 +2059,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					CurrentStaminaRatio > 0.3f)
 				{
 					AddAction(actor, Actions::Block, true);
-					diff.defending = true;
+					diff.holdBlockLeft = DifficultySettings::AttackTimeoutTime;
 					ShouldDirectionMatch = true;
 					if (DirHandler->HasBlockAngle(target, actor))
 					{
@@ -1514,7 +2072,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				else if (wantPreBlock)
 				{
 					AddAction(actor, Actions::Block, true);
-					diff.defending = true;
+					diff.holdBlockLeft = PreBlockHoldSeconds;
 					ShouldDirectionMatch = true;
 					if (DirHandler->HasBlockAngle(target, actor))
 					{
@@ -1605,7 +2163,9 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				}
 				// too close, try to attack to prevent the bash. Aggression-
 				// modulated: aggressive NPCs counter-attack more readily.
-				else if (TargetDistSQ < (BashDistanceSq + 1500) && !actor->IsAttacking() && RollTickScaled((mod * 0.5f) + 2 + diff.aggressionMod * 2.0f, 14.f, Tick)
+				// Never into a dagger, whose bash beats the attack.
+				else if (TargetDistSQ < (BashDistanceSq + 1500) && !actor->IsAttacking() && !HoldsDagger(target) &&
+					RollTickScaled((mod * 0.5f) + 2 + diff.aggressionMod * 2.0f, 14.f, Tick)
 					&& AttackHandler::GetSingleton()->CanAttack(target) && AttackHandler::GetSingleton()->CanAttack(actor)
 					&& CurrentStaminaRatio > StaminaGate(0.4f, 1.f, diff.cautionMod, diff.aggressionMod))
 				{
@@ -1632,7 +2192,7 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 				// Release the block to save stamina, patience-modulated; never
 				// during our own attack lockout, when the shell is all we have.
 				else if (actor->IsBlocking() && AttackHandler::GetSingleton()->CanAttack(actor) &&
-					diff.numTimesDirectionSame < 1 &&
+					diff.numTimesDirectionSame < 1 && diff.chainAnswer != 1 &&
 					(RollTickScaled(3.0f - diff.patienceMod * 1.5f, 5.f, Tick) || CurrentStaminaRatio < 0.6))
 				{
 					AddAction(actor, Actions::EndBlock);
@@ -1683,57 +2243,29 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 					}
 					AddAction(actor, Actions::Dodge, false, 0, probeDir);
 				}
-				// always hard defend if cant attack (attack was parried)
-				if (!AttackHandler::GetSingleton()->CanAttack(actor))
+				// Defending means answering a swing in flight, nothing more: it ends with the swing.
+				// The block outlives it briefly, so a chain doesn't drop and re-raise it.
+				if (diff.defending && !TargetSwingingAtMe)
 				{
-					diff.defending = true;
+					diff.defending = false;
+					diff.numTimesDirectionsSwitched = 2;
+					diff.numTimesDirectionSame = 0;
+					diff.holdBlockLeft = std::max(diff.holdBlockLeft, AnsweredHoldSeconds);
 				}
-				if (diff.defending)
+				// A block with nothing to answer comes down, unless a pre-block is holding it.
+				if (!diff.defending && actor->IsBlocking() && diff.holdBlockLeft <= 0.f)
 				{
-					ShouldDirectionMatch = true;
-					// Offense exit on a clock: patience sets it, aggression ends it,
-					// a strong read doubles it; recovering skips it.
-					if (!TargetSwingingAtMe &&
-						AttackHandler::GetSingleton()->CanAttack(actor) &&
-						(Recovering ||
-						(diff.defendTime >= AISettings::DefendPatienceSeconds *
-							std::clamp(1.f + diff.patienceMod, 0.3f, 2.f) *
-							(strongRead ? 2.f : 1.f) &&
-						// floored: at aggression <= -0.67 the raw expression goes
-						// non-positive and the exit can never fire, stranding
-						// passive archetypes in defense
-						RollTickScaled(std::max(1.f, 2.0f + diff.aggressionMod * 3.0f), 10.f, Tick))))
-					{
-						diff.defending = false;
-						diff.numTimesDirectionsSwitched = 2;
-						diff.numTimesDirectionSame = 0;
-						if (actor->IsBlocking())
-						{
-							AddAction(actor, Actions::EndBlock);
-						}
-						ShouldDirectionMatch = false;
-					}
+					AddAction(actor, Actions::EndBlock);
+					DontChangeDirection = false;
 				}
-				else
-				{
-					// Not defending
-					if (actor->IsBlocking())
-					{
-						AddAction(actor, Actions::EndBlock);
-						DontChangeDirection = false;
-						ShouldDirectionMatch = false;
-					}
-				}
-							
 
 				if (!DontChangeDirection)
 				{
-					// Tracking a target that can't reach me only spends switches; a real swing still answers.
-					if (ShouldDirectionMatch && (TargetSwingingAtMe || TargetInThreatRange))
-					{
-						DirectionMatchTarget(actor, target, TargetSwingingAtMe);
-					}
-					else
+					// Offense is decided every tick no swing is being answered, except while a chosen
+					// swing is still queued: a new pick would replace it before it could start (its
+					// protection is one action timer; its line switch or chain window takes longer).
+					// The runner drops a swing that never gets its window, so this can't park the offense.
+					if (!diff.defending && AttackHandler::GetSingleton()->CanAttack(actor) && !HasSwingQueued(actor))
 					{
 						// Lead a retreating target: test the swing against where it
 						// will be, not where it is.
@@ -1743,6 +2275,48 @@ void AIHandler::RunActor(RE::Actor* actor, float delta)
 							AttackDist += BackpedalLeadUnits;
 						}
 						SwitchToNewDirection(actor, target, AttackDist * AttackDist);
+					}
+					// The guard stays on them in every posture, out to the judge radius so it
+					// is set as they close. Only a swing that already asked for its line keeps
+					// it, and that swing waits for the line to land.
+					const Actions Queued = GetQueuedAction(actor);
+					bool AttackQueued = Queued == Actions::Attack || Queued == Actions::PowerAttack ||
+						Queued == Actions::FeintFollowup || Queued == Actions::StartFeint ||
+						Queued == Actions::DashAttack || Queued == Actions::OpportunityAttack ||
+						Queued == Actions::Followup || Queued == Actions::UnblockRiposte ||
+						Queued == Actions::UnblockPowerRiposte || Queued == Actions::UnblockStartFeint;
+					// Inside their reach the thrust is the turn taken between their swings, on a
+					// tick the pattern passed on: the loops, powers and feints decide first.
+					if (!AttackQueued && !diff.defending && !TargetSwingingAtMe && !Recovering &&
+						TargetDistSQ <= ThreatReachSQ && TargetDistSQ < PokeReach * PokeReach &&
+						(!IsGuardUp(target) || DirHandler->GetCurrentDirection(target) !=
+							DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(Poke))) &&
+						CurrentStaminaRatio > AttackStaminaOffLine + StaminaReserve(diff.cautionMod) &&
+						AttackHandler::GetSingleton()->CanAttack(actor) &&
+						RollPerSecond(PokeRatePerSecond * std::clamp(0.5f + diff.aggressionMod + diff.baitTendency, 0.25f, 1.5f), Tick))
+					{
+						// Queue first: a pending EndBlock refuses the attack this tick, and a thrust
+						// that was refused must not move the guard or claim the tick.
+						AddAction(actor, Actions::Attack);
+						if (GetQueuedAction(actor) == Actions::Attack)
+						{
+							DirHandler->WantToSwitchTo(actor, Poke, true);
+							AttackQueued = true;
+							if (Settings::VerboseLogging)
+							{
+								logger::info("[poke] {} thrusts at {} from {} at {:.0f} (inside their reach)", Who(actor), Who(target),
+									static_cast<int>(Poke), std::sqrt(TargetDistSQ));
+							}
+						}
+					}
+					// Mid-chain the hand stays on its own next line, or every chained swing
+					// would pay a switch back; a swing coming in still gets its read.
+					bool PrevPower = false;
+					const bool InChain = AttackHandler::GetSingleton()->InAttackChain(actor, PrevPower);
+					if (!AttackQueued && !actor->IsAttacking() && (TargetSwingingAtMe || !InChain) &&
+						(TargetSwingingAtMe || TargetDistSQ < JudgeRadius * JudgeRadius))
+					{
+						DirectionMatchTarget(actor, target, TargetSwingingAtMe);
 					}
 				}
 			}
@@ -1828,36 +2402,39 @@ void AIHandler::TryRiposteExternalCalled(RE::Actor* actor, RE::Actor*)
 	{
 
 		SwitchToNextAttack(actor);
-		// A blind feint: a guess that they'll commit to defending the riposte. Their guard
-		// here is just the line they swung from, so there's nothing of theirs to read.
-		bool ShouldFeint = !DirectionHandler::GetSingleton()->IsUnblockable(actor);
 		float TotalStamina = actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 		float CurrentStamina = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 		if (CurrentStamina > TotalStamina * 0.15f)
 		{
-			DifficultyMap[actor->GetHandle()].defending = false;
+			AIDifficulty& Diff = DifficultyMap[actor->GetHandle()];
+			Diff.defending = false;
 			// The next tick may spike the blocked swing again if it's still running.
-			DifficultyMap[actor->GetHandle()].sawSwingLastTick = false;
-			if (CurrentStamina < TotalStamina * 0.4f)
+			Diff.sawSwingLastTick = false;
+			// The riposte carries the personality's kind roll, same shares as the open-line pick:
+			// the attacker is locked out, so this is where a feint or a power bites hardest. The
+			// unblockable finisher stays a plain riposte; both heavier kinds need a power's stamina.
+			const bool PowerAffordable = !DirectionHandler::GetSingleton()->IsUnblockable(actor) &&
+				CurrentStamina >= AttackHandler::GetSingleton()->SwingStaminaCost(actor, true);
+			const float FeintShare = std::clamp((1.f + Diff.feintTendency) / 3.f, 0.f, 1.f);
+			const float DieShare = std::clamp((1.f + 1.5f * Diff.powerAttackTendency) / 3.f, 0.f, 1.f);
+			Actions Pick = Actions::UnblockRiposte;
+			if (PowerAffordable && CurrentStamina >= TotalStamina * 0.4f &&
+				static_cast<float>(mt_rand() % 10000u) / 10000.f < FeintShare)
 			{
-				ShouldFeint = false;
+				Pick = Actions::UnblockStartFeint;
 			}
-			// Rare, and only for feint-leaning personalities: feinting here gives up the
-			// riposte turn, landing after the attacker's lockout has run out.
-			const float FeintShare = std::clamp(0.3f * DifficultyMap[actor->GetHandle()].feintTendency, 0.f, 1.f);
-			if (static_cast<float>(mt_rand() % 10000u) >= FeintShare * 10000.f)
+			else if (PowerAffordable && static_cast<float>(mt_rand() % 10000u) / 10000.f < DieShare)
 			{
-				ShouldFeint = false;
+				Pick = Actions::UnblockPowerRiposte;
+			}
+			if (Settings::VerboseLogging)
+			{
+				logger::info("[riposte] {} picks a {} riposte (feint share {:.2f}, power share {:.2f}, stamina {:.2f})", Who(actor),
+					Pick == Actions::UnblockStartFeint ? "feint" : Pick == Actions::UnblockPowerRiposte ? "power" : "light",
+					FeintShare, DieShare, CurrentStamina / std::max(1.f, TotalStamina));
 			}
 			// Priority 1, so a neutral pre-block can't wipe the counter before it comes out.
-			if (ShouldFeint)
-			{
-				AddAction(actor, Actions::UnblockStartFeint, false, 1);
-			}
-			else
-			{
-				AddAction(actor, Actions::UnblockRiposte, false, 1);
-			}
+			AddAction(actor, Pick, false, 1);
 		}
 		else
 		{
@@ -1918,13 +2495,89 @@ static bool PredictedLinePreference(RE::Actor* target, int (&OutPref)[4])
 }
 
 // force should not be abused, as it can cause actions to never be finished because they are constantly be overwritten
+// The cascade: the belief prior plus the learned edges out of the last swing line seen
+// (the opener row before any), blended with the combo-rule term by tier. Rebuilt on the
+// tick and again on the frame a reflex rolls, since the chain node moves between ticks.
+void AIHandler::ComputeCascade(RE::Actor* target, AIDifficulty& diff) const
+{
+	int Belief[4] = {};
+	for (int i = 0; i < 4; ++i)
+	{
+		const Directions Dir = static_cast<Directions>(i);
+		// A mode that folds a line must never pick it.
+		Belief[i] = DirectionHandler::DirectionEnabled(Dir) ? std::min(diff.directionChangeChance[Dir], BeliefBudget) : 0;
+	}
+	const int ChainNode = diff.lastSeenSwingLine >= 0 && diff.lastSeenSwingLine < 4 ? diff.lastSeenSwingLine : OpenerRow;
+	if (ChainNode >= 0)
+	{
+		for (int i = 0; i < 4; ++i)
+		{
+			Belief[i] += diff.chainEdges[ChainNode][i];
+		}
+	}
+	int Total = Belief[0] + Belief[1] + Belief[2] + Belief[3];
+	// Scaled back into the budget, or the lottery truncates the last lines.
+	if (Total > BeliefBudget)
+	{
+		for (int& B : Belief)
+		{
+			B = B * BeliefBudget / Total;
+		}
+		Total = Belief[0] + Belief[1] + Belief[2] + Belief[3];
+	}
+	int Pref[4] = {};
+	const bool HasStructure = PredictedLinePreference(target, Pref);
+	// Folded lines are zeroed in the belief above; the structural term must
+	// not reintroduce them.
+	for (int i = 0; i < 4; ++i)
+	{
+		if (!DirectionHandler::DirectionEnabled(static_cast<Directions>(i)))
+		{
+			Pref[i] = 0;
+		}
+	}
+	// The rule masks and the beliefs rank: legal lines keep their learned
+	// order instead of being spread evenly over.
+	int Ranked[4] = {};
+	int RankedSum = 0;
+	if (HasStructure)
+	{
+		for (int i = 0; i < 4; ++i)
+		{
+			Ranked[i] = Pref[i] * (Belief[i] + StructuralRankPrior);
+			RankedSum += Ranked[i];
+		}
+	}
+	// Tier only: reading combo structure is rule knowledge every fighter has,
+	// not a personality trait. Bait used to gate it, which left the non-bait
+	// archetypes predicting the habit line right after it landed, the one
+	// line the combo rule says can't come next.
+	constexpr int LowTier = static_cast<int>(Difficulty::VeryEasy);
+	constexpr int HighTier = static_cast<int>(Difficulty::Legendary);
+	const float TierT = std::clamp(
+		static_cast<float>(static_cast<int>(diff.difficulty) - LowTier) /
+		static_cast<float>(HighTier - LowTier), 0.f, 1.f);
+	const float TierScale = AISettings::ComboReadLowTierScale +
+		(1.f - AISettings::ComboReadLowTierScale) * TierT;
+	const float k = HasStructure
+		? std::clamp(AISettings::ComboReadStrength * TierScale, 0.f, 1.f)
+		: 0.f;
+	for (int i = 0; i < 4; ++i)
+	{
+		const float structural = (RankedSum > 0)
+			? static_cast<float>(Total) * static_cast<float>(Ranked[i]) / static_cast<float>(RankedSum)
+			: 0.f;
+		// Round: the sum is the cascade's fire rate, and four truncations shed up to 3.
+		diff.lastCascadeWeights[i] = static_cast<int>(
+			static_cast<float>(Belief[i]) * (1.f - k) + structural * k + 0.5f);
+	}
+}
+
 void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool force)
 {
 	int mod = (int)CalcAndInsertDifficulty(actor);
 	auto& diff = DifficultyMap[actor->GetHandle()];
 
-	// Conditioning-resistance divisor, capped at Normal so high tiers stay fake-out-able.
-	const int condMod = std::clamp(mod, 1, 3);
 	// Belief drains below are per tick, so they convert against this.
 	const float Tick = CalcUpdateTimer(actor);
 
@@ -1996,163 +2649,71 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		}
 	};
 
-	// Set in the match branch to deny free mid-swing guard acquisition; the
-	// belief/tracking bookkeeping above still runs when it's set.
-	bool SuppressSwitch = false;
+	// A swing in flight answered by sight: the switch waits for the reaction time,
+	// plus CommitCost when a guard that already moved this swing has to move again.
+	bool Read = false;
+	float CommitCost = 0.f;
+	// The price of leaving the line the guard covers: its belief share, in seconds.
+	// Folded: beliefs live on the lines attacks actually come from.
+	const Directions CoveredLine = DirectionHandler::FoldDirection(
+		DirectionHandler::GetCounterDirection(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)));
+	const float Fixation = (static_cast<float>(chanceFor(CoveredLine)) / static_cast<float>(BeliefBudget)) *
+		AISettings::ConditionedFixationSeconds;
 
 	// Diagnostic tag for VerboseLogging: which mechanism produced this guard decision.
 	const char* decisionKind = "hold";
 
-	// Switches the target completed since the last tick, recorded per frame.
-	// Events condition belief only; branch selection stays on the tick sample,
-	// or fidgety play churns the hold state.
-	const int ObservedSwitches = std::min(diff.observedSwitchCount, static_cast<int>(diff.observedSwitchesFrom.size()));
+	// The perception ring is flushed per tick; a switch no longer conditions the line
+	// left behind. What follows a line is the chain graph's to say.
 	diff.observedSwitchCount = 0;
-
-	// One accumulation per observed switch, to the line the target left.
-	// False on an empty ring so the caller uses the sampled fallback instead.
-	auto accumulateObserved = [&]() {
-		if (ObservedSwitches <= 0)
-		{
-			return false;
-		}
-		const int DifficultyMod = AISettings::BeliefAccumBase * AISettings::AIMistakeRatio;
-		const float baitDamping = 1.0f - std::max(0.0f, diff.baitTendency) * 0.7f;
-		const int streak = std::max(1, diff.conditioningStreak);
-		for (int i = 0; i < ObservedSwitches; ++i)
-		{
-			// float division BEFORE the multipliers — int division truncated
-			// to zero at sub-default AIMistakeRatio values for high tiers
-			accumulate(diff.observedSwitchesFrom[i], static_cast<int>(
-				(static_cast<float>(DifficultyMod) / static_cast<float>(condMod)) *
-				static_cast<float>(streak) *
-				baitDamping + 0.5f));  // round, don't truncate — truncation
-				                       // zeroed bait-archetype conditioning
-				                       // at low streaks
-		}
-		return true;
-	};
 
 	// Belief blended toward the lines the combo makes likely. Computed every
 	// call, before accumulation, so the cached copy the HUD reads stays current.
-	int ChainNode = -1;
-	{
-		// The start row is the prior and the learned edges out of the target's
-		// last landed line, or the opener row with none, add to it.
-		int Belief[4] = { TR, TL, BL, BR };
-		Directions LastLanded;
-		if (!DirectionHandler::GetSingleton()->GetLastAttackDirection(target, LastLanded))
-		{
-			ChainNode = OpenerRow;
-		}
-		else if (static_cast<int>(LastLanded) < 4)
-		{
-			ChainNode = static_cast<int>(LastLanded);
-		}
-		if (ChainNode >= 0)
-		{
-			for (int i = 0; i < 4; ++i)
-			{
-				Belief[i] += diff.chainEdges[ChainNode][i];
-			}
-		}
-		int Total = Belief[0] + Belief[1] + Belief[2] + Belief[3];
-		// Scaled back into the budget, or the lottery truncates the last lines.
-		if (Total > BeliefBudget)
-		{
-			for (int& B : Belief)
-			{
-				B = B * BeliefBudget / Total;
-			}
-			Total = Belief[0] + Belief[1] + Belief[2] + Belief[3];
-		}
-		int Pref[4] = {};
-		const bool HasStructure = PredictedLinePreference(target, Pref);
-		// Folded lines are zeroed in the belief above; the structural term must
-		// not reintroduce them.
-		for (int i = 0; i < 4; ++i)
-		{
-			if (!DirectionHandler::DirectionEnabled(static_cast<Directions>(i)))
-			{
-				Pref[i] = 0;
-			}
-		}
-		// The rule masks and the beliefs rank: legal lines keep their learned
-		// order instead of being spread evenly over.
-		int Ranked[4] = {};
-		int RankedSum = 0;
-		if (HasStructure)
-		{
-			for (int i = 0; i < 4; ++i)
-			{
-				Ranked[i] = Pref[i] * (Belief[i] + StructuralRankPrior);
-				RankedSum += Ranked[i];
-			}
-		}
-		// Tier only: reading combo structure is rule knowledge every fighter has,
-		// not a personality trait. Bait used to gate it, which left the non-bait
-		// archetypes predicting the habit line right after it landed — the one
-		// line the combo rule says can't come next.
-		constexpr int LowTier = static_cast<int>(Difficulty::VeryEasy);
-		constexpr int HighTier = static_cast<int>(Difficulty::Legendary);
-		const float TierT = std::clamp(
-			static_cast<float>(static_cast<int>(diff.difficulty) - LowTier) /
-			static_cast<float>(HighTier - LowTier), 0.f, 1.f);
-		const float TierScale = AISettings::ComboReadLowTierScale +
-			(1.f - AISettings::ComboReadLowTierScale) * TierT;
-		const float k = HasStructure
-			? std::clamp(AISettings::ComboReadStrength * TierScale, 0.f, 1.f)
-			: 0.f;
-		for (int i = 0; i < 4; ++i)
-		{
-			const float structural = (RankedSum > 0)
-				? static_cast<float>(Total) * static_cast<float>(Ranked[i]) / static_cast<float>(RankedSum)
-				: 0.f;
-			// Round: the sum is the cascade's fire rate, and four truncations shed up to 3.
-			diff.lastCascadeWeights[i] = static_cast<int>(
-				static_cast<float>(Belief[i]) * (1.f - k) + structural * k + 0.5f);
-		}
-	}
+	ComputeCascade(target, diff);
 
 	if (ToCounter != CurrentTargetDir)
 	{
 		// Target's net direction changed since last tick.
-		const int DifficultyMod = AISettings::BeliefAccumBase * AISettings::AIMistakeRatio;
 		diff.numTimesDirectionsSwitched++;
 		diff.conditioningStreak = std::min(diff.conditioningStreak + 1, AISettings::MaxDirectionTracked);
 		diff.numTimesDirectionSame = 0;
 
-		// Cascade: roll against accumulated chances. The AI may pick a wrong
-		// direction here based on conditioning
-		int random = mt_rand() % 100;
+		// First tier: expectation. The cascade fires from habits with no reaction
+		// wait, right or wrong; being wrong is what conditioning buys the attacker.
+		// Not against a swing already in flight: its line is visible, the start edge has
+		// answered it, and re-forcing a stale pick here moved right guards onto wrong lines.
 		bool found = false;
-		random -= diff.lastCascadeWeights[(int)Directions::TR];
-		if (!found && random < 0) { ToCounter = Directions::TR; found = true; }
-		random -= diff.lastCascadeWeights[(int)Directions::TL];
-		if (!found && random < 0) { ToCounter = Directions::TL; found = true; }
-		random -= diff.lastCascadeWeights[(int)Directions::BL];
-		if (!found && random < 0) { ToCounter = Directions::BL; found = true; }
-		random -= diff.lastCascadeWeights[(int)Directions::BR];
-		if (!found && random < 0) { ToCounter = Directions::BR; found = true; }
-
-		if (found)
+		if (force)
 		{
-			// Wrong-pick fired — drain all chances by 5 ("used up" some
-			// conditioning).
+			decisionKind = "swing-seen";
+		}
+		else if (diff.reflexPickValid)
+		{
+			// The reflex rolled, drained and moved on the frame the line changed; keep its pick.
+			ToCounter = diff.reflexPick;
+			diff.reflexPickValid = false;
+			found = true;
+			decisionKind = (ToCounter == CurrentTargetDir) ? "expect-right" : "expect-wrong";
+		}
+		else if (SwitchLooksLikeAttack(actor, target, diff, TorsoDistanceSq(actor, target), CurrentTargetDir,
+					 DirectionHandler::GetSingleton()->GetComboStep(target) > 0) &&
+				 RollExpectation(diff.lastCascadeWeights, ReadDecisiveness(diff.difficulty), ToCounter))
+		{
+			found = true;
+			// The pick spends some conditioning.
 			const int drainAmount = AISettings::BeliefCascadeDrain;
 			TR = std::max(0, TR - drainAmount);
 			TL = std::max(0, TL - drainAmount);
 			BL = std::max(0, BL - drainAmount);
 			BR = std::max(0, BR - drainAmount);
-			decisionKind = (ToCounter == CurrentTargetDir) ? "cascade-right" : "cascade-wrong";
+			decisionKind = (ToCounter == CurrentTargetDir) ? "expect-right" : "expect-wrong";
 		}
-
 		else
 		{
-			// No conditioned pick: baseline track-or-stay. Deliberately weak, so
-			// the AI defends by reading, not by reflex.
+			// No expectation. Between swings a weak reflex track, so positioning
+			// comes from reading; against a swing the read below takes over.
 			const int rollBaseline = mt_rand() % 50;
-			if (rollBaseline < mod)
+			if (!force && rollBaseline < mod)
 			{
 				ToCounter = CurrentTargetDir;
 				decisionKind = "react-track";
@@ -2168,17 +2729,17 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 			BL = std::max(0, BL - forgetDrain);
 			BR = std::max(0, BR - forgetDrain);
 		}
-
-		// Sampled fallback for the first tick against a target, before the ring
-		// has anything in it. After the drain, so it isn't immediately undone.
-		if (!accumulateObserved())
+		// Second tier: recognition. The swing-start frame normally decides the read; this is
+		// the fallback for a swing whose start it did not answer (not yet pending).
+		if (force && !found && !IsSwitchUnderway(actor, DirectionHandler::GetCounterDirection(CurrentTargetDir)))
 		{
-			const float baitDamping = 1.0f - std::max(0.0f, diff.baitTendency) * 0.7f;
-			accumulate(PreviousTracked, static_cast<int>(
-				(static_cast<float>(DifficultyMod) / static_cast<float>(condMod)) *
-				static_cast<float>(std::max(1, diff.conditioningStreak)) *
-				baitDamping + 0.5f));  // round, don't truncate
+			ToCounter = CurrentTargetDir;
+			Read = true;
+			// A guard still committed from the last swing (a feint's first half) pays to leave it.
+			CommitCost = diff.guardMovedAgo >= 0.f ? Fixation : 0.f;
+			decisionKind = "read";
 		}
+
 	}
 	else
 	{
@@ -2188,72 +2749,43 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 		diff.numTimesDirectionSame++;
 		// The other three lines ebb every tick of the hold. The held line is a
 		// loaded attack — guard charge speeds the next swing from it — so
-		// belief there grows with the target's charge instead.
-		const int holdDrain = DrainPerTick(HoldDrainPerSecond, Tick, diff.beliefDrainRemainder);
-		int& held = chanceFor(ToCounter);
-		for (int* p : { &TR, &TL, &BL, &BR })
+		// belief there grows with the target's charge instead. Not when the held
+		// line is just where the last swing came from: that is a leftover, not a
+		// show, and the chain graph already says what follows it.
+		if (static_cast<int>(ToCounter) != diff.lastSeenSwingLine)
 		{
-			if (p != &held)
+			const int holdDrain = DrainPerTick(HoldDrainPerSecond, Tick, diff.beliefDrainRemainder);
+			int& held = chanceFor(ToCounter);
+			for (int* p : { &TR, &TL, &BL, &BR })
 			{
-				*p = std::max(0, *p - holdDrain);
-			}
-		}
-		const float Charge = DirectionHandler::GetSingleton()->GetGuardChargeRatio(target);
-		const int holdAccrual = DrainPerTick(HoldAccrualPerSecond * Charge, Tick, diff.holdAccrualRemainder);
-		if (holdAccrual > 0)
-		{
-			accumulate(ToCounter, holdAccrual);
-		}
-		// Acquisition gate: the guard can't arrive at the counter inside the
-		// commit window plus the fixation floor; past it, it always adjusts.
-		if (force)
-		{
-			const Directions guardDir = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
-			// Folded: beliefs live on the lines attacks actually come from.
-			const Directions coveredLine = DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(guardDir));
-			const float fixation = (static_cast<float>(chanceFor(coveredLine)) / static_cast<float>(BeliefBudget)) * AISettings::ConditionedFixationSeconds;
-			if (diff.timeSinceLineChange < CommitWindow(diff) + fixation)
-			{
-				const int gateRoll = static_cast<int>(mt_rand() % 50);
-				if (gateRoll >= mod)
+				if (p != &held)
 				{
-					SuppressSwitch = true;
-					decisionKind = "gate-suppressed";
-				}
-				else
-				{
-					decisionKind = "gate-beaten";
+					*p = std::max(0, *p - holdDrain);
 				}
 			}
+			const float Charge = DirectionHandler::GetSingleton()->GetGuardChargeRatio(target);
+			const int holdAccrual = DrainPerTick(HoldAccrualPerSecond * Charge, Tick, diff.holdAccrualRemainder);
+			if (holdAccrual > 0)
+			{
+				accumulate(ToCounter, holdAccrual);
+			}
 		}
-
-		// Net-zero wiggles (switch away and back between ticks) still
-		// condition — that's the perception layer's point — they just don't
-		// perturb the hold/streak state above.
-		accumulateObserved();
-	}
-
-	// Force bump: the target is attacking, so belief spikes on that line and
-	// the others drain faster — locking on once a commit happens.
-	if (force)
-	{
-		const int DifficultyMod = AISettings::BeliefAccumBase * AISettings::AIMistakeRatio;
-		// 3x the normal bump, but only on the swing's first tick: each attack
-		// teaches the line once, so slow attacks don't teach more than fast ones.
-		if (!diff.sawSwingLastTick && DifficultyMod > 0)
+		// Recognition on a swing in flight: a guard off the line corrects toward it,
+		// due at the reaction time plus, if a switch already committed this swing,
+		// the fixation on the line it committed to.
+		if (force && !DirectionHandler::GetSingleton()->HasBlockAngle(target, actor) &&
+			!IsSwitchUnderway(actor, DirectionHandler::GetCounterDirection(CurrentTargetDir)))
 		{
-			accumulate(CurrentTargetDir, std::max(1, (DifficultyMod * 3) / condMod));
+			ToCounter = CurrentTargetDir;
+			Read = true;
+			CommitCost = diff.guardMovedAgo >= 0.f ? Fixation : 0.f;
+			decisionKind = "correct";
 		}
 
-		// Drain the other three directions faster than the regular tick drain
-		// so accumulated bias on non-attacking directions doesn't fight the
-		// spike on the attacking one.
-		constexpr int forceDrain = 3;
-		if (CurrentTargetDir != Directions::TR) TR = std::max(0, TR - forceDrain);
-		if (CurrentTargetDir != Directions::TL) TL = std::max(0, TL - forceDrain);
-		if (CurrentTargetDir != Directions::BL) BL = std::max(0, BL - forceDrain);
-		if (CurrentTargetDir != Directions::BR) BR = std::max(0, BR - forceDrain);
 	}
+
+	// No force bump: an attack teaches the chain graph what follows it, not a belief
+	// that the next one comes from the same line.
 
 	// Single writeback to the map.
 	diff.directionChangeChance[Directions::TR] = TR;
@@ -2263,28 +2795,84 @@ void AIHandler::DirectionMatchTarget(RE::Actor* actor, RE::Actor* target, bool f
 
 	diff.lastDecisionKind = decisionKind;
 
-	if (!SuppressSwitch)
 	{
 		const Directions ToSwitch = DirectionHandler::GetCounterDirection(ToCounter);
-		QueueDirectionSwitch(actor, ToSwitch, force);
+		// The swing-start read owns the answer to a swing in flight: while its switch to the
+		// counter is underway the tick neither re-decides the line nor "stays" over it, since a
+		// forced request for any other line (a stay is one) would overwrite the read in the
+		// one-slot queue. The press below still runs.
+		const Directions SwingCounter = DirectionHandler::GetCounterDirection(CurrentTargetDir);
+		const bool ReadUnderway = force && IsSwitchUnderway(actor, SwingCounter) &&
+			DirectionHandler::FoldDirection(ToSwitch) != DirectionHandler::FoldDirection(SwingCounter);
+		if (ReadUnderway)
+		{
+			decisionKind = "read-pending";
+			diff.lastDecisionKind = decisionKind;
+		}
+		else
+		{
+			// A read is a reaction: the tier's processing time to register the swing, the action
+			// timer for the choice of line, measured from the swing's start.
+			float Input = GuardInputSeconds;
+			if (Read)
+			{
+				const float Elapsed = std::max(0.f, diff.swingElapsed);
+				Input = std::max(GuardInputSeconds, RollProcessing(CalcProcessingTimer(actor), diff.npcRand) +
+					CalcActionTimer(actor) * ReadBitsScale(KIND_BITS(diff)) + CommitCost - Elapsed);
+			}
+			QueueDirectionSwitch(actor, ToSwitch, force, Input);
+			// A switch against a swing is a commitment for a short while, feint follow-ups included.
+			if (force && DirectionHandler::FoldDirection(ToSwitch) != DirectionHandler::GetSingleton()->GetCurrentDirection(actor))
+			{
+				if (Settings::VerboseLogging && Read && !diff.swingCorrectionLogged)
+				{
+					diff.swingCorrectionLogged = true;
+					logger::info("[dmt] {} {} toward {} swing from {}: guard counts in {:.0f}ms (commit cost {:.0f}ms)",
+						Who(actor), decisionKind, Who(target), static_cast<int>(CurrentTargetDir),
+						(Input + GuardTransitionSeconds) * 1000.f, CommitCost * 1000.f);
+				}
+				if (diff.answerAt < 0.f)
+				{
+					diff.answerAt = diff.swingElapsed + Input + GuardTransitionSeconds;
+				}
+				diff.guardMovedAgo = 0.f;
+			}
+		}
 
-		if (force && ToCounter == CurrentTargetDir &&
-			IsPreparedToBlock(actor, target, diff) && IsBlockableSwing(target) &&
-			!CanAnswerLine(actor, target, diff))
+		// Every tick of a swing in flight: a guard that isn't up yet comes up, whichever
+		// line it is on. AddAction drops the repeat once it's queued or blocking.
+		if (force && IsPreparedToBlock(actor, target, diff) && IsBlockableSwing(target))
 		{
 			AddAction(actor, Actions::Block, true);
 		}
 	}
 
+	// Exchange record: the swing's first answer, or a later move that overrode it.
+	if (force)
+	{
+		const bool Unset = std::strcmp(diff.answerKind, "none") == 0 || std::strcmp(diff.answerKind, "expect-pre") == 0;
+		const bool Moves = std::strcmp(decisionKind, "correct") == 0 || std::strcmp(decisionKind, "react-track") == 0 ||
+			std::strcmp(decisionKind, "read") == 0 || std::strncmp(decisionKind, "expect", 6) == 0;
+		if (Unset)
+		{
+			diff.answerKind = decisionKind;
+		}
+		else if (Moves && std::strcmp(decisionKind, diff.answerKind) != 0)
+		{
+			diff.answerLater = decisionKind;
+		}
+	}
 	// Once per swing: what the guard did about it, and why.
 	if (Settings::VerboseLogging && force && !diff.sawSwingLastTick)
 	{
 		logger::info("[dmt] {} {:08X} answers {} swing from {}: {} (guard {} -> {}, line seen {:.0f}ms, window {:.0f}ms)",
 			actor->GetName(), actor->GetFormID(), Who(target), static_cast<int>(CurrentTargetDir), decisionKind,
 			static_cast<int>(DirectionHandler::GetSingleton()->GetCurrentDirection(actor)),
-			SuppressSwitch ? -1 : static_cast<int>(DirectionHandler::GetCounterDirection(ToCounter)),
+			static_cast<int>(DirectionHandler::GetCounterDirection(ToCounter)),
 			diff.timeSinceLineChange * 1000.f, CommitWindow(diff) * 1000.f);
 	}
+	// A reflex pick only lives until the next decision; a wiggle must not hand it to a later change.
+	diff.reflexPickValid = false;
 	diff.lastDirectionTracked = CurrentTargetDir;
 
 }
@@ -2306,10 +2894,10 @@ void AIHandler::GetGuardConditioningExternalCalled(RE::Actor* actor, std::array<
 	{
 		return;
 	}
-	// Positive mistakeRatio = this AI has been winning recent exchanges;
-	// normalize against the clamp range for the HUD. Negative (rattled)
-	// reads as 0 — the arcs only warm, never cool.
-	outConfidence = std::clamp(iter->second.mistakeRatio / MaxMistakeRange, 0.f, 1.f);
+	// Tint = how fixated this AI is on the player's swing kind: 1 (red) when it has only
+	// seen lights and reacts at full speed, 0 (yellow) at two kind bits, the full mixup tax.
+	// Replaced the fight-record tint (mistakeRatio / MaxMistakeRange) 2026-10-12.
+	outConfidence = std::clamp(1.f - KIND_BITS(iter->second) * 0.5f, 0.f, 1.f);
 	// Belief is keyed by the line the attack comes from; the HUD wants guard
 	// space, so map through the counter. Cached weights, so the arcs show the roll.
 	for (int i = 0; i < 4; ++i)
@@ -2326,6 +2914,12 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 	RE::ActorHandle ActorHandle = actor->GetHandle();
 	CalcAndInsertDifficulty(actor);
 	auto& diff = DifficultyMap[ActorHandle];
+	// A dash swings from the line it dodged in on: any switch here would spend its
+	// charge, and the dash entry becomes the swing itself.
+	if (GetQueuedAction(actor) == Actions::DashAttack)
+	{
+		return;
+	}
 	Directions TargetDirection = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
 	// This will queue up this event if you cant switch instead
 	Directions CounterDirection = DirectionHandler::GetCounterDirection(TargetDirection);
@@ -2348,17 +2942,16 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 	const float ComboProgress = DirectionHandler::GetSingleton()->GetComboProgress(actor);
 	const float Commitment = ComboProgress * ComboCommitmentDiscount;
 	const float ComboRate = 1.f + ComboProgress * ComboRateBoost;
+	// A charge built while parked (out of reach, standing off, waiting on a line) is spent
+	// before it tapers: the swing it speeds up is the one to take now.
+	const float ChargeRatio = DirectionHandler::GetSingleton()->GetGuardChargeRatio(actor);
+	const float ChargeBoost = 1.f + ChargeRatio;
 	// Folded on both sides: in a 3-line mode the two lows (or tops) are one
 	// line, so an entry on the folded twin is into the guard too.
 	if (DirectionHandler::FoldDirection(diff.attackPattern[idx]) != DirectionHandler::FoldDirection(CounterDirection))
 	{
-		// A queued swing already asked for its line (a poke's may differ from
-		// the pattern's); re-asking here would turn it before it comes out.
-		const Actions Queued = GetQueuedAction(actor);
-		if (Queued != Actions::Attack && Queued != Actions::FeintFollowup)
-		{
-			SwitchToNextAttack(actor);
-		}
+		// The pattern line is taken only when a swing is chosen, below: until then the
+		// guard is the defender's, steered by DirectionMatchTarget.
 		// Per-line reach of this swing; a kind out of reach isn't picked.
 		const Directions GateLine = DirectionHandler::FoldDirection(diff.attackPattern[idx]);
 		const bool Chained = DirectionHandler::GetSingleton()->GetComboStep(actor) > 0;
@@ -2374,8 +2967,10 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 			// multiplier. The dominant difficulty axis in play.
 			const float StaminaScale = StaminaAttackScale(
 				CurrentStaminaRatio, AttackStaminaOffLine, Reserve, Commitment);
-			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate, Tick))
+			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate * ChargeBoost, Tick))
 			{
+				// Ask for the pattern line now; the swing waits for it to land.
+				SwitchToNextAttack(actor);
 				// the attack lands from the queued line if one is still in
 				// transit, otherwise from the one already held
 				DirectionHandler* DirHandler = DirectionHandler::GetSingleton();
@@ -2384,21 +2979,89 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 				{
 					AttackDir = DirHandler->GetCurrentDirection(actor);
 				}
+				// A warhammer in a chain alternates light and power: each switch speeds the next swing.
+				// It breaks the alternation on a read, not a roll: a guard already answering the
+				// line gets the power (a blocked power locks the defender out and advances the
+				// combo), an open guard gets the fast light.
+				bool PrevPower = false;
+				const bool Alternating = DirHandler->AnimationSet(actor) == WeaponSet::Warhammer &&
+					AttackHandler::GetSingleton()->InAttackChain(actor, PrevPower);
+				const bool Answered = IsGuardUp(target) && DirHandler->GetCurrentDirection(target) ==
+					DirectionHandler::FoldDirection(DirectionHandler::GetCounterDirection(AttackDir));
+				const bool PowerAffordable = PowerInReach &&
+					CurrentStamina >= AttackHandler::GetSingleton()->SwingStaminaCost(actor, true);
 				// Spend the finisher as a power attack
 				if (PowerInReach && DirHandler->WouldCompleteCombo(actor, AttackDir) &&
 					CurrentStaminaRatio > ComboFinisherStaminaRatio + Reserve)
 				{
 					AddAction(actor, AIHandler::Actions::PowerAttack);
 				}
-				// PowerAttackTendency-modulated attack-type choice: NPCs that
-				// favor power attacks pick them more often over light attacks.
-				else if (LightInReach && (!PowerInReach || mt_rand() % 3 < (2.0f - diff.powerAttackTendency * 1.5f)))
+				else if (Alternating && PrevPower && Answered && PowerAffordable)
+				{
+					AddAction(actor, AIHandler::Actions::PowerAttack);
+					if (Settings::VerboseLogging) logger::info("[hammer] {} breaks for a power: {}'s guard answers the line", Who(actor), Who(target));
+				}
+				else if (Alternating && !PrevPower && !Answered && LightInReach)
+				{
+					AddAction(actor, AIHandler::Actions::Attack);
+					if (Settings::VerboseLogging) logger::info("[hammer] {} breaks for a light: {}'s guard is open", Who(actor), Who(target));
+				}
+				else if (Alternating && PrevPower && LightInReach)
 				{
 					AddAction(actor, AIHandler::Actions::Attack);
 				}
-				else
+				else if (Alternating && !PrevPower && PowerAffordable)
 				{
 					AddAction(actor, AIHandler::Actions::PowerAttack);
+				}
+				// This line is open: the feint takes its own share first (a power windup, so it
+				// needs the power's reach), then the light is the anti-open tool and keeps its
+				// archetype share of the rest at every tier; the remainder is a real power.
+				else
+				{
+					const float FeintShare = std::clamp((1.f + diff.feintTendency) / 3.f, 0.f, 1.f);
+					const float DieShare = std::clamp((1.f + 1.5f * diff.powerAttackTendency) / 3.f, 0.f, 1.f);
+					if (PowerInReach && static_cast<float>(mt_rand() % 10000u) / 10000.f < FeintShare)
+					{
+						AddAction(actor, AIHandler::Actions::StartFeint);
+					}
+					else if (LightInReach && (!PowerInReach ||
+						static_cast<float>(mt_rand() % 10000u) / 10000.f >= DieShare))
+					{
+						AddAction(actor, AIHandler::Actions::Attack);
+						// Charged opener: hold the attack line for guard charge, then swing it fast or
+						// re-aim at an open line inside the carry window. Openers only; a chain has
+						// tempo to keep. Defence interrupts the hold for free, as it does the player's.
+						if (!Chained)
+						{
+							const float ChargeShare = std::clamp(ChargeShareBase + ChargeSharePatience * diff.patienceMod -
+								ChargeShareAggression * diff.aggressionMod + (CurrentStaminaRatio < 0.5f ? ChargeShareLowStamina : 0.f),
+								0.f, ChargeShareMax);
+							if (static_cast<float>(mt_rand() % 10000u) / 10000.f < ChargeShare)
+							{
+								const float Goal = ChargeGoalMin + static_cast<float>(mt_rand() % 10000u) / 10000.f * (1.f - ChargeGoalMin);
+								if (SetQueuedChargeGoal(actor, Goal) && Settings::VerboseLogging)
+								{
+									logger::info("[charge] {} holds line {} for a {:.2f} charge (share {:.2f}: patience {:.2f}, aggression {:.2f}, stamina {:.2f})",
+										Who(actor), static_cast<int>(AttackDir), Goal, ChargeShare, diff.patienceMod, diff.aggressionMod, CurrentStaminaRatio);
+								}
+							}
+						}
+					}
+					else
+					{
+						AddAction(actor, AIHandler::Actions::PowerAttack);
+					}
+				}
+				if (Settings::VerboseLogging)
+				{
+					// What the queue holds after the pick: a refused add shows as neither.
+					const Actions Picked = GetQueuedAction(actor);
+					logger::info("[pattern] {} picks {} from {} at {:.0f}: blocking {}, light in reach {}, power in reach {}, chained {}, tendency {:.2f}, feint share {:.2f}, charge {:.2f}",
+						Who(actor), Picked == Actions::PowerAttack ? "power" : Picked == Actions::Attack ? "light" :
+						Picked == Actions::StartFeint ? "feint" : "nothing",
+						static_cast<int>(AttackDir), std::sqrt(TargetDistSQ), actor->IsBlocking(), LightInReach, PowerInReach, Chained,
+						diff.powerAttackTendency, std::clamp((1.f + diff.feintTendency) / 3.f, 0.f, 1.f), ChargeRatio);
 				}
 			}
 		}
@@ -2418,23 +3081,28 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 			// counter line, so it reaches full rate earlier.
 			const float StaminaScale = StaminaAttackScale(
 				CurrentStaminaRatio, AttackStaminaFeint, Reserve, Commitment);
-			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate, Tick))
+			if (RollPerSecond(BaseInitiativeRate(mod, diff.aggressionMod) * StaminaScale * ComboRate * ChargeBoost, Tick))
 			{
 				// Flat reach: a feint redirects to a cut, whatever line it starts on.
 				const float CutReach = actor->GetReach() + CutLungeUnits;
 				if (ShouldFeint && TargetDistSQ < CutReach * CutReach)
 				{
 					SwitchToNextAttack(actor);
-					// A third of these are feints with no lean; the tendency scales that
-					// share, and power and light split the rest.
+					// A third of these are feints with no lean; the tendency scales that share.
+					// The rest is the anti-block read: into a covered line a light only locks the
+					// attacker out, so the power takes half of the rest at VeryEasy and all of it at
+					// Legendary.
 					const float FeintShare = std::clamp((1.f + diff.feintTendency) / 3.f, 0.f, 1.f);
+					const float TierT = std::clamp(
+						static_cast<float>(mod - static_cast<int>(Difficulty::VeryEasy)) /
+							static_cast<float>(static_cast<int>(Difficulty::Legendary) - static_cast<int>(Difficulty::VeryEasy)), 0.f, 1.f);
 					const float Pick = static_cast<float>(mt_rand() % 10000u) / 10000.f;
 
 					if (Pick < FeintShare)
 					{
 						AddAction(actor, AIHandler::Actions::StartFeint);
 					}
-					else if (Pick < FeintShare + (1.f - FeintShare) * 0.5f)
+					else if (Pick < FeintShare + (1.f - FeintShare) * (0.5f + 0.5f * TierT))
 					{
 						AddAction(actor, AIHandler::Actions::PowerAttack);
 					}
@@ -2442,47 +3110,19 @@ void AIHandler::SwitchToNewDirection(RE::Actor* actor, RE::Actor* target, float 
 					{
 						AddAction(actor, AIHandler::Actions::Attack);
 					}
+					if (Settings::VerboseLogging)
+					{
+						const Actions Picked = GetQueuedAction(actor);
+						logger::info("[pattern] {} presses {} into {}'s guard at {:.0f}: blocking {}, feint share {:.2f}, charge {:.2f}",
+							Who(actor), Picked == Actions::PowerAttack ? "power" : Picked == Actions::Attack ? "light" :
+							Picked == Actions::StartFeint ? "feint" : "nothing",
+							Who(target), std::sqrt(TargetDistSQ), actor->IsBlocking(), FeintShare, ChargeRatio);
+					}
 				}
 			}
 
 
 		}
-		else
-		{
-			ShouldFeint = false;
-		}
-		if (!ShouldFeint)
-		{
-			// switch between actively changing directions if our current direction is matching
-			if (mt_rand() % 4 < 2)
-			{
-				Directions ToAvoid = DirectionHandler::GetSingleton()->GetCurrentDirection(target);
-				QueueDirectionSwitch(actor, ToAvoid, false);
-			}
-			else
-			{
-				int Direction = mt_rand() % 4;
-				Directions ToSwitch;
-				switch (Direction)
-				{
-				case 0:
-					ToSwitch = Directions::TR;
-					break;
-				case 1:
-					ToSwitch = Directions::TL;
-					break;
-				case 2:
-					ToSwitch = Directions::BL;
-					break;
-				case 3:
-				default:
-					ToSwitch = Directions::BR;
-					break;
-				}
-				QueueDirectionSwitch(actor, ToSwitch, false);
-			}
-		}
-		
 	}
 }
 
@@ -2510,7 +3150,7 @@ void AIHandler::ReduceDifficulty(RE::Actor* actor)
 	}
 }
 
-void AIHandler::RecordPlayerChainTransition(WeaponSet a_set, int a_from, Directions a_to)
+void AIHandler::RecordPlayerSwingLine(WeaponSet a_set, Directions a_to)
 {
 	// Off, the saved profile stays as it was.
 	if (!AISettings::LearnAcrossFights)
@@ -2518,13 +3158,32 @@ void AIHandler::RecordPlayerChainTransition(WeaponSet a_set, int a_from, Directi
 		return;
 	}
 	const int Set = static_cast<int>(a_set);
-	const int From = a_from;
 	const int To = static_cast<int>(a_to);
-	if (Set < 0 || Set >= NumWeaponSets || From < 0 || From > OpenerRow || To < 0 || To > 3)
+	if (Set < 0 || Set >= NumWeaponSets)
 	{
 		return;
 	}
 	std::lock_guard Lock(PlayerHabitMtx);
+	// The NPCs' chain node, mirrored: the last swing line until the combo timer would
+	// have worn off; a new weapon set starts over, an unblockable swing keeps the node.
+	const auto Now = std::chrono::steady_clock::now();
+	const bool Chained = PlayerLastSwingLine >= 0 && PlayerLastSwingSet == Set &&
+		std::chrono::duration<float>(Now - PlayerLastSwingAt).count() < DifficultySettings::ComboResetTimer;
+	const int From = Chained ? PlayerLastSwingLine : OpenerRow;
+	if (To >= 0 && To < 4)
+	{
+		PlayerLastSwingLine = To;
+	}
+	else if (!Chained)
+	{
+		PlayerLastSwingLine = -1;
+	}
+	PlayerLastSwingSet = Set;
+	PlayerLastSwingAt = Now;
+	if (To < 0 || To > 3)
+	{
+		return;
+	}
 	float (&Row)[4] = PlayerHabit[Set][From];
 	for (float& Count : Row)
 	{
@@ -2870,7 +3529,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 			const std::string Label = Step == 0 ? "opener" : std::format("step {}{}", Step, Step == Steps - 1 ? "+" : "");
 			Line += std::format(" {} {}/{} ({:.0f}%)", Label, Powers, Swings, Swings ? 100.f * Powers / Swings : 0.f);
 		}
-		logger::info("{}", Line);
+		logger::info("[stats] {}", Line);
 		std::string Feints = std::format("[stats] {} feints:", SetName);
 		for (int Step = 0; Step < Steps; ++Step)
 		{
@@ -2880,7 +3539,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 			Feints += std::format(" {} light {}/{} power {}/{}", Label,
 				PlayerFeints.feints[Set][Step][0], Lights, PlayerFeints.feints[Set][Step][1], Powers);
 		}
-		logger::info("{}", Feints);
+		logger::info("[stats] {}", Feints);
 		for (int Kind = 0; Kind < 2; ++Kind)
 		{
 			std::string Dist = std::format("[stats] {} {} start distance:", SetName, Kind ? "power" : "light");
@@ -2899,7 +3558,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 			}
 			if (Any)
 			{
-				logger::info("{}", Dist);
+				logger::info("[stats] {}", Dist);
 			}
 		}
 		constexpr int StaminaBuckets = static_cast<int>(std::extent_v<decltype(PlayerStaminaStatsV1::stamina), 2>);
@@ -2919,7 +3578,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 			}
 			if (Any)
 			{
-				logger::info("{}", Stam);
+				logger::info("[stats] {}", Stam);
 			}
 		}
 		// Outcomes summed two ways: by step over every line, by line over every step.
@@ -2952,7 +3611,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 				Resolved += Counts[Kind];
 				Out += std::format(", {} {}", OutcomeNames[Kind], Counts[Kind]);
 			}
-			logger::info("{}, no contact {}", Out, Swings - std::min(Swings, Resolved));
+			logger::info("[stats] {}, no contact {}", Out, Swings - std::min(Swings, Resolved));
 		};
 		for (int Step = 0; Step < Steps; ++Step)
 		{
@@ -2980,7 +3639,7 @@ void AIHandler::LogPlayerStats(const char* a_when)
 				}
 				if (Total > 0)
 				{
-					logger::info("{} (of {})", Def, Total);
+					logger::info("[stats] {} (of {})", Def, Total);
 				}
 			}
 		}
@@ -3018,17 +3677,45 @@ void AIHandler::SeedChainEdges(AIDifficulty& diff, WeaponSet a_set)
 	}
 }
 
-// Staggered or inside a dodge clip: an attackStart is accepted but never plays.
+// Staggered, inside a dodge clip, or inside a feint's stop blend: an attackStart is
+// accepted but never plays.
 static bool InTransition(RE::Actor* actor)
 {
 	auto* Dodges = DodgeHandler::GetSingleton();
 	const float SinceDodge = Dodges->SecondsSinceDodge(actor);
 	return actor->AsActorState()->actorState2.staggered || Dodges->IsDodging(actor) ||
-		(SinceDodge >= 0.f && SinceDodge < DodgeClipSeconds);
+		(SinceDodge >= 0.f && SinceDodge < DodgeClipSeconds) ||
+		AttackHandler::GetSingleton()->SecondsSinceFeint(actor) < FeintFollowupSettle;
+}
+
+// Out of a straight back dodge the only swing is the poke. NPCs can swing once
+// the dodge clip ends, and for this long after.
+constexpr float BackDodgePokeSeconds = 0.3f;
+static bool InBackDodgeFollowUp(RE::Actor* actor)
+{
+	const float Since = DodgeHandler::GetSingleton()->SecondsSinceBackDodge(actor);
+	return Since >= 0.f && Since < DodgeClipSeconds + BackDodgePokeSeconds;
 }
 
 bool AIHandler::TryAttack(RE::Actor* actor)
 {
+	// Turn to the poke line first; the queue waits for the switch. A raised guard opts
+	// out: turning it is a guard switch, with its parry and stamina cost.
+	if (InBackDodgeFollowUp(actor) && !actor->IsBlocking())
+	{
+		auto* DirHandler = DirectionHandler::GetSingleton();
+		const Directions Poke = DirectionHandler::FoldDirection(AttackHandler::PokeLine(actor));
+		if (DirHandler->GetCurrentDirection(actor) != Poke)
+		{
+			Directions Queued;
+			if (Settings::VerboseLogging && (!DirHandler->HasQueuedDirection(actor, Queued) || Queued != Poke))
+			{
+				logger::info("[ai] {} swings out of a back dodge: turning to the poke line {}", Who(actor), static_cast<int>(Poke));
+			}
+			DirHandler->WantToSwitchTo(actor, Poke, true);
+			return false;
+		}
+	}
 	// since this is a forced attack, it happens outside of the normal AI attack loop so we need to add checks here as well
 	// Mid-swing only in the chain window; a queued step retries until then.
 	if (!InTransition(actor) && AttackHandler::GetSingleton()->CanInitiateAttack(actor) &&
@@ -3042,6 +3729,11 @@ bool AIHandler::TryAttack(RE::Actor* actor)
 
 bool AIHandler::TryPowerAttack(RE::Actor* actor)
 {
+	// Out of a back dodge a power comes out as the poke; the blocking gate below still holds.
+	if (InBackDodgeFollowUp(actor))
+	{
+		return !actor->IsBlocking() && TryAttack(actor);
+	}
 
 	// since this is a forced attack, it happens outside of the normal AI attack loop so we need to add checks here as well
 	// Same chain-window rule as TryAttack.
@@ -3068,8 +3760,9 @@ bool AIHandler::HasPendingDirectionSwitch(RE::Actor* actor) const
 	return DirectionHandler::GetSingleton()->HasQueuedDirection(actor, Queued);
 }
 
-void AIHandler::QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool force)
+void AIHandler::QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool force, float inputDelay)
 {
+	const float Delay = inputDelay < 0.f ? GuardInputSeconds : inputDelay;
 	std::unique_lock DirLock(DirectionQueueMtx);
 	// force means override: a defensive correction replaces a pending switch and
 	// a deliberate one can't replace it. It still pays the input delay.
@@ -3082,7 +3775,7 @@ void AIHandler::QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool forc
 		{
 			return;
 		}
-		DirectionQueue[actor->GetHandle()] = { dir, force, GuardInputSeconds };
+		DirectionQueue[actor->GetHandle()] = { dir, force, Delay };
 		return;
 	}
 	// Deciding the same line again is not a new movement. Re-arming it every
@@ -3102,10 +3795,43 @@ void AIHandler::QueueDirectionSwitch(RE::Actor* actor, Directions dir, bool forc
 		((static_cast<int>(Iter->second.dir) + 2) % 4) == static_cast<int>(dir);
 	Iter->second.dir = dir;
 	Iter->second.force = force;
-	if (Opposite)
+	// An explicit delay is a floor: a read redirecting a pending guess must not inherit its head start.
+	if (inputDelay >= 0.f)
 	{
-		Iter->second.timeLeft = GuardInputSeconds;
+		Iter->second.timeLeft = std::max(Iter->second.timeLeft, Delay);
 	}
+	else if (Opposite)
+	{
+		Iter->second.timeLeft = Delay;
+	}
+}
+
+bool AIHandler::IsSwitchPending(RE::Actor* actor, Directions dir) const
+{
+	std::shared_lock DirLock(DirectionQueueMtx);
+	auto Iter = DirectionQueue.find(actor->GetHandle());
+	return Iter != DirectionQueue.end() &&
+		DirectionHandler::FoldDirection(Iter->second.dir) == DirectionHandler::FoldDirection(dir);
+}
+
+void AIHandler::CancelSwitchUnderway(RE::Actor* actor)
+{
+	{
+		std::unique_lock DirLock(DirectionQueueMtx);
+		DirectionQueue.erase(actor->GetHandle());
+	}
+	DirectionHandler::GetSingleton()->CancelQueuedDirection(actor);
+}
+
+bool AIHandler::IsSwitchUnderway(RE::Actor* actor, Directions dir) const
+{
+	if (IsSwitchPending(actor, dir))
+	{
+		return true;
+	}
+	Directions Queued;
+	return DirectionHandler::GetSingleton()->HasQueuedDirection(actor, Queued) &&
+		DirectionHandler::FoldDirection(Queued) == DirectionHandler::FoldDirection(dir);
 }
 
 void AIHandler::SwitchToNextAttack(RE::Actor* actor)
@@ -3129,6 +3855,30 @@ void AIHandler::SwitchToNextAttack(RE::Actor* actor)
 	else
 	{
 		diff.currentAttackIdx = 0;
+	}
+}
+
+bool AIHandler::SetQueuedChargeGoal(RE::Actor* actor, float goal)
+{
+	std::unique_lock lock(ActionQueueMtx);
+	auto Iter = ActionQueue.find(actor->GetHandle());
+	if (Iter == ActionQueue.end() || Iter->second.toDo != Actions::Attack)
+	{
+		return false;
+	}
+	Iter->second.chargeGoal = goal;
+	Iter->second.heldForCharge = 0.f;
+	return true;
+}
+
+void AIHandler::ExpediteQueuedAction(RE::Actor* actor)
+{
+	std::unique_lock lock(ActionQueueMtx);
+	auto Iter = ActionQueue.find(actor->GetHandle());
+	if (Iter != ActionQueue.end())
+	{
+		// The runner dispatches once this is negative.
+		Iter->second.timeLeft = -0.001f;
 	}
 }
 
@@ -3214,46 +3964,110 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 
 		// generate attack patterns ahead of time, from the seed rather than rand so
 		// you can learn after dying
-		std::array<Directions, 3> Lines{};
+		std::array<Directions, 4> Lines{};
 		int NumLines = 0;
 		for (Directions Dir : { Directions::TR, Directions::TL, Directions::BL, Directions::BR })
 		{
-			if (DirectionHandler::DirectionEnabled(Dir) && NumLines < 3)
+			if (DirectionHandler::DirectionEnabled(Dir))
 			{
 				Lines[NumLines++] = Dir;
 			}
 		}
+		auto& Pattern = DifficultyMap[actor->GetHandle()].attackPattern;
+		// Every loop this mode can run. Three lines: the table rows fold into repeats, so
+		// loops over the real lines, never the same line back-to-back so combos still
+		// complete. Nine distinct: 3 by favourite line (length 4; swapping Y and Z only
+		// shifts that loop) and 6 by ordering (length 5). Four lines: the table rows.
+		std::vector<std::vector<Directions>> Pool;
 		if (NumLines == 3)
 		{
-			// Three lines: the table rows fold into repeats, so build a loop over the real lines.
-			// Never the same line back-to-back, so combos still complete.
-			// Nine distinct loops, evenly: 3 by favourite line (length 4; swapping Y and Z
-			// only shifts that loop) and 6 by ordering (length 5).
-			const uint32_t Pick = ActorSeed % 9;
-			const uint32_t Perm = Pick < 3 ? Pick * 2 : Pick - 3;
-			std::array<int, 3> Order{ 0, 1, 2 };
-			for (uint32_t i = 0; i < Perm; ++i)
+			for (uint32_t Pick = 0; Pick < 9; ++Pick)
 			{
-				std::next_permutation(Order.begin(), Order.end());
-			}
-			const Directions X = Lines[Order[0]], Y = Lines[Order[1]], Z = Lines[Order[2]];
-			auto& Pattern = DifficultyMap[actor->GetHandle()].attackPattern;
-			if (Pick < 3)
-			{
-				Pattern = { X, Y, X, Z };     // one favourite line
-			}
-			else
-			{
-				Pattern = { X, Y, X, Y, Z };  // one rare line
+				const uint32_t Perm = Pick < 3 ? Pick * 2 : Pick - 3;
+				std::array<int, 3> Order{ 0, 1, 2 };
+				for (uint32_t i = 0; i < Perm; ++i)
+				{
+					std::next_permutation(Order.begin(), Order.end());
+				}
+				const Directions X = Lines[Order[0]], Y = Lines[Order[1]], Z = Lines[Order[2]];
+				if (Pick < 3)
+				{
+					Pool.push_back({ X, Y, X, Z });     // one favourite line
+				}
+				else
+				{
+					Pool.push_back({ X, Y, X, Y, Z });  // one rare line
+				}
 			}
 		}
 		else
 		{
-			int Idx = ActorSeed % TotalAttackCombos;
-			for (unsigned i = 0; i < AttackComboLength; ++i)
+			for (const auto& Row : AIAttackCombo)
 			{
-				DifficultyMap[actor->GetHandle()].attackPattern.push_back(AIAttackCombo[Idx][i]);
+				Pool.emplace_back(std::begin(Row), std::end(Row));
 			}
+		}
+		const FollowUpAxis Axis = DirectionHandler::GetSingleton()->GetFollowUpAxis(actor);
+		if (Axis == FollowUpAxis::None)
+		{
+			Pattern = Pool[ActorSeed % Pool.size()];
+		}
+		else
+		{
+			// Swords and polearms lean on their fast follow-up without all playing it. Four
+			// lines also offer the loops over all four, two of which cross one axis every
+			// step. The pick is weighted by the square of the share of steps that cross the
+			// weapon's axis, then started at a seeded point.
+			if (NumLines == 4)
+			{
+				constexpr Directions Loops[6][4] = {
+					{ Directions::TR, Directions::TL, Directions::BL, Directions::BR },  // square
+					{ Directions::TR, Directions::BR, Directions::BL, Directions::TL },
+					{ Directions::TR, Directions::TL, Directions::BR, Directions::BL },  // Z: sides every step
+					{ Directions::TR, Directions::BL, Directions::BR, Directions::TL },
+					{ Directions::TR, Directions::BR, Directions::TL, Directions::BL },  // N: heights every step
+					{ Directions::TR, Directions::BL, Directions::TL, Directions::BR },
+				};
+				for (const auto& Loop : Loops)
+				{
+					Pool.emplace_back(std::begin(Loop), std::end(Loop));
+				}
+			}
+			std::uint32_t Hash = ActorSeed * 0x9E3779B1u;
+			Hash ^= Hash >> 15;
+			std::vector<float> Weights;
+			float Total = 0.f;
+			for (const auto& Loop : Pool)
+			{
+				int Cross = 0;
+				for (size_t i = 0; i < Loop.size(); ++i)
+				{
+					Cross += DirectionHandler::AxisHalf(Loop[i], Axis) !=
+						DirectionHandler::AxisHalf(Loop[(i + 1) % Loop.size()], Axis) ? 1 : 0;
+				}
+				const float Share = static_cast<float>(Cross) / static_cast<float>(Loop.size());
+				Weights.push_back(Share * Share);
+				Total += Share * Share;
+			}
+			float PoolRoll = static_cast<float>(Hash % 10000u) / 10000.f * Total;
+			size_t Chosen = 0;
+			while (Chosen + 1 < Pool.size() && PoolRoll >= Weights[Chosen])
+			{
+				PoolRoll -= Weights[Chosen];
+				++Chosen;
+			}
+			Pattern = Pool[Chosen];
+			std::rotate(Pattern.begin(), Pattern.begin() + (Hash >> 16) % Pattern.size(), Pattern.end());
+		}
+		if (Settings::VerboseLogging)
+		{
+			std::string Text;
+			for (Directions Dir : Pattern)
+			{
+				Text += std::format(" {}", static_cast<int>(Dir));
+			}
+			logger::info("[ai] {} attack pattern:{} ({})", Who(actor), Text,
+				Axis == FollowUpAxis::Side ? "leans side to side" : Axis == FollowUpAxis::Height ? "leans up and down" : "seeded");
 		}
 
 
@@ -3315,7 +4129,7 @@ AIHandler::Difficulty AIHandler::CalcAndInsertDifficulty(RE::Actor* actor)
 
 			if (Settings::VerboseLogging)
 			{
-				logger::info("{} archetype={} (agg={:.2f} pat={:.2f} bait={:.2f} caut={:.2f} pow={:.2f} feint={:.2f})",
+				logger::info("[ai] {} archetype={} (agg={:.2f} pat={:.2f} bait={:.2f} caut={:.2f} pow={:.2f} feint={:.2f})",
 					Who(actor), arch.name,
 					d.aggressionMod, d.patienceMod, d.baitTendency, d.cautionMod, d.powerAttackTendency, d.feintTendency);
 			}
@@ -3382,9 +4196,7 @@ void AIHandler::SignalBadThingExternalCalled(RE::Actor* actor, Directions attack
 		DisconfirmLine(Iter->second.directionChangeChance[failedLine]);
 	}
 
-	// increase percentage of blocking this location
-	IncreaseBlockChance(actor, attackDir, mt_rand() % 10 + 5, AISettings::BeliefSpreadModifierHit);
-
+	// A hit no longer credits its own line: what follows it is the chain graph's to say.
 	float NewMistakeRatio = DifficultyMap[actor->GetHandle()].mistakeRatio - AISettings::AIGrowthFactor;
 	NewMistakeRatio = std::min(NewMistakeRatio, MaxMistakeRange);
 	NewMistakeRatio = std::max(NewMistakeRatio, -MaxMistakeRange);
@@ -3411,15 +4223,15 @@ void AIHandler::SignalGoodThingExternalCalled(RE::Actor* actor, Directions attac
 	{
 		dirs.insert(dir);
 	}
-	// increase percentage of blocking this location
-	IncreaseBlockChance(actor, attackedDir, mt_rand() % 5 + 3, AISettings::BeliefSpreadModifierBlock);
+	// A blocked hit no longer credits its own line either; the lose-shift below is the read.
 	// Lose-shift: a transition that just got blocked is one the target is less
-	// likely to try again from there.
+	// likely to try again from there. One sighting's worth: at two, a habit that
+	// kept coming eroded until it was blocked only half the time.
 	auto& Chain = Iter->second;
 	if (Chain.lastChainFrom >= 0 && Chain.lastChainTo == static_cast<int>(attackedDir))
 	{
 		int& Edge = Chain.chainEdges[Chain.lastChainFrom][Chain.lastChainTo];
-		Edge = std::max(0, Edge - 2 * ChainEdgeGain);
+		Edge = std::max(0, Edge - ChainEdgeGain);
 		Chain.lastChainFrom = -1;
 	}
 
@@ -3521,6 +4333,27 @@ float AIHandler::CalcUpdateTimer(RE::Actor* actor)
 	}
 	// Floored so direction switching can't flicker.
 	base = std::max(base, LowestTime);
+	return base;
+}
+
+float AIHandler::CalcProcessingTimer(RE::Actor* actor)
+{
+	float base = AISettings::NormalProcessingTimer;
+	{
+		std::shared_lock lock(DifficultyProcessingTimerMtx);
+		const Difficulty mod = CalcAndInsertDifficulty(actor);
+		auto It = DifficultyProcessingTimer.find(mod);
+		if (It != DifficultyProcessingTimer.end())
+		{
+			base = It->second;
+		}
+	}
+	// Tiredness slows the registering and deciding too. find, not at(): see CalcActionTimer.
+	auto DiffIter = DifficultyMap.find(actor->GetHandle());
+	if (DiffIter != DifficultyMap.end())
+	{
+		base += AISettings::FatigueProcessingSeconds * Fatigue(DiffIter->second.fightSeconds);
+	}
 	return base;
 }
 
@@ -3630,13 +4463,57 @@ void AIHandler::Update(float delta)
 				{
 					ActionQueueIter->second.waitedForDir += delta;
 				}
+				// A charged opener holds its line until the charge reaches its goal. A target
+				// that leaves reach ends it; the hold is bounded by the full charge time, so a
+				// block that zeroed the charge still lets the swing go.
+				else if (ActionQueueIter->second.chargeGoal > 0.f)
+				{
+					Action& Act = ActionQueueIter->second;
+					RE::Actor* Target = GetCombatTarget(actor);
+					const float Reach = (actor->GetReach() + AttackLungeUnits) * ChargeReachSlack;
+					const float Ratio = DirectionHandler::GetSingleton()->GetGuardChargeRatio(actor);
+					Act.heldForCharge += delta;
+					if (!Target || TorsoDistanceSq(actor, Target) > Reach * Reach)
+					{
+						if (Settings::VerboseLogging)
+						{
+							logger::info("[charge] {} drops its charged opener at {:.2f}: target out of reach", Who(actor), Ratio);
+						}
+						Act.toDo = Actions::None;
+					}
+					else if (Ratio >= Act.chargeGoal || Act.heldForCharge >= DifficultySettings::GuardChargeFull + ChargeHoldMargin)
+					{
+						// Go. Their guard on the line: re-aim at an open one inside the carry window,
+						// the switch landing before the swing as for any attack.
+						Act.chargeGoal = 0.f;
+						const Directions Line = DirectionHandler::GetSingleton()->GetCurrentDirection(actor);
+						const Directions Open = LineCovered(Target, Line) ? OpenLineAgainst(actor, Target) : Line;
+						if (Open != Line)
+						{
+							DirectionHandler::GetSingleton()->WantToSwitchTo(actor, Open, true);
+							Act.waitedForDir = 0.f;
+						}
+						if (Settings::VerboseLogging)
+						{
+							logger::info("[charge] {} swings at {:.2f} charge after {:.2f}s: line {} {}", Who(actor), Ratio, Act.heldForCharge,
+								static_cast<int>(Line), Open != Line ? std::format("covered, re-aims to {}", static_cast<int>(Open)) : "open");
+						}
+					}
+				}
 				else if (TryAttack(actor))
 				{
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 				else
 				{
+					// Unranked while it can't start, so the defence can displace it; dropped after
+					// StaleSwingSeconds so a swing that never gets its window can't park the offense.
 					ActionQueueIter->second.priority = 0;
+					ActionQueueIter->second.timeLeft -= delta;
+					if (ActionQueueIter->second.timeLeft < -StaleSwingSeconds)
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 
 			}
@@ -3650,6 +4527,11 @@ void AIHandler::Update(float delta)
 				else
 				{
 					ActionQueueIter->second.priority = 0;
+					ActionQueueIter->second.timeLeft -= delta;
+					if (ActionQueueIter->second.timeLeft < -StaleSwingSeconds)
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 			}
 			else if (ActionQueueIter->second.toDo == Actions::Block)
@@ -3669,14 +4551,16 @@ void AIHandler::Update(float delta)
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 			}
-			else if (ActionQueueIter->second.toDo == Actions::UnblockRiposte)
+			else if (ActionQueueIter->second.toDo == Actions::UnblockRiposte ||
+				ActionQueueIter->second.toDo == Actions::UnblockPowerRiposte)
 			{
 				bool staggering = actor->AsActorState()->actorState2.staggered;
 				if (!staggering)
 				{
 					actor->AsActorState()->actorState2.wantBlocking = 0;
 					actor->NotifyAnimationGraph("blockStop");
-					ActionQueueIter->second.toDo = Actions::Attack;
+					ActionQueueIter->second.toDo = ActionQueueIter->second.toDo == Actions::UnblockPowerRiposte ?
+						Actions::PowerAttack : Actions::Attack;
 					ActionQueueIter->second.timeLeft = TransitionSettleSeconds;
 					// The riposte keeps its priority into the swing.
 					ActionQueueIter->second.priority = 1;
@@ -3782,48 +4666,83 @@ void AIHandler::Update(float delta)
 				// the one read a player can rely on.
 				if (TryPowerAttack(actor))
 				{
-					ActionQueueIter->second.toDo = Actions::EndFeint;
-					ActionQueueIter->second.timeLeft = DifficultySettings::FeintWindowTime - (ActionQueueIter->second.baseTimer * .5f);
-					ActionQueueIter->second.priority = 2;
+					// The cancel fires at the feint point; EndFeint waits for it. A refusal
+					// here means the engine took no swing, and QueueFeint logged it.
+					if (AttackHandler::GetSingleton()->QueueFeint(actor))
+					{
+						ActionQueueIter->second.toDo = Actions::EndFeint;
+						ActionQueueIter->second.timeLeft = 0.f;
+						ActionQueueIter->second.priority = 2;
+					}
+					else
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 				else
 				{
 					ActionQueueIter->second.priority = 0;
+					ActionQueueIter->second.timeLeft -= delta;
+					if (ActionQueueIter->second.timeLeft < -StaleSwingSeconds)
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 
 
 			}
 			else if (ActionQueueIter->second.toDo == Actions::EndFeint)
 			{
-				// Refused (window missed or no stamina): the original swing goes through.
-				const bool Feinted = !actor->IsBlocking() && AttackHandler::GetSingleton()->HandleFeint(actor);
-				if (!Feinted && Settings::VerboseLogging && !actor->IsBlocking())
+				auto* Attacks = AttackHandler::GetSingleton();
+				if (Attacks->TakeFeintResolved(actor))
 				{
-					logger::info("[feint] {} planned feint didn't fire (window open {})",
-						Who(actor), AttackHandler::GetSingleton()->InFeintWindow(actor));
-				}
-				RE::Actor* FeintTarget = Feinted ? GetCombatTarget(actor) : nullptr;
-				// Already countered: hold the line the counter is aimed at and let the
-				// defence block or masterstrike it.
-				if (FeintTarget && IsIncomingSwing(FeintTarget, actor))
-				{
-					if (Settings::VerboseLogging)
+					RE::Actor* FeintTarget = GetCombatTarget(actor);
+					// Already countered: hold the line the counter is aimed at and let the
+					// defence block or masterstrike it.
+					if (FeintTarget && IsIncomingSwing(FeintTarget, actor))
 					{
-						logger::info("[feint] {} holds its line: {} is already countering", Who(actor), Who(FeintTarget));
+						if (Settings::VerboseLogging)
+						{
+							logger::info("[feint] {} holds its line: {} is already countering", Who(actor), Who(FeintTarget));
+						}
+						ActionQueueIter->second.toDo = Actions::None;
 					}
-					ActionQueueIter->second.toDo = Actions::None;
+					else
+					{
+						// A feint only cancels; the follow-up crosses or stays by the coin, and waits
+						// out the stop's blend either way.
+						if (static_cast<float>(static_cast<unsigned>(GetRand()) % 10000u) / 10000.f >= FeintSameLineShare)
+						{
+							Attacks->HandleFeintChangeDirection(actor);
+						}
+						ActionQueueIter->second.toDo = Actions::FeintFollowup;
+						ActionQueueIter->second.timeLeft = FeintFollowupSettle;
+						// Unranked: a forced block or dodge may take the slot during the settle;
+						// only swings must wait it out (InTransition).
+						ActionQueueIter->second.priority = 0;
+					}
 				}
-				else if (Feinted)
+				else if (Attacks->FeintPending(actor))
 				{
-					// A feint only cancels now; the NPC's follow-up still comes off the other side.
-					AttackHandler::GetSingleton()->HandleFeintChangeDirection(actor);
-					ActionQueueIter->second.toDo = Actions::FeintFollowup;
-					ActionQueueIter->second.timeLeft = 0.18f;
-					ActionQueueIter->second.priority = 2;
+					// Waiting for the feint point (under a second at any plausible weapon speed).
+					ActionQueueIter->second.timeLeft -= delta;
+					if (ActionQueueIter->second.timeLeft < -2.f * StaleSwingSeconds)
+					{
+						if (Settings::VerboseLogging)
+						{
+							logger::info("[feint] {} planned feint never reached its point", Who(actor));
+						}
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 				else
 				{
-					// we tried but they attacked anyway
+					// Refused at the point (no stamina, swing cut short) or dropped at the
+					// hit: the original swing goes through.
+					if (Settings::VerboseLogging)
+					{
+						logger::info("[feint] {} planned feint didn't fire", Who(actor));
+					}
 					ActionQueueIter->second.toDo = Actions::None;
 				}
 
@@ -3879,7 +4798,7 @@ void AIHandler::Update(float delta)
 							InTransition(actor) ? ": in transition" :
 							IsAttackingDisabled(actor) ? ": attacking disabled" :
 							!Attacks->CanAttack(actor) ? ": locked out" :
-							Attacks->InFeintWindow(actor) ? ": feint window" :
+							Attacks->FeintPending(actor) ? ": feint pending" :
 							Attacks->LacksAttackStamina(actor) ? ": no stamina" : ": mid-swing";
 						logger::info("[opportunity] {} {} {}{}", Who(actor), Swung ? "swings at" : "couldn't swing at", Who(Opening), Why);
 					}
@@ -3934,7 +4853,14 @@ void AIHandler::Update(float delta)
 				}
 				else
 				{
+					// Same stale rule as the light: unranked while it can't start, dropped after
+					// StaleSwingSeconds.
 					ActionQueueIter->second.priority = 0;
+					ActionQueueIter->second.timeLeft -= delta;
+					if (ActionQueueIter->second.timeLeft < -StaleSwingSeconds)
+					{
+						ActionQueueIter->second.toDo = Actions::None;
+					}
 				}
 
 			}
@@ -3960,6 +4886,12 @@ void AIHandler::Update(float delta)
 					// A straight dash in arrives swinging: the strike is due as the dodge lands.
 					if (Dashing)
 					{
+						// On the guard it dodged in on: a switch still in flight would spend the charge.
+						{
+							std::unique_lock DirLock(DirectionQueueMtx);
+							DirectionQueue.erase(ActionQueueIter->first);
+						}
+						DirectionHandler::GetSingleton()->CancelQueuedDirection(actor);
 						ActionQueueIter->second.toDo = Actions::DashAttack;
 						ActionQueueIter->second.timeLeft = DashSwingDelay;
 					}
@@ -4035,7 +4967,62 @@ void AIHandler::Update(float delta)
 	}
 	UpdateTimerMtx.unlock();
 
-	
+
+}
+
+void AIHandler::LogExchange(RE::Actor* attacker, RE::Actor* defender, const char* outcome, float damage)
+{
+	if (!Settings::VerboseLogging || !attacker || !defender || (!attacker->IsPlayerRef() && !defender->IsPlayerRef()))
+	{
+		return;
+	}
+	// The defender's record is about its own target's swing; anyone else's hit is untracked.
+	const bool Tracked = GetCombatTarget(defender) == attacker;
+	std::unique_lock Lock(DifficultyMapMtx);
+	auto It = DifficultyMap.find(defender->GetHandle());
+	AIDifficulty* Diff = (It != DifficultyMap.end() && Tracked) ? &It->second : nullptr;
+	if (Diff)
+	{
+		Diff->swingContact = true;
+	}
+	LogExchangeLine(attacker, defender, Diff, outcome, damage);
+}
+
+void AIHandler::LogExchangeLine(RE::Actor* attacker, RE::Actor* defender, const AIDifficulty* diff, const char* outcome, float damage) const
+{
+	if (!Settings::VerboseLogging)
+	{
+		return;
+	}
+	auto* Dir = DirectionHandler::GetSingleton();
+	const bool Live = diff && diff->swingElapsed >= 0.f;
+	const int Line = Live && diff->swingLine >= 0 ? diff->swingLine : static_cast<int>(Dir->GetCurrentDirection(attacker));
+	const bool Power = Live ? diff->swingWasPower : IsPowerAttacking(attacker);
+	const bool Landed = std::strcmp(outcome, "hit") == 0 || std::strcmp(outcome, "unblockable") == 0;
+	const bool Chained = Live ? diff->swingChained : Dir->GetComboStep(attacker) > (Landed ? 1 : 0);
+	std::string Answer = "-";
+	if (diff)
+	{
+		Answer = diff->answerKind;
+		if (diff->answerAt >= 0.f)
+		{
+			Answer += std::format(" due +{:.0f}ms", diff->answerAt * 1000.f);
+		}
+		if (diff->pressAt >= 0.f)
+		{
+			Answer += std::format(", press +{:.0f}ms", diff->pressAt * 1000.f);
+		}
+		if (diff->answerLater)
+		{
+			Answer += std::format(", then {}", diff->answerLater);
+		}
+	}
+	logger::info("[xchg] {} -> {}: line {} {}{}{} speed {:.2f} | answer {} | guard {} {} | {}{}",
+		Who(attacker), Who(defender), Line, Power ? "power" : "light",
+		Dir->IsUnblockable(attacker) ? " unblockable" : "", Chained ? " chained" : "",
+		AttackHandler::EffectiveAttackSpeed(attacker), Answer,
+		IsGuardUp(defender) ? "up" : "down", Dir->HasBlockAngle(attacker, defender) ? "on angle" : "off angle",
+		outcome, damage > 0.f ? std::format(" dmg {:.1f}", damage) : std::string());
 }
 
 

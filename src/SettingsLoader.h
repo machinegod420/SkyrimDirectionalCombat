@@ -31,10 +31,14 @@ struct DifficultySettings
 	// then the player as the target.
 	static float UnblockableHealthFloor;
 	static float PlayerUnblockableHealthFloor;
+	// Lower for creature targets: they can't stop the combo, so the finisher lands every chain.
+	static float CreatureUnblockableHealthFloor;
 	static float ProjectileDamageMult;
 	static float StaggerResetTimer;
 	static float ChamberWindowTime;
-	static float FeintWindowTime;
+	// Seconds into a swing (at attack speed 1) where a queued feint cancels it. One point
+	// for every press, like For Honor: the feint is a decision, not a reaction test.
+	static float FeintPointSeconds;
 	// Share of max stamina a feint costs; the swing it cancels is never charged.
 	static float FeintStaminaCost;
 	static float StaminaRegenMult;
@@ -54,13 +58,14 @@ struct DifficultySettings
 	static float StaminaCost;
 	static float WeaponWeightStaminaMult;
 	static float KnockbackMult;
-	static float StaminaDamageCap;
 	// Share of the defender's bar per blocked hit, before weapon mass and Block.
 	static float BlockCostRatio;
 	// Share of that cost Block skill removes at 100.
 	static float BlockSkillMaxReduction;
 	// Multiplier on a blocked power attack's stamina cost.
 	static float PowerAttackBlockCostMult;
+	// Multiplier on the stamina cost of blocking a creature-graph attacker.
+	static float CreatureBlockCostMult;
 	// Multiplier on the attacker's own stamina cost for a power attack.
 	static float PowerAttackStaminaMult;
 	static float DodgeCost;
@@ -75,6 +80,8 @@ struct DifficultySettings
 	static bool EnableGuardCharge;
 	static float GuardChargeStartup;
 	static float GuardChargeFull;
+	// Seconds a charge carried through a line switch takes to drain if not spent.
+	static float GuardChargeSwitchDecay;
 	static float GuardChargeMaxSpeedBonus;
 
 	// Parsed but unread. Reserved for authored combo patterns.
@@ -93,7 +100,7 @@ enum class DirectionMode
 enum class DodgeSystem
 {
 	None = 0,    // no dodge support
-	DMCO = 1,    // external DMCO mod
+	// 1 was DMCO: dropped, the ini value now loads as Custom.
 	Custom = 2,  // our built-in dodge (DodgeHandler)
 };
 
@@ -104,10 +111,11 @@ struct Settings
 	static bool HasTDM;
 	static bool EnableForH2H;
 	static bool MNBMode;
+	// Seconds the guard idle takes to reach a new line (visual only; the commit is TimeBetweenChanges).
+	static float GuardBlendTime;
 	static DirectionMode ActiveDirectionMode;
 	static bool IsForHonor() { return ActiveDirectionMode == DirectionMode::ForHonor; }
 	static bool IsKCD() { return ActiveDirectionMode == DirectionMode::KCD; }
-	static bool ExperimentalMode;
 	static DodgeSystem ActiveDodgeSystem;
 	static bool SwitchingCostsStamina;
 	static bool RemovePowerAttacks;
@@ -212,6 +220,8 @@ struct AISettings
 	static float FatigueHorizonSeconds;
 	static float FatigueUpdateSeconds;
 	static float FatigueActionSeconds;
+	// Added to the processing timer at full fatigue: a tired fighter registers and decides slower.
+	static float FatigueProcessingSeconds;
 	// Pull toward the line the target's combo makes likely. 0 = pure learned
 	// belief, 1 = always the structurally predicted line.
 	static float ComboReadStrength;
@@ -252,6 +262,15 @@ struct AISettings
 	static float NormalActionTimer;
 	static float EasyActionTimer;
 	static float VeryEasyActionTimer;
+	// Fast processing: seconds to register a stimulus (their swing) before the action
+	// timer decides. Reactions only; plans never wait on it. Calibrated to one measured
+	// player's blocks: Hard lands the read where that player's median did.
+	static float LegendaryProcessingTimer;
+	static float VeryHardProcessingTimer;
+	static float HardProcessingTimer;
+	static float NormalProcessingTimer;
+	static float EasyProcessingTimer;
+	static float VeryEasyProcessingTimer;
 };
 
 struct UISettings

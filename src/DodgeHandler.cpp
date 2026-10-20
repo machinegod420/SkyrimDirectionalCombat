@@ -1,4 +1,5 @@
 #include "DodgeHandler.h"
+#include "DirectionHandler.h"
 #include "SettingsLoader.h"
 
 namespace
@@ -285,7 +286,18 @@ float DodgeHandler::SecondsSinceDodge(RE::Actor* actor)
 	{
 		return -1.f;
 	}
-	return std::chrono::duration<float>(std::chrono::steady_clock::now() - Iter->second).count();
+	return std::chrono::duration<float>(std::chrono::steady_clock::now() - Iter->second.at).count();
+}
+
+float DodgeHandler::SecondsSinceBackDodge(RE::Actor* actor)
+{
+	std::shared_lock lock(DodgeMtx);
+	auto Iter = DodgeStarts.find(actor->GetHandle());
+	if (Iter == DodgeStarts.end() || Iter->second.direction != DodgeDirection::Backward)
+	{
+		return -1.f;
+	}
+	return std::chrono::duration<float>(std::chrono::steady_clock::now() - Iter->second.at).count();
 }
 
 float DodgeHandler::GetDodgeCost(RE::Actor* actor)
@@ -299,30 +311,9 @@ void DodgeHandler::TriggerDodge(RE::Actor* actor, DodgeDirection direction)
 {
 	if (!actor) return;
 
-	switch (Settings::ActiveDodgeSystem)
+	if (Settings::ActiveDodgeSystem == DodgeSystem::Custom)
 	{
-	case DodgeSystem::Custom:
 		ApplyImpulse(actor, direction);
-		break;
-	case DodgeSystem::DMCO:
-	{
-		// Map our 8-direction enum to DMCO's 3-direction (back-side) scheme.
-		// DMCO uses Dodge_Direction graph variable with values 4/5/6 and the
-		// corresponding Dodge_RB/Dodge_B/Dodge_LB events. Any non-back-side
-		// direction falls through to the plain Back dodge.
-		int dmcoDir = 5;
-		const char* event = "Dodge_B";
-		if (direction == DodgeDirection::BackwardRight) { dmcoDir = 4; event = "Dodge_RB"; }
-		else if (direction == DodgeDirection::BackwardLeft) { dmcoDir = 6; event = "Dodge_LB"; }
-		actor->SetGraphVariableInt("Dodge_Direction", dmcoDir);
-		actor->NotifyAnimationGraph(event);
-		actor->NotifyAnimationGraph("Dodge");
-		break;
-	}
-	case DodgeSystem::None:
-	default:
-		// no dodge support — no-op
-		break;
 	}
 }
 
@@ -363,7 +354,7 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	state.timeTotal = startedFromIdle ? kDodgeDurationIdle : kDodgeDuration;
 	state.rampEnd   = startedFromIdle ? kRampEndIdle       : kRampEnd;
 	ActiveDodges[actor->GetHandle()] = state;
-	DodgeStarts[actor->GetHandle()] = std::chrono::steady_clock::now();
+	DodgeStarts[actor->GetHandle()] = { std::chrono::steady_clock::now(), direction };
 	// Write graph variables for the dodge state machine. Direction is the
 	// vanilla locomotion variable (may get rewritten by the engine each frame
 	// from movement intent); DirDodge is our custom variable for the alt-blend
@@ -381,6 +372,12 @@ void DodgeHandler::ApplyImpulse(RE::Actor* actor, DodgeDirection direction)
 	if (!actor->IsPlayer())
 	{
 		actor->SetGraphVariableInt("iUseDirDodge", 1);
+	}
+	lock.unlock();
+	// A straight dodge in charges the guard it was made on.
+	if (direction == DodgeDirection::Forward)
+	{
+		DirectionHandler::GetSingleton()->FillGuardCharge(actor);
 	}
 }
 
@@ -458,7 +455,7 @@ void DodgeHandler::ApplyOnGround(RE::bhkCharacterController* controller)
 			const RE::NiPoint3 endPos = dodgingActor->GetPosition();
 			const RE::NiPoint3 delta = endPos - it->second.startPos;
 			const float horizontal = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-			logger::info("Dodge end ({}): speed={} elapsed={:.3f}/{:.3f} -> horizontal={:.1f} units (3D={:.1f})",
+			logger::info("[dodge] end ({}): speed={} elapsed={:.3f}/{:.3f} -> horizontal={:.1f} units (3D={:.1f})",
 				Who(dodgingActor), it->second.speed, it->second.elapsed, it->second.timeTotal, horizontal, delta.Length());
 		}
 		

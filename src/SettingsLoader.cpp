@@ -16,14 +16,15 @@
 float DifficultySettings::ComboResetTimer = 3.f;
 float DifficultySettings::MeleeDamageMult = 2.f;
 float DifficultySettings::SameSideSpeedPenalty = 0.15f;
-float DifficultySettings::ChainPokeSpeedPenalty = 0.3f;
+float DifficultySettings::ChainPokeSpeedPenalty = 0.2f;
 float DifficultySettings::UnblockableDamageMult = 2.5f;
 float DifficultySettings::UnblockableHealthFloor = 0.1f;
 float DifficultySettings::PlayerUnblockableHealthFloor = 0.1f;
+float DifficultySettings::CreatureUnblockableHealthFloor = 0.05f;
 float DifficultySettings::ProjectileDamageMult = 0.25f;
 float DifficultySettings::StaggerResetTimer = 1.5f;
 float DifficultySettings::ChamberWindowTime = 0.2f;
-float DifficultySettings::FeintWindowTime = 0.4f;
+float DifficultySettings::FeintPointSeconds = 0.366f;
 float DifficultySettings::FeintStaminaCost = 0.05f;
 float DifficultySettings::StaminaRegenMult = 39.f;
 float DifficultySettings::CreatureStaminaRegenMult = 5.f;
@@ -35,10 +36,10 @@ float DifficultySettings::NonNPCStaggerMult = 2.f;
 float DifficultySettings::StaminaCost = 0.1f;
 float DifficultySettings::WeaponWeightStaminaMult = 0.25f;
 float DifficultySettings::KnockbackMult = 2.f;
-float DifficultySettings::StaminaDamageCap = 0.4f;
 float DifficultySettings::BlockCostRatio = 0.1f;
 float DifficultySettings::BlockSkillMaxReduction = 0.5f;
 float DifficultySettings::PowerAttackBlockCostMult = 1.75f;
+float DifficultySettings::CreatureBlockCostMult = 1.5f;
 float DifficultySettings::PowerAttackStaminaMult = 1.5f;
 float DifficultySettings::DodgeCost = 0.15f;
 float DifficultySettings::TimedBlockStartup = 0.333f;
@@ -48,6 +49,7 @@ bool DifficultySettings::KCDStyleCombos = false;
 bool DifficultySettings::EnableGuardCharge = true;
 float DifficultySettings::GuardChargeStartup = 0.5f;
 float DifficultySettings::GuardChargeFull = 2.0f;
+float DifficultySettings::GuardChargeSwitchDecay = 1.0f;
 // for scale: the existing small attack-speed buff is 0.12, the full one 0.25
 float DifficultySettings::GuardChargeMaxSpeedBonus = 0.20f;
 
@@ -56,8 +58,8 @@ bool Settings::HasPrecision = false;
 bool Settings::HasTDM = false;
 bool Settings::EnableForH2H = true;
 bool Settings::MNBMode = false;
+float Settings::GuardBlendTime = 0.33f;
 DirectionMode Settings::ActiveDirectionMode = DirectionMode::Normal;
-bool Settings::ExperimentalMode = false;
 DodgeSystem Settings::ActiveDodgeSystem = DodgeSystem::None;
 bool Settings::SwitchingCostsStamina = true;
 bool Settings::RemovePowerAttacks = true;
@@ -118,6 +120,7 @@ float AISettings::FatigueOnsetSeconds = 30.f;
 float AISettings::FatigueHorizonSeconds = 90.f;
 float AISettings::FatigueUpdateSeconds = 0.08f;
 float AISettings::FatigueActionSeconds = 0.05f;
+float AISettings::FatigueProcessingSeconds = 0.05f;
 float AISettings::ComboReadStrength = 0.5f;
 float AISettings::ComboReadLowTierScale = 0.2f;
 float AISettings::InitiativeRatePerTier = 0.57f;
@@ -143,6 +146,15 @@ float AISettings::HardActionTimer = 0.16f;
 float AISettings::NormalActionTimer = 0.17f;
 float AISettings::EasyActionTimer = 0.18f;
 float AISettings::VeryEasyActionTimer = 0.18f;
+
+// 0.10 is the floor a human can register a visual change at; the top tiers all sit on it
+// and separate through the action timer and the prediction, not by seeing faster.
+float AISettings::LegendaryProcessingTimer = 0.10f;
+float AISettings::VeryHardProcessingTimer = 0.10f;
+float AISettings::HardProcessingTimer = 0.10f;
+float AISettings::NormalProcessingTimer = 0.12f;
+float AISettings::EasyProcessingTimer = 0.16f;
+float AISettings::VeryEasyProcessingTimer = 0.22f;
 
 float UISettings::Size = 300.f;
 float UISettings::Length = 13.f;
@@ -302,6 +314,13 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::PlayerUnblockableHealthFloor);
 				}
+				else if (fieldName == "CreatureUnblockableHealthFloor")
+				{
+					float newval = field.as<float>();
+					DifficultySettings::CreatureUnblockableHealthFloor = newval;
+					logger::info("Loaded section {} setting {} with new value {}",
+						sectionName, fieldName, DifficultySettings::CreatureUnblockableHealthFloor);
+				}
 				else if (fieldName == "ProjectileDamageMult")
 				{
 					float newval = field.as<float>();
@@ -323,12 +342,12 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::ChamberWindowTime);
 				}
-				else if (fieldName == "FeintWindowTime")
+				else if (fieldName == "FeintPointSeconds")
 				{
 					float newval = field.as<float>();
-					DifficultySettings::FeintWindowTime = newval;
+					DifficultySettings::FeintPointSeconds = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, DifficultySettings::FeintWindowTime);
+						sectionName, fieldName, DifficultySettings::FeintPointSeconds);
 				}
 				else if (fieldName == "FeintStaminaCost")
 				{
@@ -404,11 +423,6 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, DifficultySettings::KnockbackMult);
 				}
-				else if (fieldName == "StaminaDamageCap")
-				{
-					float newval = field.as<float>();
-					SETTING_MACRO(sectionName, DifficultySettings, StaminaDamageCap, newval);
-				}
 				else if (fieldName == "WeaponWeightStaminaMult")
 				{
 					float newval = field.as<float>();
@@ -428,6 +442,11 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, DifficultySettings, PowerAttackBlockCostMult, newval);
+				}
+				else if (fieldName == "CreatureBlockCostMult")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, CreatureBlockCostMult, newval);
 				}
 				else if (fieldName == "PowerAttackStaminaMult")
 				{
@@ -468,6 +487,11 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, DifficultySettings, GuardChargeFull, newval);
+				}
+				else if (fieldName == "GuardChargeSwitchDecay")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, DifficultySettings, GuardChargeSwitchDecay, newval);
 				}
 				else if (fieldName == "GuardChargeMaxSpeedBonus")
 				{
@@ -562,6 +586,11 @@ void SettingsLoader::Load(const std::string& path)
 				{
 					float newval = field.as<float>();
 					SETTING_MACRO(sectionName, AISettings, FatigueActionSeconds, newval);
+				}
+				else if (fieldName == "FatigueProcessingSeconds")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, AISettings, FatigueProcessingSeconds, newval);
 				}
 				else if (fieldName == "ComboReadStrength")
 				{
@@ -744,6 +773,36 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, AISettings::LegendaryActionTimer);
 				}
+				else if (fieldName == "VeryEasyProcessingTimer")
+				{
+					AISettings::VeryEasyProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::VeryEasyProcessingTimer);
+				}
+				else if (fieldName == "EasyProcessingTimer")
+				{
+					AISettings::EasyProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::EasyProcessingTimer);
+				}
+				else if (fieldName == "NormalProcessingTimer")
+				{
+					AISettings::NormalProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::NormalProcessingTimer);
+				}
+				else if (fieldName == "HardProcessingTimer")
+				{
+					AISettings::HardProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::HardProcessingTimer);
+				}
+				else if (fieldName == "VeryHardProcessingTimer")
+				{
+					AISettings::VeryHardProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::VeryHardProcessingTimer);
+				}
+				else if (fieldName == "LegendaryProcessingTimer")
+				{
+					AISettings::LegendaryProcessingTimer = field.as<float>();
+					logger::info("Loaded section {} setting {} with new value {}", sectionName, fieldName, AISettings::LegendaryProcessingTimer);
+				}
 			}
 			else if (sectionName == "UI")
 			{
@@ -838,6 +897,11 @@ void SettingsLoader::Load(const std::string& path)
 					logger::info("Loaded section {} setting {} with new value {}",
 						sectionName, fieldName, Settings::MNBMode);
 				}
+				else if (fieldName == "GuardBlendTime")
+				{
+					float newval = field.as<float>();
+					SETTING_MACRO(sectionName, Settings, GuardBlendTime, newval);
+				}
 				else if (fieldName == "DirectionMode")
 				{
 					int newval = field.as<int>();
@@ -846,20 +910,17 @@ void SettingsLoader::Load(const std::string& path)
 						sectionName, fieldName, newval,
 						newval == 1 ? "ForHonor" : (newval == 2 ? "KCD" : "Normal"));
 				}
-				else if (fieldName == "ExperimentalMode")
-				{
-					bool newval = field.as<bool>();
-					Settings::ExperimentalMode = newval;
-					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, Settings::ExperimentalMode);
-				}
 				else if (fieldName == "DodgeSystem")
 				{
 					int newval = field.as<int>();
-					Settings::ActiveDodgeSystem = static_cast<DodgeSystem>(newval);
+					if (newval == 1)
+					{
+						logger::warn("DodgeSystem=1 (DMCO) is no longer supported; using the built-in dodge (2)");
+						newval = 2;
+					}
+					Settings::ActiveDodgeSystem = newval == 2 ? DodgeSystem::Custom : DodgeSystem::None;
 					logger::info("Loaded section {} setting {} with new value {} ({})",
-						sectionName, fieldName, newval,
-						newval == 1 ? "DMCO" : (newval == 2 ? "Custom" : "None"));
+						sectionName, fieldName, newval, newval == 2 ? "Custom" : "None");
 				}
 				else if (fieldName == "SwitchingCostsStamina")
 				{
@@ -894,7 +955,7 @@ void SettingsLoader::Load(const std::string& path)
 					bool newval = field.as<bool>();
 					Settings::TDMOnlyLockedHumanoids = newval;
 					logger::info("Loaded section {} setting {} with new value {}",
-						sectionName, fieldName, Settings::VerboseLogging);
+						sectionName, fieldName, Settings::TDMOnlyLockedHumanoids);
 				}
 				else if (fieldName == "CreatureDirectionalAttacks")
 				{

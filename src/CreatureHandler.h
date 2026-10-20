@@ -71,6 +71,10 @@ private:
 	mutable std::shared_mutex AttackLinesMtx;
 	// Filled at data load, never written after: no lock.
 	phmap::flat_hash_set<RE::TESRace*> CreatureRaces;
+	// Marker bone per body part data where TDM overrides its torso default. Data load only.
+	phmap::flat_hash_map<RE::BGSBodyPartData*, RE::BSFixedString> MarkerBones;
+	// TDM's lock point: an override bone, else the torso body part's node, else a height guess.
+	RE::NiPoint3 MarkerPosition(RE::Actor* actor) const;
 	std::unordered_set<RE::TESRace*> LoggedRaces;
 	std::mutex LoggedRacesMtx;
 };

@@ -53,8 +53,6 @@ struct DrawCommand
 	// Native actor handle, used to key the per-actor arc smoothing state on
 	// the render thread. 0 = no smoothing identity (arcs render unsmoothed).
 	uint32_t actorId = 0;
-	// Normalized 0-1 positive mistakeRatio: how well this AI has been doing
-	// in recent exchanges. Warms the arc color from yellow toward red.
 	float confidence = 0.f;
 };
 

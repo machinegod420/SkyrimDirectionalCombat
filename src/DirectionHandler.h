@@ -5,11 +5,24 @@
 #include "Utils.h"
 #include "CreatureHandler.h"
 
+#include <array>
 #include <shared_mutex>
 #include <unordered_set>
 #include "parallel_hashmap/phmap.h"
 
 #include "3rdparty/TrueDirectionalMovementAPI.h"
+
+// Per-actor state of the inertialized guard blend (see UpdateGuardBlend).
+struct GuardBlendState
+{
+	Directions target = Directions::TR;
+	bool started = false;
+	float elapsed = 0.f;
+	std::array<float, 4> x0{};  // offset at the last retarget
+	std::array<float, 4> v0{};  // velocity at the last retarget
+	std::array<float, 4> t1{};  // seconds that decay takes
+	std::array<float, 4> weights{ 1.f, 0.f, 0.f, 0.f };  // as last written, for the twist
+};
 
 class DirectionHandler
 {
@@ -47,6 +60,15 @@ public:
 	// Which attack animation set the actor is in. The only place that mapping
 	// lives; pikes ride the battleaxe set, an unarmed or unknown weapon defaults.
 	WeaponSet AnimationSet(RE::Actor* actor) const;
+	// Swords cross sides (spears ride the battleaxe set, so a greatsword is a real
+	// one), the battleaxe set crosses heights, everything else has no axis.
+	FollowUpAxis GetFollowUpAxis(RE::Actor* actor) const;
+	// The line's half of the axis: left for Side, top for Height. A step crosses
+	// the axis when the two lines' halves differ.
+	static bool AxisHalf(Directions dir, FollowUpAxis axis)
+	{
+		return axis == FollowUpAxis::Side ? IsLeftSide(dir) : (dir == Directions::TR || dir == Directions::TL);
+	}
 	// The line this direction collapses onto in the active mode. For Honor folds
 	// TL into TR, KCD folds BR into BL, Normal folds nothing. One definition of
 	// "which lines exist" — everything that used to special-case a mode asks here.
@@ -104,6 +126,8 @@ public:
 		DirectionTimersMtx.unlock_shared();
 		return ret;
 	}
+	// Drops a switch still in flight, unless a feint locked it.
+	void CancelQueuedDirection(RE::Actor* actor);
 	void RemoveDirectionalPerks(RE::ActorHandle handle);
 	void UIDrawAngles(RE::Actor* actor);
 	// Distance and only-show-targetted filters for a non-player marker.
@@ -325,6 +349,8 @@ public:
 	// returns the 0-1 ratio AND zeroes the clock — call once, at attack start
 	float ConsumeGuardCharge(RE::Actor* actor);
 	void ResetGuardCharge(RE::Actor* actor);
+	// Full charge on the current guard at once: a straight dodge in.
+	void FillGuardCharge(RE::Actor* actor);
 
 	static Directions GetCounterDirection(Directions Direction)
 	{
@@ -523,7 +549,11 @@ private:
 	// Seconds held on the current guard line without attacking (see
 	// GetGuardChargeRatio). Pruned alongside TimedParry in Update.
 	phmap::flat_hash_map<RE::ActorHandle, float> GuardCharge;
+	// Seconds left before a charge carried through a line switch is gone. Same lock.
+	phmap::flat_hash_map<RE::ActorHandle, float> GuardChargeDecay;
 	mutable std::shared_mutex GuardChargeMtx;
+	// Main thread only: UpdateCharacter and CleanupActor.
+	phmap::flat_hash_map<RE::ActorHandle, GuardBlendState> GuardBlend;
 
 	phmap::flat_hash_set<RE::ActorHandle> ToAdd;
 	mutable std::shared_mutex ToAddMtx;

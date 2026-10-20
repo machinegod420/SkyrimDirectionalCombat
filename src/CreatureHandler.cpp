@@ -4,12 +4,6 @@
 #include "UIMenu.h"
 
 // Case-insensitive substring test on the raw string: no copy, no state.
-static bool ContainsNoCase(std::string_view hay, std::string_view needle)
-{
-	return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
-		[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }) != hay.end();
-}
-
 void CreatureHandler::UpdateActor(RE::Actor* actor)
 {
 	if (!IsCreatureOpponent(actor))
@@ -94,7 +88,7 @@ void CreatureHandler::UpdateActor(RE::Actor* actor)
 				break;
 			}
 		}
-		const RE::NiPoint3 Position = actor->GetPosition() + RE::NiPoint3(0.f, 0.f, actor->GetHeight() * 0.6f);
+		const RE::NiPoint3 Position = MarkerPosition(actor);
 		const UIHostileState Hostile = actor->IsHostileToActor(RE::PlayerCharacter::GetSingleton()) ? UIHostileState::Hostile : UIHostileState::Neutral;
 		UI::AddDrawCommand(Position, HasLine ? Line : Hidden, true, HasLine ? UIDirectionState::Attacking : UIDirectionState::Default,
 			0.f, 0.f, Hostile, false, false, false, {}, actor->GetHandle().native_handle(), 0.f, Shown);
@@ -236,6 +230,53 @@ void CreatureHandler::Initialize()
 		}
 	}
 	logger::info("CreatureHandler: {} creature races", CreatureRaces.size());
+
+	// The first bone of each entry in TDM's TrueDirectionalMovement_base.toml, its default lock point.
+	struct Override
+	{
+		RE::FormID id;
+		const char* plugin;
+		const char* bone;
+	};
+	static constexpr Override Overrides[] = {
+		{ 0x13492, "Skyrim.esm", "NPC Head" },             // dragon
+		{ 0x1BC4A, "Dragonborn.esm", "NPC Head" },         // Dragonborn dragon
+		{ 0x517AB, "Skyrim.esm", "NPC Spine1 [Spn1]" },    // giant
+		{ 0x5B2E9, "Skyrim.esm", "NPC Spine2 [Spn2]" },    // frost atronach
+		{ 0x800EC, "Skyrim.esm", "NPC Spine2 [Spn2]" },    // dwarven centurion
+		{ 0x1E2A3, "Dragonborn.esm", "Boar_Reikling_Chest" },  // mounted riekling
+		{ 0x28537, "Dragonborn.esm", "NPC Spine1 [Spn1]" },    // benthic lurker
+		{ 0x1DCBC, "Dragonborn.esm", "MagicEffectsNode" },     // seeker
+	};
+	for (const auto& Entry : Overrides)
+	{
+		if (auto* Parts = RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSBodyPartData>(Entry.id, Entry.plugin))
+		{
+			MarkerBones.emplace(Parts, Entry.bone);
+		}
+	}
+}
+
+RE::NiPoint3 CreatureHandler::MarkerPosition(RE::Actor* actor) const
+{
+	RE::BGSBodyPartData* Parts = actor->GetRace() ? actor->GetRace()->bodyPartData : nullptr;
+	if (Parts)
+	{
+		const auto Override = MarkerBones.find(Parts);
+		if (Override != MarkerBones.end())
+		{
+			if (RE::NiAVObject* Node = actor->GetNodeByName(Override->second))
+			{
+				return Node->world.translate;
+			}
+		}
+		RE::BGSBodyPart* Torso = Parts->parts[RE::BGSBodyPartDefs::LIMB_ENUM::kTorso];
+		if (RE::NiAVObject* Node = Torso ? actor->GetNodeByName(Torso->targetName) : nullptr)
+		{
+			return Node->world.translate;
+		}
+	}
+	return actor->GetPosition() + RE::NiPoint3(0.f, 0.f, actor->GetHeight() * 0.6f);
 }
 
 bool CreatureHandler::IsCreatureGraph(RE::TESRace* race) const
@@ -281,6 +322,10 @@ void CreatureHandler::LogRaceOnce(RE::Actor* actor)
 	}
 	const RE::NiPoint3 Capsule = actor->GetCharController() ? actor->GetCharController()->collisionBound.extents : RE::NiPoint3();
 	const float RenderRadius = actor->Get3D() ? actor->Get3D()->worldBound.radius : 0.f;
+	// The player's, so the line reads as a ratio: GetHeight is 128 for most records.
+	auto* Player = RE::PlayerCharacter::GetSingleton();
+	const RE::NiPoint3 PlayerCapsule = Player->GetCharController() ? Player->GetCharController()->collisionBound.extents : RE::NiPoint3();
+	const float PlayerRender = Player->Get3D() ? Player->Get3D()->worldBound.radius : 0.f;
 	std::string Attacks;
 	if (Race->attackDataMap)
 	{
@@ -290,8 +335,9 @@ void CreatureHandler::LogRaceOnce(RE::Actor* actor)
 			Attacks += ' ';
 		}
 	}
-	logger::info("[creature] race {} graph {} bounds {} scale {} capsule {} {} {} render {} player {} attacks [{}]",
+	logger::info("[creature] race {} graph {} bounds {} scale {} capsule {} {} {} render {} | player bounds {} capsule {} {} {} render {} | attacks [{}]",
 		Race->GetFormEditorID(), Race->behaviorGraphs[0].model.data() ? Race->behaviorGraphs[0].model.data() : "",
 		actor->GetHeight(), actor->GetScale(),
-		Capsule.x, Capsule.y, Capsule.z, RenderRadius, BodyHeight(RE::PlayerCharacter::GetSingleton()), Attacks);
+		Capsule.x, Capsule.y, Capsule.z, RenderRadius, BodyHeight(Player),
+		PlayerCapsule.x, PlayerCapsule.y, PlayerCapsule.z, PlayerRender, Attacks);
 }

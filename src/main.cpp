@@ -157,7 +157,32 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	// One trampoline for every hook: CommonLib only honours the first request.
 	SKSE::Init(a_skse, { .trampoline = true, .trampolineSize = 256 });
 
-	logger::info("{} loaded"sv, plugin->GetName());
+	// Build time tells a stale DLL apart from a release that kept its version number.
+	// The DLL's own write time: __DATE__/__TIME__ only move when this file recompiles.
+	std::string Built = "unknown";
+	{
+		HMODULE Self = nullptr;
+		char Path[MAX_PATH];
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&MessageHandler), &Self) && GetModuleFileNameA(Self, Path, MAX_PATH))
+		{
+			std::error_code Err;
+			const auto Written = std::filesystem::last_write_time(Path, Err);
+			if (!Err)
+			{
+				const auto Sys = std::chrono::clock_cast<std::chrono::system_clock>(Written);
+				try
+				{
+					Built = std::format("{:%Y-%m-%d %H:%M}", std::chrono::current_zone()->to_local(std::chrono::floor<std::chrono::minutes>(Sys)));
+				}
+				catch (...)
+				{
+					Built = std::format("{:%Y-%m-%d %H:%M} UTC", std::chrono::floor<std::chrono::minutes>(Sys));
+				}
+			}
+		}
+	}
+	logger::info("{} loaded, built {}, game {}"sv, plugin->GetName(), Built, REL::Module::get().version().string("."));
 
 	auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging->RegisterListener("SKSE", MessageHandler)) {

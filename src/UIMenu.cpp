@@ -131,11 +131,16 @@ namespace stl
 {
 	using namespace SKSE::stl;
 
+	// The overlay is optional: where a site doesn't match the game version, it's skipped.
 	template <class T>
-	void write_thunk_call()
+	void write_thunk_call(const char* a_name)
 	{
 		auto& trampoline = SKSE::GetTrampoline();
 		const REL::Relocation<std::uintptr_t> hook{ T::id, T::offset };
+		if (!CheckCallSite(hook.address(), a_name, false))
+		{
+			return;
+		}
 		T::func = trampoline.write_call<5>(hook.address(), T::thunk);
 	}
 }
@@ -299,8 +304,8 @@ bool RenderManager::Install()
 
 	g_message->RegisterListener(MessageCallback);
 
-	stl::write_thunk_call<D3DInitHook>();
-	stl::write_thunk_call<DXGIPresentHook>();
+	stl::write_thunk_call<D3DInitHook>("UI init");
+	stl::write_thunk_call<DXGIPresentHook>("UI draw");
 	logger::info("Rendermanager install");
 
 	return true;
@@ -910,9 +915,10 @@ void RenderManager::DrawConditioningArc(RE::NiPoint2 StartPos, float depth, floa
 	const float halfSweep = (24.f * pi / 180.f) * t;
 	const float thickness = std::max(1.2f, size * 0.12f);
 
-	// confidence tint: the whole arc set warms from yellow toward red as
-	// this enemy's recent exchange record improves — same "how is this
-	// fight going" family as the sweep, different axis (them vs you).
+	// Tint: the whole arc set warms from yellow toward red as this enemy
+	// fixates on the player's swing kind (lights only = red, full speed;
+	// a mixup they have to respect = yellow, slowed). The sweep is where
+	// they expect the line; the tint is how fast they will meet it.
 	if (confidence < 0.f) { confidence = 0.f; }
 	if (confidence > 1.f) { confidence = 1.f; }
 	const int g = 0xE0 + (int)(confidence * (float)(0x58 - 0xE0));

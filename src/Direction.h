@@ -24,6 +24,14 @@ enum class WeaponSet : int
 };
 constexpr int NumWeaponSets = 5;
 
+// The chain transition a weapon makes fastest: swords cross sides, polearms cross heights.
+enum class FollowUpAxis : int
+{
+	None,
+	Side,
+	Height
+};
+
 inline const char* WeaponSetName(WeaponSet set)
 {
 	switch (set)

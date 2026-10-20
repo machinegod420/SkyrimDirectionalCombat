@@ -1,14 +1,55 @@
 #pragma once
 
 #include "Direction.h"
+#include <algorithm>
+#include <cctype>
 #include <format>
 #include <string>
+#include <string_view>
 #include <vector>
+
+inline bool ContainsNoCase(std::string_view hay, std::string_view needle)
+{
+	return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+		[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }) != hay.end();
+}
 
 // "Name FormID" for log lines: names repeat across actors, IDs don't.
 inline std::string Who(const RE::TESObjectREFR* a_ref)
 {
 	return a_ref ? std::format("{} {:08X}", a_ref->GetName(), a_ref->GetFormID()) : std::string("none");
+}
+
+// Call hooks write at offsets inside game functions, and AE updates move those. Checked before
+// writing: the site must still hold a call (E8) and, given a_expected, reach the expected target
+// or another mod's hook on it. A critical hook stops the game with a message; an optional one is
+// skipped with a warning.
+inline bool CheckCallSite(std::uintptr_t a_site, const char* a_name, bool a_critical,
+	bool (*a_expected)(std::uintptr_t) = nullptr)
+{
+	bool Ok = *reinterpret_cast<const std::uint8_t*>(a_site) == 0xE8;
+	if (Ok && a_expected)
+	{
+		const std::uintptr_t Target = a_site + 5 + *reinterpret_cast<const std::int32_t*>(a_site + 1);
+		const auto* Bytes = reinterpret_cast<const std::uint8_t*>(Target);
+		// A trampoline jump: another mod hooked this call first.
+		const bool OtherHook = Bytes[0] == 0xE9 || (Bytes[0] == 0xFF && Bytes[1] == 0x25);
+		Ok = OtherHook || a_expected(Target);
+	}
+	if (Ok)
+	{
+		return true;
+	}
+	const std::string Msg = std::format(
+		"direction-plugin: the {} hook doesn't match this game version ({}). This is an Anniversary Edition "
+		"update the mod hasn't been updated for, not a broken install.",
+		a_name, REL::Module::get().version().string("."));
+	if (a_critical)
+	{
+		SKSE::stl::report_and_fail(Msg);
+	}
+	logger::warn("{} Hook skipped; that feature is off.", Msg);
+	return false;
 }
 
 // hash functions
@@ -113,6 +154,14 @@ inline bool IsPowerAttacking(RE::Actor* a_actor)
 inline bool IsBashing(RE::Actor* a_actor)
 {
 	return a_actor->AsActorState()->GetAttackState() == RE::ATTACK_STATE_ENUM::kBash;
+}
+
+// Right-hand dagger: fights at grappling range, so its bash beats an attack.
+inline bool HoldsDagger(RE::Actor* a_actor)
+{
+	auto* Form = a_actor->GetEquippedObject(false);
+	auto* Weapon = Form ? Form->As<RE::TESObjectWEAP>() : nullptr;
+	return Weapon && Weapon->IsOneHandedDagger();
 }
 
 // Before the hit. A press here never started the next swing: refused, or taken and dropped.
@@ -250,7 +299,8 @@ inline bool HasFullShieldBlock(RE::Actor* a_actor)
 	float ActorMaxStamina = a_actor->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kStamina);
 	float ActorCurrentStamina = a_actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina);
 	float Ratio = ActorCurrentStamina / ActorMaxStamina;
-	return Ratio > 0.8f;
+	// One blocked sword power attack opens it; a light alone does not.
+	return Ratio > 0.9f;
 }
 
 class CircularArray

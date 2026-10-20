@@ -36,15 +36,14 @@ public:
 	bool IsDodging(RE::Actor* actor);
 	// Since this actor's last custom dodge began, -1 if none.
 	float SecondsSinceDodge(RE::Actor* actor);
+	// The same, but -1 unless that dodge went straight back.
+	float SecondsSinceBackDodge(RE::Actor* actor);
 	float GetDodgeCost(RE::Actor* actor);
 
 
 	void ApplyImpulse(RE::Actor* actor, DodgeDirection direction);
 
-	// High-level dodge dispatcher. Routes to whichever dodge system is active
-	// (Custom → ApplyImpulse, DMCO → graph events, None → no-op). Callers
-	// (player input, AI, etc.) use this so they don't have to know about each
-	// system's specifics.
+	// The dodge entry point for the AI: ApplyImpulse with the dodge system on, nothing without.
 	void TriggerDodge(RE::Actor* actor, DodgeDirection direction);
 
 	// called from bhkCharacterStateOnGround::SimulateStatePhysics hook (per physics tick)
@@ -68,7 +67,12 @@ private:
 	};
 
 	phmap::flat_hash_map<RE::ActorHandle, DodgeState> ActiveDodges;
-	phmap::flat_hash_map<RE::ActorHandle, std::chrono::steady_clock::time_point> DodgeStarts;
+	struct DodgeStart
+	{
+		std::chrono::steady_clock::time_point at;
+		DodgeDirection direction;
+	};
+	phmap::flat_hash_map<RE::ActorHandle, DodgeStart> DodgeStarts;
 	std::shared_mutex DodgeMtx;
 
 	// Post-dodge slow: writes a temporary-slot delta to SpeedMult AV during the

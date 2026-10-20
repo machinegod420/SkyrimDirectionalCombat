@@ -444,6 +444,7 @@ float DirectionHandler::ConsumeGuardCharge(RE::Actor* actor)
 	}
 	const float ratio = ChargeRatioFromSeconds(Iter->second);
 	Iter->second = 0.f;
+	GuardChargeDecay.erase(actor->GetHandle());
 	return ratio;
 }
 
@@ -455,6 +456,18 @@ void DirectionHandler::ResetGuardCharge(RE::Actor* actor)
 	{
 		Iter->second = 0.f;
 	}
+	GuardChargeDecay.erase(actor->GetHandle());
+}
+
+void DirectionHandler::FillGuardCharge(RE::Actor* actor)
+{
+	if (!DifficultySettings::EnableGuardCharge || !HasDirectionalPerks(actor))
+	{
+		return;
+	}
+	std::unique_lock lock(GuardChargeMtx);
+	GuardCharge[actor->GetHandle()] = DifficultySettings::GuardChargeFull;
+	GuardChargeDecay.erase(actor->GetHandle());
 }
 
 // CommonLib's hkStringPtr::c_str() strips the owner flag with a 32-bit mask and truncates the
@@ -465,34 +478,16 @@ static const char* HkText(const RE::hkStringPtr& text)
 	return reinterpret_cast<const char*>(Raw & ~static_cast<std::uintptr_t>(1));
 }
 
-static bool ContainsNoCase(const char* text, const char* needle)
-{
-	if (!text)
-	{
-		return false;
-	}
-	const size_t N = std::strlen(needle);
-	for (const char* p = text; *p; ++p)
-	{
-		size_t i = 0;
-		while (i < N && p[i] && std::tolower(static_cast<unsigned char>(p[i])) == needle[i])
-		{
-			++i;
-		}
-		if (i == N)
-		{
-			return true;
-		}
-	}
-	return false;
-}
+// The graph variables the guard blend writes, in Directions order.
+static constexpr const char* GuardWeightVars[4] = { "DirModGuardTR", "DirModGuardTL", "DirModGuardBL", "DirModGuardBR" };
 
-// The largest "DirMod_Twist.<degrees>" annotation among the idle clips the graph is playing, read
-// off their bound animations; no tag means no twist. Read from memory rather than waiting for the
-// clip's event, which only fires on activation. More than one idle is active during a transition
-// and picking the youngest by local time flickered between them, so the largest tag wins.
-static float ReadIdleTwist(RE::Actor* actor)
+// The DirMod_Twist.<deg> tag of the idle clips the graph is playing, read off the bound animation.
+// Blended guard clips are weighted by the blend (outWeighted); otherwise the largest tag wins, since
+// several idles are active mid-transition.
+static float ReadIdleTwist(RE::Actor* actor, const std::array<float, 4>* weights, bool& outWeighted)
 {
+	outWeighted = false;
+	bool SawBlended = false;
 	RE::BSAnimationGraphManagerPtr Manager;
 	if (!actor->GetAnimationGraphManager(Manager) || !Manager)
 	{
@@ -511,6 +506,7 @@ static float ReadIdleTwist(RE::Actor* actor)
 		return 0.f;
 	}
 	float Degrees = 0.f;
+	float Weighted = 0.f;
 	for (const auto& Info : *Graph->behaviorGraph->activeNodes)
 	{
 		if (!Info.nodeClone)
@@ -518,11 +514,23 @@ static float ReadIdleTwist(RE::Actor* actor)
 			continue;
 		}
 		auto* Clip = skyrim_cast<RE::hkbClipGenerator*>(Info.nodeClone);
-		if (!Clip || !Clip->binding || !Clip->binding->animation ||
-			!ContainsNoCase(HkText(Clip->animationName), "idle"))
+		if (!Clip)
 		{
 			continue;
 		}
+		// Vanilla idle paths, or the blended guard idles under DirMod\ (only guards live there).
+		const char* PathText = HkText(Clip->animationName);
+		const std::string_view Path = PathText ? PathText : "";
+		const bool Blended = ContainsNoCase(Path, "\\DirMod\\");
+		if (!Clip->binding || !Clip->binding->animation)
+		{
+			continue;
+		}
+		if (!Blended && !ContainsNoCase(Path, "idle"))
+		{
+			continue;
+		}
+		float Tagged = 0.f;
 		for (const auto& Track : Clip->binding->animation->annotationTracks)
 		{
 			for (const auto& Annotation : Track.annotations)
@@ -531,19 +539,46 @@ static float ReadIdleTwist(RE::Actor* actor)
 				constexpr std::string_view Tag = "DirMod_Twist.";
 				if (Text && std::strncmp(Text, Tag.data(), Tag.size()) == 0)
 				{
-					Degrees = std::max(Degrees, static_cast<float>(std::atof(Text + Tag.size())));
+					Tagged = std::max(Tagged, static_cast<float>(std::atof(Text + Tag.size())));
 				}
 			}
 		}
+		Degrees = std::max(Degrees, Tagged);
+		SawBlended = SawBlended || Blended;
+		// The blended clips are named DirMod<Guard|Block>_<set>_<line>: the line is the suffix.
+		const char* Name = Blended && weights ? HkText(Clip->name) : nullptr;
+		const size_t Len = Name ? std::strlen(Name) : 0;
+		int Index = -1;
+		if (Len >= 2)
+		{
+			const char* Line = Name + Len - 2;
+			Index = std::strcmp(Line, "TR") == 0 ? 0 : std::strcmp(Line, "TL") == 0 ? 1 :
+				std::strcmp(Line, "BL") == 0 ? 2 : std::strcmp(Line, "BR") == 0 ? 3 : -1;
+			if (Index >= 0)
+			{
+				Weighted += (*weights)[Index] * Tagged;
+				outWeighted = true;
+			}
+		}
 	}
-	return Degrees;
+	// Blended guard clips with no readable line name: the twist can't follow the blend.
+	if (weights && SawBlended && !outWeighted)
+	{
+		static bool Warned = false;
+		if (!Warned)
+		{
+			Warned = true;
+			logger::warn("[twist] guard clips are playing but their names don't end in a line; the twist falls back to the largest tag");
+		}
+	}
+	return outWeighted ? Weighted : Degrees;
 }
 
 // Spine twist the graph applies while walking on a left guard, countering the walk straightening
 // the root. Sword and shield keep a straight block. Ramped so a stop or a switch doesn't pop.
 constexpr float SpineTwistMovingSpeed = 10.f;
 constexpr float SpineTwistDegreesPerSecond = 400.f;
-static void UpdateSpineTwist(RE::Actor* actor, Directions dir, float delta)
+static void UpdateSpineTwist(RE::Actor* actor, Directions dir, float delta, const GuardBlendState* blend)
 {
 	float Speed = 0.f;
 	float Current = 0.f;
@@ -558,13 +593,128 @@ static void UpdateSpineTwist(RE::Actor* actor, Directions dir, float delta)
 	int BodyBlend = 0;
 	const bool FakeFirstPerson = actor->IsPlayerRef() &&
 		actor->GetGraphVariableInt("DirModBodyBlendSelect", BodyBlend) && BodyBlend == 1;
-	const bool Wanted = Left && !ShieldBlock && !FakeFirstPerson && Speed > SpineTwistMovingSpeed;
-	const float Target = Wanted ? ReadIdleTwist(actor) : 0.f;
+	const bool Wanted = !ShieldBlock && !FakeFirstPerson && Speed > SpineTwistMovingSpeed;
+	// Weighted by the blend, a right line already reads 0; the old graph keeps the left gate.
+	bool Weighted = false;
+	const float Tag = ReadIdleTwist(actor, blend && blend->started ? &blend->weights : nullptr, Weighted);
+	const float Target = Wanted && (Weighted || Left) ? Tag : 0.f;
 	const float Step = SpineTwistDegreesPerSecond * delta;
 	const float Next = std::clamp(Target, Current - Step, Current + Step);
 	if (Next != Current)
 	{
 		actor->SetGraphVariableFloat("DirModSpineTwist", Next);
+	}
+}
+
+// The guard idle is a four-way blend weighted here every frame, so a switch mid-move bends instead
+// of restarting. Each weight's offset decays along a quintic from its current velocity
+// (inertialization); from rest that is the S-curve the old SMOOTH transition had.
+
+// True when the graph carries the blend; the old patch has no variables and keeps ForceIdle.
+static bool HasGuardBlend(RE::Actor* actor)
+{
+	float Weight = 0.f;
+	return actor->GetGraphVariableFloat(GuardWeightVars[0], Weight);
+}
+
+// Offset and velocity t seconds into the decay (Bollo, GDC 2018, a0 = 0); all three reach zero at t1.
+static void InertialOffset(float x0, float v0, float t1, float t, float& outX, float& outV)
+{
+	if (t1 <= 0.f || t >= t1)
+	{
+		outX = 0.f;
+		outV = 0.f;
+		return;
+	}
+	const float T3 = t1 * t1 * t1, T4 = T3 * t1, T5 = T4 * t1;
+	const float A = -(6.f * v0 * t1 + 12.f * x0) / (2.f * T5);
+	const float B = (16.f * v0 * t1 + 30.f * x0) / (2.f * T4);
+	const float C = -(12.f * v0 * t1 + 20.f * x0) / (2.f * T3);
+	const float t2 = t * t, t3 = t2 * t, t4 = t3 * t, t5 = t4 * t;
+	outX = A * t5 + B * t4 + C * t3 + v0 * t + x0;
+	outV = 5.f * A * t4 + 4.f * B * t3 + 3.f * C * t2 + v0;
+}
+
+// Aim every weight at dir from where it is now, keeping the velocity it has.
+static void RetargetGuardBlend(RE::Actor* actor, Directions dir, GuardBlendState& state)
+{
+	const float Duration = std::max(0.05f, Settings::GuardBlendTime);
+	for (int i = 0; i < 4; ++i)
+	{
+		float Offset = 0.f;
+		float Velocity = 0.f;
+		float Current = static_cast<int>(dir) == i ? 1.f : 0.f;
+		if (state.started)
+		{
+			InertialOffset(state.x0[i], state.v0[i], state.t1[i], state.elapsed, Offset, Velocity);
+			Current = (static_cast<int>(state.target) == i ? 1.f : 0.f) + Offset;
+		}
+		else if (!actor->GetGraphVariableFloat(GuardWeightVars[i], Current))
+		{
+			Current = i == 0 ? 1.f : 0.f;
+		}
+		const float Target = static_cast<int>(dir) == i ? 1.f : 0.f;
+		state.x0[i] = Current - Target;
+		state.v0[i] = Velocity;
+		// Already heading for the target: cap so it isn't crossed (monotonic to 2.5x the straight-line time).
+		state.t1[i] = Duration;
+		if (state.x0[i] * Velocity < 0.f)
+		{
+			state.t1[i] = std::min(Duration, -2.5f * state.x0[i] / Velocity);
+		}
+	}
+	state.target = dir;
+	state.elapsed = 0.f;
+	state.started = true;
+}
+
+// Snap the weights to one line, at rest: a new fencer doesn't fade in from TR.
+static void SetGuardBlend(RE::Actor* actor, Directions dir, GuardBlendState& state)
+{
+	state.target = dir;
+	state.started = true;
+	state.elapsed = 0.f;
+	state.x0.fill(0.f);
+	state.v0.fill(0.f);
+	state.t1.fill(0.f);
+	for (int i = 0; i < 4; ++i)
+	{
+		state.weights[i] = static_cast<int>(dir) == i ? 1.f : 0.f;
+		actor->SetGraphVariableFloat(GuardWeightVars[i], state.weights[i]);
+	}
+}
+
+static void UpdateGuardBlend(RE::Actor* actor, Directions dir, float delta, GuardBlendState& state)
+{
+	if (!HasGuardBlend(actor))
+	{
+		return;
+	}
+	if (!state.started || dir != state.target)
+	{
+		RetargetGuardBlend(actor, dir, state);
+	}
+	state.elapsed += delta;
+	float Weights[4];
+	float Sum = 0.f;
+	for (int i = 0; i < 4; ++i)
+	{
+		float Offset = 0.f;
+		float Velocity = 0.f;
+		InertialOffset(state.x0[i], state.v0[i], state.t1[i], state.elapsed, Offset, Velocity);
+		// Ends exactly on target, so the line left drops out of the blend; the clamp only matters mid-move.
+		Weights[i] = std::clamp((static_cast<int>(dir) == i ? 1.f : 0.f) + Offset, 0.f, 1.f);
+		Sum += Weights[i];
+	}
+	if (Sum <= 0.f)
+	{
+		SetGuardBlend(actor, dir, state);
+		return;
+	}
+	for (int i = 0; i < 4; ++i)
+	{
+		state.weights[i] = Weights[i] / Sum;
+		actor->SetGraphVariableFloat(GuardWeightVars[i], state.weights[i]);
 	}
 }
 
@@ -653,10 +803,14 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 	ActiveDirections[actor->GetHandle()] = dir;
 	ActiveDirectionsMtx.unlock();
 
-	// A completed switch spends the guard charge
+	// A completed switch keeps the charge for a short window: the re-aimed fast light
+	// is the mixup, and the drain is what stops it being carried around indefinitely.
 	{
 		std::unique_lock ChargeLock(GuardChargeMtx);
-		GuardCharge[actor->GetHandle()] = 0.f;
+		if (GuardCharge[actor->GetHandle()] > 0.f)
+		{
+			GuardChargeDecay[actor->GetHandle()] = DifficultySettings::GuardChargeSwitchDecay;
+		}
 	}
 
 	// A switch un-sets the guard on both clocks.
@@ -672,7 +826,7 @@ void DirectionHandler::SwitchDirectionSynchronous(RE::Actor* actor, Directions d
 			TimedParryMtx.lock();
 			if (TimedParry.contains(actor->GetHandle()))
 			{
-				TimedParry[actor->GetHandle()] = -0.001;
+				TimedParry[actor->GetHandle()] = -0.001f;
 			}
 			TimedParryMtx.unlock();
 		}
@@ -907,6 +1061,16 @@ void DirectionHandler::WantToSwitchTo(RE::Actor* actor, Directions dir, bool for
 	}
 }
 
+void DirectionHandler::CancelQueuedDirection(RE::Actor* actor)
+{
+	std::unique_lock lock(DirectionTimersMtx);
+	auto Iter = DirectionTimers.find(actor->GetHandle());
+	if (Iter != DirectionTimers.end() && !Iter->second.locked)
+	{
+		DirectionTimers.erase(Iter);
+	}
+}
+
 void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapon)
 {
 	// initialize for correctness
@@ -919,6 +1083,7 @@ void DirectionHandler::AddDirectional(RE::Actor* actor, RE::TESObjectWEAP* weapo
 	ActiveDirections[actor->GetHandle()] = Initial;
 	actor->AddSpell(DirectionToPerk(Initial));
 	ActiveDirectionsMtx.unlock();
+	SetGuardBlend(actor, Initial, GuardBlend[actor->GetHandle()]);
 	ApplyModeMarker(actor);
 	// hack to fix unblockable issues
 	actor->RemoveSpell(Unblockable);
@@ -949,6 +1114,22 @@ WeaponSet DirectionHandler::AnimationSet(RE::Actor* actor) const
 		return WeaponSet::Warhammer;
 	}
 	return HasShield(actor) ? WeaponSet::OneHandShield : WeaponSet::OneHand;
+}
+
+FollowUpAxis DirectionHandler::GetFollowUpAxis(RE::Actor* actor) const
+{
+	const WeaponSet Set = AnimationSet(actor);
+	if (Set == WeaponSet::Battleaxe)
+	{
+		return FollowUpAxis::Height;
+	}
+	auto* Equipped = actor->GetEquippedObject(false);
+	auto* Weapon = Equipped ? Equipped->As<RE::TESObjectWEAP>() : nullptr;
+	if (Set == WeaponSet::TwoHandSword || (Weapon && Weapon->IsOneHandedSword()))
+	{
+		return FollowUpAxis::Side;
+	}
+	return FollowUpAxis::None;
 }
 
 // One marker at a time, matching the active mode. Normal mode carries neither.
@@ -983,6 +1164,7 @@ void DirectionHandler::RemoveDirectionalPerks(RE::ActorHandle handle)
 
 	GuardChargeMtx.lock();
 	GuardCharge.erase(handle);
+	GuardChargeDecay.erase(handle);
 	GuardChargeMtx.unlock();
 
 	RE::Actor* actor = handle.get().get();
@@ -1217,7 +1399,16 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 	if (HasDirectionalPerks(actor))
 	{
 		const Directions Line = GetCurrentDirection(actor);
-		UpdateSpineTwist(actor, Line, delta);
+		// Head for a queued line, so the pose leads the commit instead of trailing it.
+		Directions Target;
+		if (!HasQueuedDirection(actor, Target))
+		{
+			Target = Line;
+		}
+		GuardBlendState& Blend = GuardBlend[actor->GetHandle()];
+		UpdateGuardBlend(actor, Target, delta, Blend);
+		// After the blend, so the twist rides this frame's weights.
+		UpdateSpineTwist(actor, Line, delta, &Blend);
 	}
 
 	// Accrue guard charge: holding a line while neither swinging nor blocking
@@ -1228,9 +1419,25 @@ void DirectionHandler::UpdateCharacter(RE::Actor* actor, float delta)
 		{
 			std::unique_lock ChargeLock(GuardChargeMtx);
 			float& Charge = GuardCharge[actor->GetHandle()];
+			auto Decay = GuardChargeDecay.find(actor->GetHandle());
 			if (actor->IsAttacking() || actor->IsBlocking())
 			{
 				Charge = 0.f;
+				if (Decay != GuardChargeDecay.end())
+				{
+					GuardChargeDecay.erase(Decay);
+				}
+			}
+			else if (Decay != GuardChargeDecay.end())
+			{
+				// Carried through a switch: drains over the window unless a swing spends it.
+				Charge -= delta * DifficultySettings::GuardChargeFull / std::max(0.05f, DifficultySettings::GuardChargeSwitchDecay);
+				Decay->second -= delta;
+				if (Charge <= 0.f || Decay->second <= 0.f)
+				{
+					Charge = 0.f;
+					GuardChargeDecay.erase(Decay);
+				}
 			}
 			else
 			{
@@ -1459,6 +1666,7 @@ void DirectionHandler::CleanupActor(RE::ActorHandle actor)
 {
 	
 	RemoveDirectionalPerks(actor);
+	GuardBlend.erase(actor);
 
 	UnblockableActorsMtx.lock();
 	UnblockableActors.erase(actor);
@@ -1526,6 +1734,7 @@ void DirectionHandler::Cleanup()
 
 	GuardChargeMtx.lock();
 	GuardCharge.clear();
+	GuardChargeDecay.clear();
 	GuardChargeMtx.unlock();
 }
 
@@ -1535,7 +1744,7 @@ void DirectionHandler::QueueAnimationEvent(RE::Actor* actor)
 	constexpr int MaxSize = 4;
 	if (AnimationTimer.contains(actor->GetHandle()))
 	{
-		int size = AnimationTimer[actor->GetHandle()].size();
+		const int size = static_cast<int>(AnimationTimer[actor->GetHandle()].size());
 		
 		if (size < MaxSize)
 		{
@@ -1739,6 +1948,7 @@ void DirectionHandler::Update(float delta)
 		{
 			if (!ChargeIter->first || !ChargeIter->first.get().get())
 			{
+				GuardChargeDecay.erase(ChargeIter->first);
 				ChargeIter = GuardCharge.erase(ChargeIter);
 				continue;
 			}
@@ -1797,6 +2007,11 @@ void DirectionHandler::Update(float delta)
 
 void DirectionHandler::SendAnimationEvent(RE::Actor* actor, bool slow)
 {
+	// The blended guard and block idles have no ForceIdle transitions; UpdateGuardBlend moves them.
+	if (HasGuardBlend(actor))
+	{
+		return;
+	}
 	// does this still need to be seperate animation events?
 	if (actor->IsBlocking())
 	{

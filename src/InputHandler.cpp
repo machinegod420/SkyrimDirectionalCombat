@@ -48,6 +48,32 @@ bool InputEventHandler::ShouldHoldPress() const
 		(Player->GetGraphVariableBool("IsBashing", GraphBash) && GraphBash) || IsInWindup(Player);
 }
 
+// From a straight back dodge's start: the dodge itself (0.5-0.6 s) and a beat after.
+constexpr float BackDodgePokeSeconds = 0.9f;
+
+bool InputEventHandler::BufferBackDodgePoke()
+{
+	auto* Player = RE::PlayerCharacter::GetSingleton();
+	const float Since = DodgeHandler::GetSingleton()->SecondsSinceBackDodge(Player);
+	// A raised guard opts out: turning it is a guard switch, with its parry and stamina cost.
+	if (Since < 0.f || Since >= BackDodgePokeSeconds || IsGuardUp(Player) ||
+		Player->AsActorState()->GetWeaponState() != RE::WEAPON_STATE::kDrawn ||
+		!DirectionHandler::GetSingleton()->HasDirectionalPerks(Player) ||
+		!Hooks::HookAttackHandler::CanPlayerAttack())
+	{
+		return false;
+	}
+	const Directions Poke = DirectionHandler::FoldDirection(AttackHandler::PokeLine(Player));
+	DirectionHandler::GetSingleton()->WantToSwitchTo(Player, Poke, true);
+	if (Settings::VerboseLogging)
+	{
+		logger::info("[press] out of a back dodge ({:.2f}s): poke on line {}", Since, static_cast<int>(Poke));
+	}
+	PendingAttack = true;
+	PendingPower = false;
+	return true;
+}
+
 void InputEventHandler::OnBlockPressed()
 {
 	PendingAttack = false;
@@ -60,6 +86,18 @@ void InputEventHandler::Update(float delta)
 {
 	auto* Player = RE::PlayerCharacter::GetSingleton();
 	AttackHandler::GetSingleton()->ClearStuckAttack(Player, GraphIdleAttacking, delta);
+	if (AttackHandler::GetSingleton()->TakeFeintResolved(Player))
+	{
+		// Counted like swings: only with someone to swing at.
+		if (DirectionHandler::GetSingleton()->GetSwingTarget(Player))
+		{
+			AIHandler::GetSingleton()->RecordPlayerFeint(
+				DirectionHandler::GetSingleton()->AnimationSet(Player), FeintedStep, FeintedPower);
+			AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Feinted);
+		}
+		// The buffered follow-up's wait starts over: the graph reads as a windup until it takes the stop.
+		PendingAge = 0.f;
+	}
 	if (!PendingAttack)
 	{
 		return;
@@ -70,6 +108,12 @@ void InputEventHandler::Update(float delta)
 	bool GraphBash = false;
 	const bool BashPlaying = Player->GetGraphVariableBool("IsBashing", GraphBash) && GraphBash;
 	const bool MidSwing = IsInWindup(Player);
+	// A press behind a queued feint is the follow-up: held, unaged, until the feint fires.
+	// No leak: the pending flag always clears, at the point or at the hit frame.
+	if (AttackHandler::GetSingleton()->FeintPending(Player))
+	{
+		return;
+	}
 	if (DirectionHandler::GetSingleton()->HasQueuedDirection(Player, Queued) || BashPlaying || MidSwing)
 	{
 		PendingAge += delta;
@@ -127,11 +171,6 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 		auto button = static_cast<RE::ButtonEvent*>(event);
 		auto Player = RE::PlayerCharacter::GetSingleton();
 
-		// speculative fix for specific edge case
-		if (Settings::ExperimentalMode && Player->AsActorState()->actorState2.wantBlocking && !Player->IsBlocking())
-		{
-			Player->NotifyAnimationGraph("blockStart");
-		}
 		if (event->AsButtonEvent()->IsDown())
 		{
 			auto key = button->GetIDCode();
@@ -181,16 +220,11 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 
 				else if (key == InputSettings::KeyCodeFeint)
 				{
-					// Read before the feint cancels the swing.
-					const bool FeintedPower = IsPowerAttacking(Player);
-					const int FeintedStep = DirectionHandler::GetSingleton()->GetComboStep(Player);
-					// Counted like swings: only with someone to swing at.
-					if (AttackHandler::GetSingleton()->HandleFeint(Player) &&
-						DirectionHandler::GetSingleton()->GetSwingTarget(Player))
+					// Fires at the feint point (AttackHandler::Update); Update records the stats then.
+					if (AttackHandler::GetSingleton()->QueueFeint(Player))
 					{
-						AIHandler::GetSingleton()->RecordPlayerFeint(
-							DirectionHandler::GetSingleton()->AnimationSet(Player), FeintedStep, FeintedPower);
-						AIHandler::GetSingleton()->ResolvePlayerSwing(AIHandler::SwingOutcome::Feinted);
+						FeintedPower = IsPowerAttacking(Player);
+						FeintedStep = DirectionHandler::GetSingleton()->GetComboStep(Player);
 					}
 				}
 
@@ -212,7 +246,11 @@ RE::BSEventNotifyControl InputEventHandler::ProcessEvent(RE::InputEvent* const* 
 			}
 			else if (key == InputSettings::KeyCodePowerAttack)
 			{
-				if (ShouldHoldPress())
+				// Out of a back dodge it comes out as the poke instead.
+				if (BufferBackDodgePoke())
+				{
+				}
+				else if (ShouldHoldPress())
 				{
 					BufferAttack(true);
 				}

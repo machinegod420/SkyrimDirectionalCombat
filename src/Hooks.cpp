@@ -19,6 +19,12 @@ constexpr float StaggerArmorPierce = 0.5f;
 // Mid-chain poke slow per weapon set, scaling ChainPokeSpeedPenalty: the thrust's
 // timing comes from the set's animations. 1h, 1h+shield, 2h, battleaxe, warhammer.
 constexpr float ChainPokePenaltyBySet[5] = { 1.f, 1.f, 1.f, 1.f, 1.f };
+// A chained light on the weapon's easy transition: swords crossing sides, polearms
+// crossing heights. Taken off the line penalties above, so a poke still pays some.
+constexpr float FollowUpSpeedBonus = 0.10f;
+// A perked NPC's spells are held off only while its target is this close (the AI's judge
+// radius); farther out they score again, so a caster that drew its dagger can go back to casting.
+constexpr float SpellMeleeGateDistance = 600.f;
 
 // Stamina regen is driven from here. We write it every frame, and we
 // actually nerf the shit out of stamina regen buffs and debuffs because it breaks the combat
@@ -116,7 +122,7 @@ namespace Hooks
 				BlockHandler::GetSingleton()->CauseStagger(attacker, target, 2.f);
 				ret.bIgnoreHit = true;
 				return ret;
-			}	
+			}
 			*/
 
 			// A hit OnMeleeHit will discard must not strip the guard on the way past.
@@ -150,6 +156,7 @@ namespace Hooks
 				if (!IsBashing(attacker) && BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 				{
 					if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", Who(attacker));
+					AIHandler::GetSingleton()->LogExchange(attacker, target, "parried", 0.f);
 					ret.bIgnoreHit = true;
 				}
 			}
@@ -260,10 +267,10 @@ namespace Hooks
 			if (numAttackersAttacker > 1)
 			{
 				hitData.totalDamage *= 1.25f;
-			}		
-			
+			}
+
 			*/
-			
+
 			if (TargetUnblockable)
 			{
 				hitData.totalDamage *= 0.5f;
@@ -273,8 +280,10 @@ namespace Hooks
 			// so it's a floor under all the math above.
 			if (AttackerUnblockable)
 			{
-				const float Floor = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kHealth) *
-					(target->IsPlayerRef() ? DifficultySettings::PlayerUnblockableHealthFloor : DifficultySettings::UnblockableHealthFloor);
+				const float FloorShare = target->IsPlayerRef() ? DifficultySettings::PlayerUnblockableHealthFloor :
+					CreatureHandler::GetSingleton()->IsCreatureGraph(target->GetRace()) ? DifficultySettings::CreatureUnblockableHealthFloor :
+					DifficultySettings::UnblockableHealthFloor;
+				const float Floor = target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kHealth) * FloorShare;
 				if (hitData.totalDamage < Floor)
 				{
 					hitData.totalDamage = Floor;
@@ -311,7 +320,14 @@ namespace Hooks
 				// bash can be used to open up enemies but will fail if you bash after an attack started
 				if (hitData.flags.any(RE::HitData::Flag::kBash))
 				{
-					if (target->IsAttacking())
+					// A dagger bash beats an attack instead of losing to it.
+					const bool DaggerBash = HoldsDagger(attacker);
+					if (DaggerBash && target->IsAttacking() && Settings::VerboseLogging &&
+						AttackHandler::GetSingleton()->CanAttack(target))
+					{
+						logger::info("[hit] {}'s dagger bash beats {}'s attack", Who(attacker), Who(target));
+					}
+					if (target->IsAttacking() && !DaggerBash)
 					{
 						if (Settings::VerboseLogging)
 						{
@@ -420,23 +436,14 @@ namespace Hooks
 						DirectionHandler::GetSingleton()->HasTimedParry(target) ? AIHandler::DefenseOutcome::Parried : AIHandler::DefenseOutcome::Blocked);
 				}
 
-				// manual pushback
-				if (Settings::ExperimentalMode)
-				{
-					//RE::hkVector4 t = RE::hkVector4(-dir.x, -dir.y, -dir.z, 0.f);
-					//typedef void (*tfoo)(RE::bhkCharacterController* controller, RE::hkVector4& force, float time);
-
-					//static REL::Relocation<tfoo> foo{ RELOCATION_ID(76442, 40740) };
-					//foo(target->GetCharController(), t, .5f);
-
-				}
-
-
 				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
 				// apply an attack lockout to the attacker so that the victim is guaranteed to have a window to
 				// riposte instead of being gambled
-					
-				if (hitData.flags.none(RE::HitData::Flag::kPowerAttack))
+				// A timed parry turns a power around: the late press risked eating a light for it.
+				const bool PowerParried = hitData.flags.any(RE::HitData::Flag::kPowerAttack) &&
+					hitData.flags.none(RE::HitData::Flag::kBash) && DirectionHandler::GetSingleton()->HasTimedParry(target);
+
+				if (hitData.flags.none(RE::HitData::Flag::kPowerAttack) || PowerParried)
 				{
 					AttackHandler::GetSingleton()->AddLockout(attacker);
 					AttackHandler::GetSingleton()->ClearComboSlow(target);
@@ -445,7 +452,6 @@ namespace Hooks
 				{
 					//lockout defender if attacked w/ powerattack
 					AttackHandler::GetSingleton()->AddLockout(target);
-					// A timed parry gives the attacker no combo step.
 					if (hitData.flags.none(RE::HitData::Flag::kBash) && !DirectionHandler::GetSingleton()->HasTimedParry(target))
 					{
 						DirectionHandler::GetSingleton()->AddCombo(attacker);
@@ -463,7 +469,8 @@ namespace Hooks
 				}
 
 				// AI stuff
-				if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target) && hitData.flags.none(RE::HitData::Flag::kPowerAttack))
+				if (!target->IsPlayerRef() && DirectionHandler::GetSingleton()->HasDirectionalPerks(target) &&
+					(hitData.flags.none(RE::HitData::Flag::kPowerAttack) || PowerParried))
 				{
 					//AIHandler::GetSingleton()->AddAction(target, AIHandler::Actions::Riposte, true);
 					AIHandler::GetSingleton()->TryRiposteExternalCalled(target, attacker);
@@ -558,13 +565,37 @@ namespace Hooks
 						Who(target), Who(attacker));
 				}
 				BlockHandler::GetSingleton()->ApplyBlockDamage(target, attacker, hitData);
+				// A creature's heavy is its one answer to a chain: the human rule, but a parry keeps the chain.
+				if (hitData.flags.any(RE::HitData::Flag::kPowerAttack) &&
+					!DirectionHandler::GetSingleton()->HasTimedParry(target))
+				{
+					AttackHandler::GetSingleton()->AddLockout(target);
+				}
 			}
 			else
 			{
 				DirectionHandler::GetSingleton()->ResetGuardCharge(target);
 			}
 		}
+		// Damage probe on the player's hits. NPC health moves inside the call; the player's lags a frame.
+		const bool Probe = Settings::VerboseLogging && attacker && target && hitData.flags.none(RE::HitData::Flag::kBash) &&
+			(attacker->IsPlayerRef() || target->IsPlayerRef());
+		const float HealthBefore = Probe ? target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth) : 0.f;
 		_OnMeleeHit(target, hitData);
+		if (Probe)
+		{
+			const float HealthAfter = target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
+			logger::info("[dmg] {} -> {}{}{}: phys {:.1f}, resisted {:.1f}, total {:.1f}{}, health {:.0f} -> {:.0f} of {:.0f} (lost {:.1f})",
+				Who(attacker), Who(target),
+				hitData.flags.any(RE::HitData::Flag::kPowerAttack) ? " power" : "",
+				hitData.flags.any(RE::HitData::Flag::kBlocked) ? " blocked" : "",
+				hitData.physicalDamage, hitData.resistedPhysicalDamage, hitData.totalDamage,
+				hitData.totalDamage > hitData.physicalDamage + 0.5f ? " (boosted)" : "",
+				HealthBefore, HealthAfter, target->AsActorValueOwner()->GetPermanentActorValue(RE::ActorValue::kHealth), HealthBefore - HealthAfter);
+			AIHandler::GetSingleton()->LogExchange(attacker, target,
+				hitData.flags.any(RE::HitData::Flag::kBlocked) ? "blocked" :
+				DirectionHandler::GetSingleton()->IsUnblockable(attacker) ? "unblockable" : "hit", HealthBefore - HealthAfter);
+		}
 	}
 
 	void HookProjectileHit::OnArrowHit(RE::Projectile* a_this, RE::hkpAllCdPointCollector* a_AllCdPointCollector)
@@ -636,6 +667,7 @@ namespace Hooks
 					if (BlockHandler::GetSingleton()->HandleMasterstrike(attacker, target))
 					{
 						if (Settings::VerboseLogging) logger::info("[hit] handle masterstrike! {}", Who(attacker));
+						AIHandler::GetSingleton()->LogExchange(attacker, target, "parried", 0.f);
 					}
 				}
 			}
@@ -928,7 +960,7 @@ namespace Hooks
 			{
 				// return false;
 			}
-		}	
+		}
 		*/
 
 		if (DifficultySettings::AttacksCostStamina)
@@ -957,20 +989,6 @@ namespace Hooks
 	}
 
 
-	bool HookHasAttackAngle::GetAttackAngle(RE::Actor* a_attacker, RE::Actor* a_target, const RE::NiPoint3& a3, const RE::NiPoint3& a4, RE::BGSAttackData* a_attackData, float a6, void* a7, bool a8)
-	{
-		bool ret = _GetAttackAngle(a_attacker, a_target, a3, a4, a_attackData, a6, a7, a8);
-
-		// parse in range events here
-		if (ret && a_attacker && a_target)
-		{
-
-
-		}
-
-		return ret;
-	}
-
 	bool HookAttackHandler::CanPlayerAttack()
 	{
 		return AttackHandler::GetSingleton()->CanInitiateAttack(RE::PlayerCharacter::GetSingleton());
@@ -985,7 +1003,7 @@ namespace Hooks
 			auto* Attacks = AttackHandler::GetSingleton();
 			// CanInitiateAttack's checks, in its order.
 			const char* Reason = !Attacks->CanAttack(Player) ? "lockout" :
-				Attacks->InFeintWindow(Player) ? "feint window" : "stamina";
+				Attacks->FeintPending(Player) ? "feint pending" : "stamina";
 			logger::info("[press] refused ({}): stamina {:.0f}, a light swing needs {:.0f}", Reason,
 				Player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina),
 				Attacks->SwingStaminaCost(Player, false));
@@ -1026,16 +1044,20 @@ namespace Hooks
 				Directions Pending;
 				// The gate's three parts, so a refusal says which one refused.
 				auto* Attacks = AttackHandler::GetSingleton();
-				logger::info("[press] attack: state={} graph IsAttacking={} IsBashing={} queued={} buffered={} canAttack={} (lockedOut={} feintWindow={} stamina {:.0f}, light swing {:.0f})",
+				logger::info("[press] attack: state={} graph IsAttacking={} IsBashing={} queued={} buffered={} canAttack={} (lockedOut={} feintPending={} stamina {:.0f}, light swing {:.0f})",
 					(int)Player->AsActorState()->GetAttackState(),
 					HasAttacking ? (GraphAttacking ? "true" : "false") : "n/a",
 					HasBashing ? (GraphBashing ? "true" : "false") : "n/a",
 					DirectionHandler::GetSingleton()->HasQueuedDirection(Player, Pending),
 					InputEventHandler::GetSingleton()->HasBufferedAttack(),
-					CanPlayerAttack(), !Attacks->CanAttack(Player), Attacks->InFeintWindow(Player),
+					CanPlayerAttack(), !Attacks->CanAttack(Player), Attacks->FeintPending(Player),
 					Player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina), Attacks->SwingStaminaCost(Player, false));
 			}
 			auto* Input = InputEventHandler::GetSingleton();
+			if (Input->BufferBackDodgePoke())
+			{
+				return false;
+			}
 			if (Input->ShouldHoldPress())
 			{
 				Input->BufferAttack(false);
@@ -1185,8 +1207,8 @@ namespace Hooks
 				AIHandler::GetSingleton()->DidAttackExternalCalled(actor);
 			}
 
-			// make sure we cant feint past this window
-			AttackHandler::GetSingleton()->RemoveFeintWindow(actor);
+			// A feint still queued for this swing is too late now.
+			AttackHandler::GetSingleton()->EndSwingClock(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 			if (DifficultySettings::AttacksCostStamina)
 			{
@@ -1208,7 +1230,6 @@ namespace Hooks
 		else if (str == "TryChamberBegin"_h)
 		{
 			AttackHandler::GetSingleton()->AddChamberWindow(actor);
-			AttackHandler::GetSingleton()->AddFeintWindow(actor);
 			DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
 
 		}
@@ -1219,7 +1240,7 @@ namespace Hooks
 			// so we need to make sure it doesn't leak (unlikely as there would be a cell transition between an attack, but definitely possible)
 			DirectionHandler::GetSingleton()->StartedAttackWindow(actor);
 			// prevent feints from happening past this window
-			AttackHandler::GetSingleton()->RemoveFeintWindow(actor);
+			AttackHandler::GetSingleton()->EndSwingClock(actor);
 
 		}
 		else if (str == "MCO_WinClose"_h)
@@ -1302,6 +1323,8 @@ namespace Hooks
 		DirectionHandler::GetSingleton()->ClearAnimationQueue(actor);
 		// A chained swing has no TryChamberBegin to close the window it started in.
 		DirectionHandler::GetSingleton()->EndedAttackWindow(actor);
+		// The feint point is measured from here, chained swings included.
+		AttackHandler::GetSingleton()->StartSwingClock(actor);
 
 		// Cash in the guard charge: time spent set on one line becomes
 		// attack speed.
@@ -1339,17 +1362,19 @@ namespace Hooks
 					ChainPenalty = std::max(ChainPenalty,
 						DifficultySettings::ChainPokeSpeedPenalty * ChainPokePenaltyBySet[static_cast<int>(Set)]);
 				}
-				// Once per player swing, unlike the NPCs watching it. Row 4 is the
-				// opener, so an Unblockable last line mustn't reach it.
-				if (actor->IsPlayerRef() && static_cast<int>(PrevDir) < 4)
+				// Swords cut side to side, polearms lever up and down.
+				const FollowUpAxis Axis = DirectionHandler::GetSingleton()->GetFollowUpAxis(actor);
+				if (!PowerSwing && static_cast<int>(PrevDir) < 4 && Axis != FollowUpAxis::None &&
+					DirectionHandler::AxisHalf(PrevDir, Axis) != DirectionHandler::AxisHalf(CurDir, Axis))
 				{
-					AIHandler::GetSingleton()->RecordPlayerChainTransition(Set, static_cast<int>(PrevDir), CurDir);
+					ChainPenalty -= FollowUpSpeedBonus;
 				}
 			}
-			else if (actor->IsPlayerRef())
+			// Once per player swing, unlike the NPCs watching it. The profile keys the row
+			// itself (last swing line inside ComboResetTimer), not the combo ring above.
+			if (actor->IsPlayerRef())
 			{
-				AIHandler::GetSingleton()->RecordPlayerChainTransition(Set, AIHandler::OpenerRow,
-					DirectionHandler::GetSingleton()->GetCurrentDirection(actor));
+				AIHandler::GetSingleton()->RecordPlayerSwingLine(Set, DirectionHandler::GetSingleton()->GetCurrentDirection(actor));
 			}
 			RE::Actor* SwingTarget = DirectionHandler::GetSingleton()->GetSwingTarget(actor);
 			const int ComboStep = Chained ? DirectionHandler::GetSingleton()->GetComboStep(actor) : 0;
@@ -1387,7 +1412,7 @@ namespace Hooks
 			{
 				if (!DidPowerAttack)
 				{
-					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor, true);
 				}
 				else
 				{
@@ -1398,7 +1423,7 @@ namespace Hooks
 			{
 				if (DidPowerAttack)
 				{
-					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor);
+					AttackHandler::GetSingleton()->GiveSmallAttackSpeedBuff(actor, false);
 				}
 				else
 				{
@@ -1450,10 +1475,62 @@ namespace Hooks
 		_SimulateStatePhysics(a_this, a_controller);
 	}
 
+#ifdef GetObject
+#undef GetObject  // windows.h renames it to GetObjectA
+#endif
+	float HookSpellScore::CalculateScore(RE::CombatInventoryItemMagic* a_this, RE::CombatController* a_controller)
+	{
+		if (a_controller)
+		{
+			RE::Actor* Attacker = a_controller->attackerHandle.get().get();
+			if (Attacker && DirectionHandler::GetSingleton()->HasDirectionalPerks(Attacker))
+			{
+				// The combat inventory clones an either-hand spell into one item per hand
+				// before anything is scored, so this item's slot is the hand it would take.
+				// Only the left hand may hold a spell beside the weapon.
+				static const RE::BGSEquipSlot* LeftHand = RE::BGSDefaultObjectManager::GetSingleton()->GetObject<RE::BGSEquipSlot>(
+					RE::BGSDefaultObjectManager::DefaultObject::kLeftHandEquip);
+				// And only beside a one-handed weapon: a two-hander has no free hand, so any
+				// spell it scores displaces the weapon (Chiefs cycled weapon <-> spell every 5-10 s).
+				const auto* Right = Attacker->GetEquippedObject(false);
+				const auto* Weapon = Right ? Right->As<RE::TESObjectWEAP>() : nullptr;
+				const bool OneHanded = Weapon && (Weapon->IsOneHandedSword() || Weapon->IsOneHandedDagger() ||
+					Weapon->IsOneHandedAxe() || Weapon->IsOneHandedMace());
+				RE::Actor* Target = GetCombatTarget(Attacker);
+				const bool InMelee = Target && Attacker->GetPosition().GetSquaredDistance(Target->GetPosition()) <
+					SpellMeleeGateDistance * SpellMeleeGateDistance;
+				const bool Refused = InMelee && (!LeftHand || a_this->itemSlot.equipSlot != LeftHand || !OneHanded);
+				const float Score = Refused ? 0.f : _CalculateScore(a_this, a_controller);
+				// Scored many times a second; once per actor and side of the gate shows the hook runs
+				// (the spells are mostly our own abilities).
+				static std::unordered_set<std::uint64_t> Logged;
+				static std::mutex LoggedMtx;
+				bool First = false;
+				const RE::MagicItem* Magic = a_this->GetMagic();
+				if (Settings::VerboseLogging)
+				{
+					const std::uint64_t Key = (static_cast<std::uint64_t>(Attacker->GetFormID()) << 1) | (InMelee ? 1u : 0u);
+					std::lock_guard Lock(LoggedMtx);
+					First = Logged.insert(Key).second;
+				}
+				if (First)
+				{
+					logger::info("[spellscore] {} {} {} ({} hand, right hand holds {}, {}){}", Who(Attacker), Refused ? "refused" : "scores",
+						Magic ? Magic->GetName() : "?", a_this->itemSlot.equipSlot == LeftHand ? "left" : "right",
+						Weapon ? Weapon->GetName() : "nothing", InMelee ? "in melee" : "out of melee",
+						Refused ? std::string() : std::format(" = {:.2f}", Score));
+				}
+				return Score;
+			}
+		}
+		return _CalculateScore(a_this, a_controller);
+	}
+
 	void Hooks::Install()
 	{
 		logger::info("Installing hooks...");
 		HookOnMeleeHit::Install();
+		HookSpellScore::Install();
 		HookProjectileHit::Install();
 		HookBeginMeleeHit::Install();
 		HookUpdate::Install();
@@ -1461,7 +1538,6 @@ namespace Hooks
 		HookPlayerCharacter::Install();
 		HookMouseMovement::Install();
 		HookOnAttackAction::Install();
-		HookHasAttackAngle::Install();
 		HookAttackHandler::Install();
 		HookAnimEvent::Install();
 		HookNotifyAnimationGraph::Install();
